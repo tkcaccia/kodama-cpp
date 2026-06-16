@@ -20,7 +20,7 @@ The full KODAMA algorithm is intentionally not implemented yet.
 - CPU and CUDA entry points are exposed.
 - CUDA builds require FAISS GPU, cuVS headers, CUDA headers, cuBLAS, and cudart.
 - `KNNCV_CUDA` is implemented with FAISS GPU IVF-Flat.
-- `PLSDACV_CUDA` and `PLSLDACV_CUDA` are public reserved entry points and fail explicitly until the CUDA SIMPLS backend is added. They never silently run CPU code and report it as CUDA.
+- `PLSDACV_CUDA` and `PLSLDACV_CUDA` are implemented with a CUDA/cuBLAS PLS core for the large dense products.
 - PLS-DA and PLS-LDA are separate functions.
 - `constrain` controls CV splitting: samples with the same constraint value are kept in the same fold.
 
@@ -69,9 +69,9 @@ auto cuda_result = kodama::PLSDACV_CUDA(x, labels, constrain, options);
 ```
 
 PLS-DA uses SIMPLS-style latent components followed by argmax/nearest-centroid
-classification in the latent space. The CPU implementation is active. The CUDA
-entry point exists for wrapper stability, but currently throws a clear
-not-implemented error rather than falling back to CPU.
+classification in the latent space. The CUDA backend uses cuBLAS for `X'Y` and
+latent projection (`XW`) while keeping the same current component and classifier
+semantics as the CPU path.
 
 ### PLSLDACV
 
@@ -82,9 +82,8 @@ auto cuda_result = kodama::PLSLDACV_CUDA(x, labels, constrain, options);
 ```
 
 PLS-LDA uses the same latent components followed by covariance-weighted LDA-style
-classification in the latent space. The CPU implementation is active. The CUDA
-entry point exists for wrapper stability, but currently throws a clear
-not-implemented error rather than falling back to CPU.
+classification in the latent space. The CUDA backend uses the same cuBLAS PLS
+core as `PLSDACV_CUDA`.
 
 Default PLS options:
 
@@ -177,9 +176,7 @@ For `KNNCV`, compare CPU FAISS IVF-Flat and CUDA FAISS/cuVS IVF-Flat with
 cosine / inner-product and `k = 10`.
 
 For `PLSDACV` and `PLSLDACV`, compare CPU and CUDA versions across component
-counts and report selected components once the CUDA SIMPLS backend is
-implemented. In the current revision, CPU PLS-DA and CPU PLS-LDA are the active
-implementations.
+counts and report selected components.
 
 ## Acknowledgements
 
