@@ -116,6 +116,11 @@ install(EXPORT kodama-cppTargets
 if(KODAMA_BUILD_EXAMPLES)
   add_executable(kodama_cv_example examples/run_cv.cpp)
   target_link_libraries(kodama_cv_example PRIVATE kodama_cpp)
+  add_executable(kodama_mnist70_sanity benchmarks/run_mnist70_sanity.cpp)
+  target_link_libraries(kodama_mnist70_sanity PRIVATE kodama_cpp)
+  if(KODAMA_ENABLE_CUDA)
+    target_compile_definitions(kodama_mnist70_sanity PRIVATE KODAMA_ENABLE_CUDA=1)
+  endif()
 endif()
 
 if(KODAMA_BUILD_TESTS)
