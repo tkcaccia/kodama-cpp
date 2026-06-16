@@ -124,7 +124,7 @@ void write_csv(const std::string& path, const std::vector<BenchRow>& rows) {
 int main(int argc, char** argv) {
   if (argc < 5) {
     std::cerr << "Usage: " << argv[0]
-              << " <x_double_rowmajor.bin> <labels_int32.bin> <output.csv> <n_threads>\n";
+              << " <x_double_rowmajor.bin> <labels_int32.bin> <output.csv> <n_threads> [ivf_nlist] [ivf_nprobe] [pls_max_components]\n";
     return 2;
   }
 
@@ -132,6 +132,9 @@ int main(int argc, char** argv) {
   const std::string y_path = argv[2];
   const std::string out_path = argv[3];
   const int n_threads = std::stoi(argv[4]);
+  const int ivf_nlist = argc > 5 ? std::stoi(argv[5]) : 0;
+  const int ivf_nprobe = argc > 6 ? std::stoi(argv[6]) : 0;
+  const int pls_max_components = argc > 7 ? std::stoi(argv[7]) : 5;
   constexpr std::size_t n = 70000;
   constexpr std::size_t p = 784;
 
@@ -146,15 +149,15 @@ int main(int argc, char** argv) {
   knn.cv.stratified = true;
   knn.k = 10;
   knn.metric = kodama::DistanceMetric::Cosine;
-  knn.ivf_nlist = 4096;
-  knn.ivf_nprobe = 128;
+  knn.ivf_nlist = ivf_nlist;
+  knn.ivf_nprobe = ivf_nprobe;
   knn.n_threads = n_threads;
 
   kodama::PLSOptions pls;
   pls.cv.folds = 5;
   pls.cv.seed = 7;
   pls.cv.stratified = true;
-  pls.max_components = 5;
+  pls.max_components = pls_max_components;
   pls.center = true;
   pls.scale = true;
   pls.n_threads = n_threads;
