@@ -75,6 +75,17 @@ int main() {
   require(kres.global_accuracy > 0.95, "KNNCV accuracy unexpectedly low.");
   require(kres.confusion.n_labels == 3, "KNNCV confusion matrix label count mismatch.");
 
+#if defined(KODAMA_ENABLE_CUDA)
+  kodama::KNNOptions cuda_knn = knn;
+  cuda_knn.backend = kodama::Backend::CUDA;
+  cuda_knn.ivf_nlist = 8;
+  cuda_knn.ivf_nprobe = 4;
+  kodama::KNNCVResult cuda_kres = kodama::KNNCV_CUDA(view, d.y, d.constrain, cuda_knn);
+  require(cuda_kres.parameters.backend == kodama::Backend::CUDA, "CUDA KNNCV did not report CUDA backend.");
+  require(cuda_kres.predicted_labels.size() == d.y.size(), "CUDA KNNCV prediction size mismatch.");
+  require(cuda_kres.global_accuracy > 0.95, "CUDA KNNCV accuracy unexpectedly low.");
+#endif
+
   kodama::PLSOptions pls;
   pls.cv.folds = 5;
   pls.cv.seed = 1;
