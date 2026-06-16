@@ -1,55 +1,48 @@
 # kodama-cpp
 
-`kodama-cpp` is a standalone C++ library for high-performance KODAMA-related
-algorithms. The first implementation phase intentionally focuses only on two
-cross-validation kernels:
+`kodama-cpp` is a standalone C++ library for high-performance
+KODAMA-related cross-validation kernels. It is independent from R and Python,
+but the API is designed so wrappers can be added later.
+
+The first implementation phase focuses only on:
 
 - `KNNCV`
-- `PLSCV`
+- `PLSDACV`
+- `PLSLDACV`
 
-The full KODAMA algorithm is not implemented in this repository yet. The goal is
-to keep the core library independent from R and Python while making later
-wrappers straightforward.
+The full KODAMA algorithm is intentionally not implemented yet.
 
-## Current Status
+## Current Contract
 
-This repository is an initial C++ core. It provides:
+- FAISS is mandatory.
+- `KNNCV` uses FAISS IVF-Flat, not a hand-written exact fallback.
+- Cosine similarity is implemented by L2-normalizing rows and using inner product.
+- CPU and CUDA entry points are exposed.
+- CUDA builds require FAISS GPU and cuVS headers.
+- PLS-DA and PLS-LDA are separate functions.
+- `constrain` controls CV splitting: samples with the same constraint value are kept in the same fold.
 
-- constrained cross-validation folds through a `constrain` vector;
-- CPU `KNNCV` using exact cosine / inner-product KNN;
-- backend metadata for future FAISS/cuVS acceleration;
-- CPU `PLSCV` using a SIMPLS-style PLS2 component extraction strategy;
-- PLS-DA and PLS-LDA classification modes;
-- fold-level accuracy, global accuracy, confusion matrix, runtime, and memory reporting;
-- a clean CMake build with tests and an example.
+## Functions
 
-The CUDA FAISS/cuVS path is exposed in the design but is not linked by default.
-The next backend phase will implement FAISS GPU IVF-Flat / cuVS search behind
-the same `KNNCV` API.
-
-## Design
-
-Inputs use a simple row-major `MatrixView`:
+### KNNCV
 
 ```cpp
-kodama::MatrixView x{data.data(), n_samples, n_features};
+auto result = kodama::KNNCV(x, labels, constrain, options);
+auto cpu_result = kodama::KNNCV_CPU(x, labels, constrain, options);
+auto cuda_result = kodama::KNNCV_CUDA(x, labels, constrain, options);
 ```
 
-Labels are integer class labels. `constrain` is optional; when provided, samples
-with the same constraint value are kept in the same CV fold. This mirrors the
-fold-control behavior used by KODAMA's `PLSDACV_simpls` workflow.
+CPU:
 
-## KNNCV
+- FAISS `IndexIVFFlat`
+- inner product / cosine
 
-`KNNCV` performs:
+CUDA:
 
-1. constrained / optionally stratified fold construction;
-2. training/validation split per fold;
-3. KNN classification of validation samples from the training samples;
-4. majority vote among `k` neighbours;
-5. fold-level and global accuracy reporting.
+- FAISS GPU IVF-Flat
+- cuVS is required by the CUDA build gate for future native cuVS kernels
 
-Default settings:
+Default options:
 
 ```cpp
 kodama::KNNOptions opt;
@@ -58,27 +51,35 @@ opt.cv.stratified = true;
 opt.cv.seed = 1;
 opt.k = 10;
 opt.metric = kodama::DistanceMetric::Cosine;
-opt.backend = kodama::Backend::Auto;
+opt.backend = kodama::Backend::CPU;
+opt.index_type = kodama::KNNIndexType::FaissIVFFlat;
+opt.ivf_nlist = 0;   // automatic
+opt.ivf_nprobe = 0;  // automatic
 ```
 
-Requested future acceleration:
+### PLSDACV
 
-- CPU: exact KNN and optional FAISS CPU fallback.
-- CUDA: FAISS GPU IVF-Flat / cuVS nearest-neighbour search.
+```cpp
+auto result = kodama::PLSDACV(x, labels, constrain, options);
+auto cpu_result = kodama::PLSDACV_CPU(x, labels, constrain, options);
+auto cuda_result = kodama::PLSDACV_CUDA(x, labels, constrain, options);
+```
 
-## PLSCV
+PLS-DA uses SIMPLS-style latent components followed by argmax/nearest-centroid
+classification in the latent space.
 
-`PLSCV` performs:
+### PLSLDACV
 
-1. constrained / optionally stratified fold construction;
-2. training-set centering/scaling;
-3. SIMPLS-style latent component extraction;
-4. validation projection into the PLS latent space;
-5. PLS-DA or PLS-LDA classification;
-6. accuracy evaluation for `1:max_components`;
-7. component selection by cross-validated accuracy.
+```cpp
+auto result = kodama::PLSLDACV(x, labels, constrain, options);
+auto cpu_result = kodama::PLSLDACV_CPU(x, labels, constrain, options);
+auto cuda_result = kodama::PLSLDACV_CUDA(x, labels, constrain, options);
+```
 
-Default settings:
+PLS-LDA uses the same latent components followed by covariance-weighted LDA-style
+classification in the latent space.
+
+Default PLS options:
 
 ```cpp
 kodama::PLSOptions opt;
@@ -86,12 +87,14 @@ opt.cv.folds = 10;
 opt.cv.stratified = true;
 opt.cv.seed = 1;
 opt.max_components = 10;
-opt.mode = kodama::PLSMode::PLS_DA;
 opt.center = true;
 opt.scale = true;
+opt.backend = kodama::Backend::CPU;
 ```
 
 ## Build
+
+FAISS must be installed and discoverable.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -105,23 +108,38 @@ Run the example:
 ./build/kodama_cv_example
 ```
 
-## Optional Backends
-
-The CMake options are present for backend-specific builds:
+CUDA build:
 
 ```bash
-cmake -S . -B build-faiss -DKODAMA_ENABLE_FAISS=ON
-cmake -S . -B build-cuvs  -DKODAMA_ENABLE_CUVS=ON
+cmake -S . -B build-cuda -DCMAKE_BUILD_TYPE=Release -DKODAMA_ENABLE_CUDA=ON
+cmake --build build-cuda -j
 ```
 
-The first release keeps the CPU implementation as the portable reference. FAISS
-and cuVS will be added as implementation files behind the existing API so R and
-Python wrappers do not need to change.
+`KODAMA_ENABLE_CUDA=ON` requires:
+
+- FAISS
+- FAISS GPU library
+- cuVS headers
+- CUDA toolchain
+
+## Outputs
+
+The result structs include:
+
+- predicted labels
+- true labels
+- fold assignments
+- accuracy per fold
+- global accuracy
+- confusion matrix
+- runtime
+- peak memory where measurable
+- backend used
+- FAISS/cuVS parameters used
 
 ## Benchmark Plan
 
-The speed and classification performance of `KNNCV` and `PLSCV` should be
-tested on the datasets already prepared for the fastEmbedR benchmarks:
+The first benchmark target is the curated fastEmbedR data collection:
 
 - COIL20
 - USPS
@@ -133,15 +151,11 @@ tested on the datasets already prepared for the fastEmbedR benchmarks:
 - MetRef
 - mass41
 
-Metrics to report:
+For `KNNCV`, compare CPU FAISS IVF-Flat and CUDA FAISS/cuVS IVF-Flat with
+cosine / inner-product and `k = 10`.
 
-- global CV accuracy;
-- fold-level accuracy;
-- confusion matrix;
-- runtime;
-- peak memory;
-- backend used;
-- FAISS/cuVS parameters, when enabled.
+For `PLSDACV` and `PLSLDACV`, compare CPU and CUDA versions across component
+counts and report selected components.
 
 ## Acknowledgements
 
@@ -149,8 +163,8 @@ This library is inspired by:
 
 - KODAMA, especially the constrained CV logic around `PLSDACV_simpls`;
 - fastPLS, especially the SIMPLS / fast PLS implementation strategy;
-- FAISS and cuVS for the planned GPU/ANN backend design.
+- FAISS and cuVS for high-performance nearest-neighbour search.
 
-The C++ code in this repository is a standalone implementation and does not use
-Rcpp, R, or Armadillo APIs.
+The code here is implemented as a standalone C++ library and does not depend on
+Rcpp, R, Armadillo, or Python.
 

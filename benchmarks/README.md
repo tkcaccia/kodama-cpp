@@ -1,6 +1,6 @@
 # Benchmark Notes
 
-The first benchmark target is to compare `KNNCV` and `PLSCV` on the datasets
+The first benchmark target is to compare `KNNCV`, `PLSDACV`, and `PLSLDACV` on the datasets
 used by fastEmbedR Benchmark #2 and #3.
 
 Suggested local dataset layout:
@@ -19,7 +19,7 @@ For each dataset, report:
 dataset
 n samples
 p features
-method: KNNCV or PLSCV
+method: KNNCV, PLSDACV, or PLSLDACV
 backend requested
 backend used
 folds
@@ -28,9 +28,8 @@ constraint policy
 k for KNNCV
 metric for KNNCV
 index type for KNNCV
-max components for PLSCV
-selected components for PLSCV
-classification mode for PLSCV
+max components for PLSDACV / PLSLDACV
+selected components for PLSDACV / PLSLDACV
 global accuracy
 fold accuracy
 confusion matrix
@@ -40,8 +39,6 @@ peak memory
 
 The planned GPU benchmark should compare:
 
-- CPU exact KNN
-- FAISS CPU Flat / IVF-Flat, when available
+- FAISS CPU IVF-Flat
 - FAISS GPU IVF-Flat cosine / inner product
-- cuVS nearest-neighbour search
-
+- cuVS nearest-neighbour search where available in the CUDA build

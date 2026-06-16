@@ -36,9 +36,6 @@ const char* to_string(DistanceMetric metric) {
 
 const char* to_string(KNNIndexType index_type) {
   switch (index_type) {
-    case KNNIndexType::Auto: return "auto";
-    case KNNIndexType::Exact: return "exact";
-    case KNNIndexType::FaissFlat: return "faiss_flat";
     case KNNIndexType::FaissIVFFlat: return "faiss_ivf_flat";
     case KNNIndexType::CuvsIVFFlat: return "cuvs_ivf_flat";
   }
@@ -243,4 +240,3 @@ std::vector<int> sorted_unique_folds(const std::vector<int>& folds) {
 }
 
 }  // namespace kodama::detail
-

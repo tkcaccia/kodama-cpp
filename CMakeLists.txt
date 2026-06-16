@@ -8,8 +8,7 @@ project(kodama-cpp
 
 option(KODAMA_BUILD_TESTS "Build kodama-cpp tests" ON)
 option(KODAMA_BUILD_EXAMPLES "Build kodama-cpp examples" ON)
-option(KODAMA_ENABLE_FAISS "Enable optional FAISS backend when available" OFF)
-option(KODAMA_ENABLE_CUVS "Enable optional cuVS backend when available" OFF)
+option(KODAMA_ENABLE_CUDA "Build CUDA FAISS/cuVS backends" OFF)
 
 add_library(kodama_cpp
   src/common.cpp
@@ -29,21 +28,39 @@ target_include_directories(kodama_cpp
 
 target_compile_features(kodama_cpp PUBLIC cxx_std_17)
 
-if(KODAMA_ENABLE_FAISS)
-  find_path(FAISS_INCLUDE_DIR faiss/IndexFlat.h)
-  find_library(FAISS_LIBRARY faiss)
-  if(FAISS_INCLUDE_DIR AND FAISS_LIBRARY)
-    target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_FAISS=1)
-    target_include_directories(kodama_cpp PRIVATE ${FAISS_INCLUDE_DIR})
-    target_link_libraries(kodama_cpp PRIVATE ${FAISS_LIBRARY})
-  else()
-    message(WARNING "KODAMA_ENABLE_FAISS=ON but FAISS was not found. Building CPU-only fallback.")
-  endif()
+find_path(FAISS_INCLUDE_DIR
+  NAMES faiss/IndexIVFFlat.h
+  HINTS /opt/homebrew/include /usr/local/include $ENV{CONDA_PREFIX}/include
+)
+find_library(FAISS_LIBRARY
+  NAMES faiss
+  HINTS /opt/homebrew/lib /usr/local/lib $ENV{CONDA_PREFIX}/lib
+)
+if(NOT FAISS_INCLUDE_DIR OR NOT FAISS_LIBRARY)
+  message(FATAL_ERROR "FAISS is mandatory for kodama-cpp. Install FAISS or set FAISS_INCLUDE_DIR and FAISS_LIBRARY.")
 endif()
+target_include_directories(kodama_cpp PRIVATE ${FAISS_INCLUDE_DIR})
+target_link_libraries(kodama_cpp PRIVATE ${FAISS_LIBRARY})
+target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_FAISS=1)
 
-if(KODAMA_ENABLE_CUVS)
-  target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUVS=1)
-  message(STATUS "cuVS backend requested. First phase exposes the build flag; native kernels are implemented in a later CUDA pass.")
+if(KODAMA_ENABLE_CUDA)
+  find_library(FAISS_GPU_LIBRARY
+    NAMES faiss_gpu
+    HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
+  )
+  find_path(CUVS_INCLUDE_DIR
+    NAMES cuvs/neighbors/ivf_flat.hpp cuvs/neighbors/cagra.hpp
+    HINTS /usr/local/include $ENV{CONDA_PREFIX}/include
+  )
+  if(NOT FAISS_GPU_LIBRARY)
+    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires FAISS GPU library (libfaiss_gpu).")
+  endif()
+  if(NOT CUVS_INCLUDE_DIR)
+    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires cuVS headers.")
+  endif()
+  target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1 KODAMA_ENABLE_CUVS=1)
+  target_include_directories(kodama_cpp PRIVATE ${CUVS_INCLUDE_DIR})
+  target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY})
 endif()
 
 include(GNUInstallDirs)
@@ -70,4 +87,3 @@ if(KODAMA_BUILD_TESTS)
   target_link_libraries(kodama_cpp_tests PRIVATE kodama_cpp)
   add_test(NAME kodama_cpp_tests COMMAND kodama_cpp_tests)
 endif()
-

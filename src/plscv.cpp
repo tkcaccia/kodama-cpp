@@ -403,17 +403,17 @@ std::vector<int> predict_pls_lda(
 
 }  // namespace
 
-PLSCVResult PLSCV(
+namespace {
+
+PLSCVResult run_plscv_cpu(
   MatrixView x,
   const std::vector<int>& labels,
   const std::vector<int>& constrain,
-  const PLSOptions& options
+  const PLSOptions& options,
+  PLSMode mode
 ) {
   detail::validate_inputs(x, labels, constrain);
   if (options.max_components < 1) throw std::invalid_argument("PLSOptions::max_components must be positive.");
-  if (options.backend == Backend::CUDA) {
-    throw std::runtime_error("CUDA PLSCV is not implemented in the first kodama-cpp phase.");
-  }
 
   detail::Timer timer;
   PLSCVResult result;
@@ -444,7 +444,7 @@ PLSCVResult PLSCV(
     for (int a = 1; a <= fit.weights.cols; ++a) {
       Dense t_train = first_columns(fit.train_scores, a);
       Dense t_val = transform_pls_scores(x_val, fit, a);
-      std::vector<int> fold_pred = options.mode == PLSMode::PLS_LDA ?
+      std::vector<int> fold_pred = mode == PLSMode::PLS_LDA ?
         predict_pls_lda(t_train, y_train_labels, t_val, classes) :
         predict_pls_da(t_train, y_train_labels, t_val, classes);
       for (std::size_t i = 0; i < validation.size(); ++i) {
@@ -481,7 +481,7 @@ PLSCVResult PLSCV(
   result.runtime_seconds = timer.seconds();
   result.peak_memory_mb = detail::peak_memory_mb();
   result.parameters.backend = Backend::CPU;
-  result.parameters.mode = options.mode;
+  result.parameters.mode = mode;
   result.parameters.max_components = options.max_components;
   result.parameters.selected_components = best_comp;
   result.parameters.center = options.center;
@@ -489,6 +489,42 @@ PLSCVResult PLSCV(
   result.parameters.gpu_device = options.gpu_device;
   result.parameters.n_threads = options.n_threads;
   return result;
+}
+
+}  // namespace
+
+PLSCVResult PLSDACV(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+  if (options.backend == Backend::CUDA) return PLSDACV_CUDA(x, labels, constrain, options);
+  return PLSDACV_CPU(x, labels, constrain, options);
+}
+
+PLSCVResult PLSLDACV(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+  if (options.backend == Backend::CUDA) return PLSLDACV_CUDA(x, labels, constrain, options);
+  return PLSLDACV_CPU(x, labels, constrain, options);
+}
+
+PLSCVResult PLSDACV_CPU(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+  return run_plscv_cpu(x, labels, constrain, options, PLSMode::PLS_DA);
+}
+
+PLSCVResult PLSLDACV_CPU(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+  return run_plscv_cpu(x, labels, constrain, options, PLSMode::PLS_LDA);
+}
+
+PLSCVResult PLSDACV_CUDA(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+  (void)x;
+  (void)labels;
+  (void)constrain;
+  (void)options;
+  throw std::runtime_error("PLSDACV_CUDA requires the CUDA PLS backend implementation. The public CUDA entry point is reserved and fails explicitly in this revision.");
+}
+
+PLSCVResult PLSLDACV_CUDA(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+  (void)x;
+  (void)labels;
+  (void)constrain;
+  (void)options;
+  throw std::runtime_error("PLSLDACV_CUDA requires the CUDA PLS backend implementation. The public CUDA entry point is reserved and fails explicitly in this revision.");
 }
 
 }  // namespace kodama

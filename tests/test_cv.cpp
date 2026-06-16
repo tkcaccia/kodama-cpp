@@ -79,16 +79,14 @@ int main() {
   pls.cv.folds = 5;
   pls.cv.seed = 1;
   pls.max_components = 4;
-  pls.mode = kodama::PLSMode::PLS_DA;
-  kodama::PLSCVResult pres = kodama::PLSCV(view, d.y, d.constrain, pls);
+  kodama::PLSCVResult pres = kodama::PLSDACV(view, d.y, d.constrain, pls);
   require(pres.predicted_labels.size() == d.y.size(), "PLSCV prediction size mismatch.");
   require(pres.accuracy_by_components.size() == 4, "PLSCV component accuracy size mismatch.");
   require(pres.selected_components >= 1, "PLSCV selected too few components.");
   require(pres.selected_components <= 4, "PLSCV selected too many components.");
   require(pres.global_accuracy > 0.90, "PLS-DA accuracy unexpectedly low.");
 
-  pls.mode = kodama::PLSMode::PLS_LDA;
-  kodama::PLSCVResult lres = kodama::PLSCV(view, d.y, d.constrain, pls);
+  kodama::PLSCVResult lres = kodama::PLSLDACV(view, d.y, d.constrain, pls);
   require(lres.global_accuracy > 0.90, "PLS-LDA accuracy unexpectedly low.");
 
   std::cout << "All kodama-cpp CV tests passed.\n";

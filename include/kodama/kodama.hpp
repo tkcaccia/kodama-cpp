@@ -19,9 +19,6 @@ enum class DistanceMetric {
 };
 
 enum class KNNIndexType {
-  Auto,
-  Exact,
-  FaissFlat,
   FaissIVFFlat,
   CuvsIVFFlat
 };
@@ -51,8 +48,8 @@ struct KNNOptions {
   FoldOptions cv;
   int k = 10;
   DistanceMetric metric = DistanceMetric::Cosine;
-  Backend backend = Backend::Auto;
-  KNNIndexType index_type = KNNIndexType::Auto;
+  Backend backend = Backend::CPU;
+  KNNIndexType index_type = KNNIndexType::FaissIVFFlat;
   int ivf_nlist = 0;
   int ivf_nprobe = 0;
   int gpu_device = 0;
@@ -62,7 +59,6 @@ struct KNNOptions {
 struct PLSOptions {
   FoldOptions cv;
   int max_components = 10;
-  PLSMode mode = PLSMode::PLS_DA;
   bool center = true;
   bool scale = true;
   Backend backend = Backend::CPU;
@@ -89,7 +85,7 @@ struct ConfusionMatrix {
 
 struct KNNParametersUsed {
   Backend backend = Backend::CPU;
-  KNNIndexType index_type = KNNIndexType::Exact;
+  KNNIndexType index_type = KNNIndexType::FaissIVFFlat;
   DistanceMetric metric = DistanceMetric::Cosine;
   int k = 10;
   int ivf_nlist = 0;
@@ -142,7 +138,56 @@ KNNCVResult KNNCV(
   const KNNOptions& options = KNNOptions()
 );
 
-PLSCVResult PLSCV(
+KNNCVResult KNNCV_CPU(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const KNNOptions& options = KNNOptions()
+);
+
+KNNCVResult KNNCV_CUDA(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const KNNOptions& options = KNNOptions()
+);
+
+PLSCVResult PLSDACV(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const PLSOptions& options = PLSOptions()
+);
+
+PLSCVResult PLSLDACV(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const PLSOptions& options = PLSOptions()
+);
+
+PLSCVResult PLSDACV_CPU(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const PLSOptions& options = PLSOptions()
+);
+
+PLSCVResult PLSLDACV_CPU(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const PLSOptions& options = PLSOptions()
+);
+
+PLSCVResult PLSDACV_CUDA(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const PLSOptions& options = PLSOptions()
+);
+
+PLSCVResult PLSLDACV_CUDA(
   MatrixView x,
   const std::vector<int>& labels,
   const std::vector<int>& constrain,
@@ -155,4 +200,3 @@ const char* to_string(KNNIndexType index_type);
 const char* to_string(PLSMode mode);
 
 }  // namespace kodama
-
