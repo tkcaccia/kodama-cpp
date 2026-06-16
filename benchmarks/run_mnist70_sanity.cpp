@@ -93,6 +93,7 @@ BenchRow run_pls(const std::string& name, const std::string& backend, Fn fn) {
     std::ostringstream os;
     os << "mode=" << kodama::to_string(result.parameters.mode)
        << ";max_components=" << result.parameters.max_components
+       << ";fixed_components=" << result.parameters.fixed_components
        << ";selected_components=" << result.parameters.selected_components;
     row.details = os.str();
   } catch (const std::exception& e) {
@@ -158,6 +159,7 @@ int main(int argc, char** argv) {
   pls.cv.seed = 7;
   pls.cv.stratified = true;
   pls.max_components = pls_max_components;
+  pls.fixed_components = pls_max_components;
   pls.center = true;
   pls.scale = true;
   pls.n_threads = n_threads;

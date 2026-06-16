@@ -319,26 +319,22 @@ struct PLSFit {
   Dense train_scores;
 };
 
-PLSFit fit_pls_components(const Dense& x, const Dense& y, int max_components) {
-  Dense s = crossprod(x, y);
-  Dense gram(s.rows, s.rows);
-  for (int i = 0; i < s.rows; ++i) {
-    for (int j = 0; j < s.rows; ++j) {
-      long double val = 0.0;
-      for (int c = 0; c < s.cols; ++c) val += static_cast<long double>(s(i, c)) * s(j, c);
-      gram(i, j) = static_cast<double>(val);
-    }
-  }
-  const int max_rank = std::min({max_components, s.rows, s.cols, std::max(1, x.rows - 1)});
+PLSFit fit_pls_components_from_crossprod(const Dense& x, const Dense& y, Dense s, int max_components) {
+  const int max_rank = std::min({max_components, x.cols, std::max(1, x.rows - 1)});
   Dense w(x.cols, max_rank);
   Dense pmat(x.cols, max_rank);
   Dense qmat(y.cols, max_rank);
   Dense tmat(x.rows, max_rank);
   for (int a = 0; a < max_rank; ++a) {
-    std::vector<double> wa(static_cast<std::size_t>(x.cols), 0.0);
-    for (int j = 0; j < x.cols; ++j) {
-      wa[static_cast<std::size_t>(j)] = std::sin(static_cast<double>((a + 1) * (j + 1)));
+    Dense gram(s.rows, s.rows);
+    for (int i = 0; i < s.rows; ++i) {
+      for (int j = 0; j < s.rows; ++j) {
+        long double val = 0.0;
+        for (int c = 0; c < s.cols; ++c) val += static_cast<long double>(s(i, c)) * s(j, c);
+        gram(i, j) = static_cast<double>(val);
+      }
     }
+    std::vector<double> wa = dominant_left_singular_vector(s);
     for (int prev = 0; prev < a; ++prev) {
       double proj = 0.0;
       for (int j = 0; j < x.cols; ++j) proj += wa[static_cast<std::size_t>(j)] * w(j, prev);
@@ -378,15 +374,70 @@ PLSFit fit_pls_components(const Dense& x, const Dense& y, int max_components) {
       for (int j = 0; j < x.cols; ++j) val += static_cast<long double>(x(i, j)) * wa[static_cast<std::size_t>(j)];
       t[static_cast<std::size_t>(i)] = static_cast<double>(val);
     }
+    long double tnorm2 = 0.0;
+    for (double tv : t) tnorm2 += static_cast<long double>(tv) * tv;
+    const double inv_tnorm2 = tnorm2 > 1e-20 ? 1.0 / static_cast<double>(tnorm2) : 0.0;
+    std::vector<double> vvec(static_cast<std::size_t>(x.cols), 0.0);
+    if (inv_tnorm2 > 0.0) {
+      for (int j = 0; j < x.cols; ++j) {
+        long double val = 0.0;
+        for (int i = 0; i < x.rows; ++i) val += static_cast<long double>(x(i, j)) * t[static_cast<std::size_t>(i)];
+        vvec[static_cast<std::size_t>(j)] = static_cast<double>(val) * inv_tnorm2;
+      }
+    } else {
+      vvec = wa;
+    }
+    for (int prev = 0; prev < a; ++prev) {
+      double proj = 0.0;
+      for (int j = 0; j < x.cols; ++j) proj += vvec[static_cast<std::size_t>(j)] * pmat(j, prev);
+      for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= proj * pmat(j, prev);
+    }
+    double nv = norm2(vvec);
+    if (nv <= 1e-12) {
+      vvec = wa;
+      for (int prev = 0; prev < a; ++prev) {
+        double proj = 0.0;
+        for (int j = 0; j < x.cols; ++j) proj += vvec[static_cast<std::size_t>(j)] * pmat(j, prev);
+        for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= proj * pmat(j, prev);
+      }
+      nv = norm2(vvec);
+    }
+    if (nv <= 1e-12) {
+      std::fill(vvec.begin(), vvec.end(), 0.0);
+      vvec[static_cast<std::size_t>(a % x.cols)] = 1.0;
+      for (int prev = 0; prev < a; ++prev) {
+        double proj = 0.0;
+        for (int j = 0; j < x.cols; ++j) proj += vvec[static_cast<std::size_t>(j)] * pmat(j, prev);
+        for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= proj * pmat(j, prev);
+      }
+      nv = std::max(norm2(vvec), 1e-12);
+    }
+    for (double& vv : vvec) vv /= nv;
+
     for (int j = 0; j < x.cols; ++j) {
       w(j, a) = wa[static_cast<std::size_t>(j)];
-      pmat(j, a) = 0.0;
+      pmat(j, a) = vvec[static_cast<std::size_t>(j)];
     }
     for (int j = 0; j < y.cols; ++j) qmat(j, a) = right[static_cast<std::size_t>(j)];
     for (int i = 0; i < x.rows; ++i) tmat(i, a) = t[static_cast<std::size_t>(i)];
 
+    std::vector<double> vs(static_cast<std::size_t>(s.cols), 0.0);
+    for (int c = 0; c < s.cols; ++c) {
+      long double val = 0.0;
+      for (int j = 0; j < s.rows; ++j) val += static_cast<long double>(vvec[static_cast<std::size_t>(j)]) * s(j, c);
+      vs[static_cast<std::size_t>(c)] = static_cast<double>(val);
+    }
+    for (int j = 0; j < s.rows; ++j) {
+      for (int c = 0; c < s.cols; ++c) {
+        s(j, c) -= vvec[static_cast<std::size_t>(j)] * vs[static_cast<std::size_t>(c)];
+      }
+    }
   }
   return PLSFit{w, pmat, qmat, tmat};
+}
+
+PLSFit fit_pls_components(const Dense& x, const Dense& y, int max_components) {
+  return fit_pls_components_from_crossprod(x, y, crossprod(x, y), max_components);
 }
 
 Dense transform_pls_scores(const Dense& x, const PLSFit& fit, int ncomp) {
@@ -453,66 +504,8 @@ Dense transform_pls_scores_cuda(const Dense& x, const PLSFit& fit, int ncomp, in
 }
 
 PLSFit fit_pls_components_cuda(const Dense& x, const Dense& y, int max_components, int gpu_device) {
-  Dense s = crossprod_cuda(x, y, gpu_device);
-  Dense gram(s.rows, s.rows);
-  for (int i = 0; i < s.rows; ++i) {
-    for (int j = 0; j < s.rows; ++j) {
-      long double val = 0.0;
-      for (int c = 0; c < s.cols; ++c) val += static_cast<long double>(s(i, c)) * s(j, c);
-      gram(i, j) = static_cast<double>(val);
-    }
-  }
-  const int max_rank = std::min({max_components, s.rows, s.cols, std::max(1, x.rows - 1)});
-  Dense w(x.cols, max_rank);
-  Dense pmat(x.cols, max_rank);
-  Dense qmat(y.cols, max_rank);
-  for (int a = 0; a < max_rank; ++a) {
-    std::vector<double> wa(static_cast<std::size_t>(x.cols), 0.0);
-    for (int j = 0; j < x.cols; ++j) {
-      wa[static_cast<std::size_t>(j)] = std::sin(static_cast<double>((a + 1) * (j + 1)));
-    }
-    for (int prev = 0; prev < a; ++prev) {
-      double proj = 0.0;
-      for (int j = 0; j < x.cols; ++j) proj += wa[static_cast<std::size_t>(j)] * w(j, prev);
-      for (int j = 0; j < x.cols; ++j) wa[static_cast<std::size_t>(j)] -= proj * w(j, prev);
-    }
-    double nwa = norm2(wa);
-    if (nwa <= 1e-12) {
-      std::fill(wa.begin(), wa.end(), 0.0);
-      wa[static_cast<std::size_t>(a % x.cols)] = 1.0;
-    } else {
-      for (double& v : wa) v /= nwa;
-    }
-    for (int iter = 0; iter < 120; ++iter) {
-      std::vector<double> next(static_cast<std::size_t>(x.cols), 0.0);
-      for (int i = 0; i < x.cols; ++i) {
-        long double val = 0.0;
-        for (int j = 0; j < x.cols; ++j) val += static_cast<long double>(gram(i, j)) * wa[static_cast<std::size_t>(j)];
-        next[static_cast<std::size_t>(i)] = static_cast<double>(val);
-      }
-      for (int prev = 0; prev < a; ++prev) {
-        double proj = 0.0;
-        for (int j = 0; j < x.cols; ++j) proj += next[static_cast<std::size_t>(j)] * w(j, prev);
-        for (int j = 0; j < x.cols; ++j) next[static_cast<std::size_t>(j)] -= proj * w(j, prev);
-      }
-      double nn = norm2(next);
-      if (nn <= 1e-12) break;
-      for (double& v : next) v /= nn;
-      wa.swap(next);
-    }
-    std::vector<double> right = t_mat_vec(s, wa);
-    const double sigma = std::max(1e-12, norm2(right));
-    for (double& v : right) v /= sigma;
-
-    for (int j = 0; j < x.cols; ++j) {
-      w(j, a) = wa[static_cast<std::size_t>(j)];
-      pmat(j, a) = 0.0;
-    }
-    for (int j = 0; j < y.cols; ++j) qmat(j, a) = right[static_cast<std::size_t>(j)];
-  }
-
-  PLSFit fit{w, pmat, qmat, Dense()};
-  fit.train_scores = transform_pls_scores_cuda(x, fit, max_rank, gpu_device);
+  PLSFit fit = fit_pls_components_from_crossprod(x, y, crossprod_cuda(x, y, gpu_device), max_components);
+  fit.train_scores = transform_pls_scores_cuda(x, fit, fit.weights.cols, gpu_device);
   return fit;
 }
 #endif
@@ -650,6 +643,8 @@ PLSCVResult run_plscv_cpu(
 ) {
   detail::validate_inputs(x, labels, constrain);
   if (options.max_components < 1) throw std::invalid_argument("PLSOptions::max_components must be positive.");
+  if (options.fixed_components < 0) throw std::invalid_argument("PLSOptions::fixed_components must be non-negative.");
+  if (options.fixed_components > options.max_components) throw std::invalid_argument("PLSOptions::fixed_components cannot exceed max_components.");
 
   detail::Timer timer;
   PLSCVResult result;
@@ -699,6 +694,7 @@ PLSCVResult run_plscv_cpu(
       best_comp = a;
     }
   }
+  if (options.fixed_components > 0) best_comp = options.fixed_components;
 
   result.selected_components = best_comp;
   result.predicted_labels = pred_by_comp[static_cast<std::size_t>(best_comp - 1)];
@@ -720,6 +716,7 @@ PLSCVResult run_plscv_cpu(
   result.parameters.mode = mode;
   result.parameters.max_components = options.max_components;
   result.parameters.selected_components = best_comp;
+  result.parameters.fixed_components = options.fixed_components;
   result.parameters.center = options.center;
   result.parameters.scale = options.scale;
   result.parameters.gpu_device = options.gpu_device;
@@ -737,6 +734,8 @@ PLSCVResult run_plscv_cuda(
 ) {
   detail::validate_inputs(x, labels, constrain);
   if (options.max_components < 1) throw std::invalid_argument("PLSOptions::max_components must be positive.");
+  if (options.fixed_components < 0) throw std::invalid_argument("PLSOptions::fixed_components must be non-negative.");
+  if (options.fixed_components > options.max_components) throw std::invalid_argument("PLSOptions::fixed_components cannot exceed max_components.");
 
   detail::Timer timer;
   check_cuda(cudaSetDevice(options.gpu_device), "cudaSetDevice(run_plscv_cuda)");
@@ -787,6 +786,7 @@ PLSCVResult run_plscv_cuda(
       best_comp = a;
     }
   }
+  if (options.fixed_components > 0) best_comp = options.fixed_components;
 
   result.selected_components = best_comp;
   result.predicted_labels = pred_by_comp[static_cast<std::size_t>(best_comp - 1)];
@@ -808,6 +808,7 @@ PLSCVResult run_plscv_cuda(
   result.parameters.mode = mode;
   result.parameters.max_components = options.max_components;
   result.parameters.selected_components = best_comp;
+  result.parameters.fixed_components = options.fixed_components;
   result.parameters.center = options.center;
   result.parameters.scale = options.scale;
   result.parameters.gpu_device = options.gpu_device;

@@ -59,6 +59,7 @@ struct KNNOptions {
 struct PLSOptions {
   FoldOptions cv;
   int max_components = 10;
+  int fixed_components = 0;
   bool center = true;
   bool scale = true;
   Backend backend = Backend::CPU;
@@ -111,6 +112,7 @@ struct PLSParametersUsed {
   PLSMode mode = PLSMode::PLS_DA;
   int max_components = 10;
   int selected_components = 1;
+  int fixed_components = 0;
   bool center = true;
   bool scale = true;
   int gpu_device = 0;
