@@ -18,7 +18,9 @@ The full KODAMA algorithm is intentionally not implemented yet.
 - `KNNCV` uses FAISS IVF-Flat, not a hand-written exact fallback.
 - Cosine similarity is implemented by L2-normalizing rows and using inner product.
 - CPU and CUDA entry points are exposed.
-- CUDA builds require FAISS GPU and cuVS headers.
+- CUDA builds require FAISS GPU, cuVS headers, CUDA headers, cuBLAS, and cudart.
+- `KNNCV_CUDA` is implemented with FAISS GPU IVF-Flat.
+- `PLSDACV_CUDA` and `PLSLDACV_CUDA` are public reserved entry points and fail explicitly until the CUDA SIMPLS backend is added. They never silently run CPU code and report it as CUDA.
 - PLS-DA and PLS-LDA are separate functions.
 - `constrain` controls CV splitting: samples with the same constraint value are kept in the same fold.
 
@@ -41,6 +43,7 @@ CUDA:
 
 - FAISS GPU IVF-Flat
 - cuVS is required by the CUDA build gate for future native cuVS kernels
+- `ivf_nlist` and `ivf_nprobe` are applied through FAISS IVF search parameters
 
 Default options:
 
@@ -66,7 +69,9 @@ auto cuda_result = kodama::PLSDACV_CUDA(x, labels, constrain, options);
 ```
 
 PLS-DA uses SIMPLS-style latent components followed by argmax/nearest-centroid
-classification in the latent space.
+classification in the latent space. The CPU implementation is active. The CUDA
+entry point exists for wrapper stability, but currently throws a clear
+not-implemented error rather than falling back to CPU.
 
 ### PLSLDACV
 
@@ -77,7 +82,9 @@ auto cuda_result = kodama::PLSLDACV_CUDA(x, labels, constrain, options);
 ```
 
 PLS-LDA uses the same latent components followed by covariance-weighted LDA-style
-classification in the latent space.
+classification in the latent space. The CPU implementation is active. The CUDA
+entry point exists for wrapper stability, but currently throws a clear
+not-implemented error rather than falling back to CPU.
 
 Default PLS options:
 
@@ -113,6 +120,21 @@ CUDA build:
 ```bash
 cmake -S . -B build-cuda -DCMAKE_BUILD_TYPE=Release -DKODAMA_ENABLE_CUDA=ON
 cmake --build build-cuda -j
+```
+
+On conda or micromamba FAISS/cuVS installations, use the matching compiler and
+runtime from the environment so `libstdc++`, FAISS, and cuVS agree:
+
+```bash
+export CONDA_PREFIX=/path/to/faiss-cuvs-env
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+cmake -S . -B build-cuda \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKODAMA_ENABLE_CUDA=ON \
+  -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
+  -DCMAKE_CXX_COMPILER="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-c++"
+cmake --build build-cuda -j
+ctest --test-dir build-cuda --output-on-failure
 ```
 
 `KODAMA_ENABLE_CUDA=ON` requires:
@@ -155,7 +177,9 @@ For `KNNCV`, compare CPU FAISS IVF-Flat and CUDA FAISS/cuVS IVF-Flat with
 cosine / inner-product and `k = 10`.
 
 For `PLSDACV` and `PLSLDACV`, compare CPU and CUDA versions across component
-counts and report selected components.
+counts and report selected components once the CUDA SIMPLS backend is
+implemented. In the current revision, CPU PLS-DA and CPU PLS-LDA are the active
+implementations.
 
 ## Acknowledgements
 
@@ -167,4 +191,3 @@ This library is inspired by:
 
 The code here is implemented as a standalone C++ library and does not depend on
 Rcpp, R, Armadillo, or Python.
-
