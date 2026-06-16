@@ -48,6 +48,9 @@ if(KODAMA_ENABLE_CUDA)
     NAMES faiss_gpu
     HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
   )
+  if(NOT FAISS_GPU_LIBRARY AND EXISTS "${FAISS_INCLUDE_DIR}/faiss/gpu/GpuIndexIVFFlat.h")
+    set(FAISS_GPU_LIBRARY ${FAISS_LIBRARY})
+  endif()
   find_path(CUVS_INCLUDE_DIR
     NAMES cuvs/neighbors/ivf_flat.hpp cuvs/neighbors/cagra.hpp
     HINTS /usr/local/include $ENV{CONDA_PREFIX}/include
@@ -58,9 +61,16 @@ if(KODAMA_ENABLE_CUDA)
   if(NOT CUVS_INCLUDE_DIR)
     message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires cuVS headers.")
   endif()
+  find_library(CUVS_LIBRARY
+    NAMES cuvs
+    HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
+  )
+  if(NOT CUVS_LIBRARY)
+    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires libcuvs.")
+  endif()
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1 KODAMA_ENABLE_CUVS=1)
   target_include_directories(kodama_cpp PRIVATE ${CUVS_INCLUDE_DIR})
-  target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY})
+  target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY} ${CUVS_LIBRARY})
 endif()
 
 include(GNUInstallDirs)
