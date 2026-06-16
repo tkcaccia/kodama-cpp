@@ -156,13 +156,14 @@ std::vector<int> knn_predict_faiss_ivf_flat_cuda(
   faiss::gpu::GpuIndexIVFFlatConfig config;
   config.device = gpu_device;
   faiss::gpu::GpuIndexIVFFlat index(&resources, d, nlist, faiss::METRIC_INNER_PRODUCT, config);
-  index.setNumProbes(nprobe);
   index.train(train.size(), train_x.data());
   index.add(train.size(), train_x.data());
 
   std::vector<faiss::idx_t> idx(validation.size() * static_cast<std::size_t>(k), -1);
   std::vector<float> scores(validation.size() * static_cast<std::size_t>(k), -std::numeric_limits<float>::infinity());
-  index.search(validation.size(), val_x.data(), k, scores.data(), idx.data());
+  faiss::SearchParametersIVF search_params;
+  search_params.nprobe = static_cast<std::size_t>(nprobe);
+  index.search(validation.size(), val_x.data(), k, scores.data(), idx.data(), &search_params);
 
   std::vector<int> pred(validation.size(), 0);
   for (std::size_t qi = 0; qi < validation.size(); ++qi) {
