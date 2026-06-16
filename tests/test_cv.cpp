@@ -100,6 +100,17 @@ int main() {
   kodama::PLSCVResult lres = kodama::PLSLDACV(view, d.y, d.constrain, pls);
   require(lres.global_accuracy > 0.90, "PLS-LDA accuracy unexpectedly low.");
 
+#if defined(KODAMA_ENABLE_CUDA)
+  kodama::PLSOptions cuda_pls = pls;
+  cuda_pls.backend = kodama::Backend::CUDA;
+  kodama::PLSCVResult cuda_pres = kodama::PLSDACV_CUDA(view, d.y, d.constrain, cuda_pls);
+  require(cuda_pres.parameters.backend == kodama::Backend::CUDA, "CUDA PLS-DA did not report CUDA backend.");
+  require(cuda_pres.global_accuracy > 0.90, "CUDA PLS-DA accuracy unexpectedly low.");
+  kodama::PLSCVResult cuda_lres = kodama::PLSLDACV_CUDA(view, d.y, d.constrain, cuda_pls);
+  require(cuda_lres.parameters.backend == kodama::Backend::CUDA, "CUDA PLS-LDA did not report CUDA backend.");
+  require(cuda_lres.global_accuracy > 0.90, "CUDA PLS-LDA accuracy unexpectedly low.");
+#endif
+
   std::cout << "All kodama-cpp CV tests passed.\n";
   return 0;
 }
