@@ -44,6 +44,33 @@ target_link_libraries(kodama_cpp PRIVATE ${FAISS_LIBRARY})
 target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_FAISS=1)
 
 if(KODAMA_ENABLE_CUDA)
+  find_path(CUDA_TOOLKIT_INCLUDE_DIR
+    NAMES cublas_v2.h cuda_runtime_api.h
+    HINTS
+      $ENV{CONDA_PREFIX}/targets/x86_64-linux/include
+      /usr/local/cuda/include
+      /usr/local/cuda-13.0/targets/x86_64-linux/include
+      /usr/include
+  )
+  find_library(CUDA_CUBLAS_LIBRARY
+    NAMES cublas
+    HINTS
+      $ENV{CONDA_PREFIX}/targets/x86_64-linux/lib
+      /usr/local/cuda/lib64
+      /usr/local/cuda-13.0/targets/x86_64-linux/lib
+      /usr/lib/x86_64-linux-gnu
+  )
+  find_library(CUDA_RUNTIME_LIBRARY
+    NAMES cudart
+    HINTS
+      $ENV{CONDA_PREFIX}/targets/x86_64-linux/lib
+      /usr/local/cuda/lib64
+      /usr/local/cuda-13.0/targets/x86_64-linux/lib
+      /usr/lib/x86_64-linux-gnu
+  )
+  if(NOT CUDA_TOOLKIT_INCLUDE_DIR OR NOT CUDA_CUBLAS_LIBRARY OR NOT CUDA_RUNTIME_LIBRARY)
+    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires CUDA headers, libcublas, and libcudart.")
+  endif()
   find_library(FAISS_GPU_LIBRARY
     NAMES faiss_gpu
     HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
@@ -69,8 +96,8 @@ if(KODAMA_ENABLE_CUDA)
     message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires libcuvs.")
   endif()
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1 KODAMA_ENABLE_CUVS=1)
-  target_include_directories(kodama_cpp PRIVATE ${CUVS_INCLUDE_DIR})
-  target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY} ${CUVS_LIBRARY})
+  target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR} ${CUVS_INCLUDE_DIR})
+  target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY} ${CUVS_LIBRARY} ${CUDA_CUBLAS_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
 endif()
 
 include(GNUInstallDirs)
