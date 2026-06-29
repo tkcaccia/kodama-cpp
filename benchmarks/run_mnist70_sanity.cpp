@@ -32,6 +32,15 @@ std::vector<double> read_double_bin(const std::string& path, std::size_t n) {
   return out;
 }
 
+std::vector<float> read_float_bin(const std::string& path, std::size_t n) {
+  std::vector<float> out(n);
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("Cannot open " + path);
+  in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size() * sizeof(float)));
+  if (!in) throw std::runtime_error("Could not read expected float count from " + path);
+  return out;
+}
+
 std::vector<int> read_int_bin(const std::string& path, std::size_t n) {
   std::vector<int> out(n);
   std::ifstream in(path, std::ios::binary);
@@ -39,6 +48,17 @@ std::vector<int> read_int_bin(const std::string& path, std::size_t n) {
   in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size() * sizeof(int)));
   if (!in) throw std::runtime_error("Could not read expected int count from " + path);
   return out;
+}
+
+bool use_float32_input(const std::string& path) {
+  const char* dtype = std::getenv("KODAMA_INPUT_DTYPE");
+  if (dtype != nullptr && std::string(dtype).empty() == false) {
+    const std::string text(dtype);
+    if (text == "float32" || text == "float" || text == "single") return true;
+    if (text == "float64" || text == "double") return false;
+    throw std::runtime_error("KODAMA_INPUT_DTYPE must be float32 or float64.");
+  }
+  return path.find("float32") != std::string::npos;
 }
 
 std::string csv_escape(const std::string& x) {
@@ -68,7 +88,12 @@ BenchRow run_knn(const std::string& name, const std::string& backend, Fn fn) {
        << ";metric=" << kodama::to_string(result.parameters.metric)
        << ";index=" << kodama::to_string(result.parameters.index_type)
        << ";nlist=" << result.parameters.ivf_nlist
-       << ";nprobe=" << result.parameters.ivf_nprobe;
+       << ";nprobe=" << result.parameters.ivf_nprobe
+       << ";hnsw_m=" << result.parameters.hnsw_m
+       << ";hnsw_ef_construction=" << result.parameters.hnsw_ef_construction
+       << ";hnsw_ef_search=" << result.parameters.hnsw_ef_search
+       << ";hnsw_tune_k=" << result.parameters.hnsw_tune_k
+       << ";hnsw_target_recall=" << result.parameters.hnsw_target_recall;
     row.details = os.str();
   } catch (const std::exception& e) {
     row.status = "failed";
@@ -125,7 +150,7 @@ void write_csv(const std::string& path, const std::vector<BenchRow>& rows) {
 int main(int argc, char** argv) {
   if (argc < 5) {
     std::cerr << "Usage: " << argv[0]
-              << " <x_double_rowmajor.bin> <labels_int32.bin> <output.csv> <n_threads> [ivf_nlist] [ivf_nprobe] [pls_max_components]\n";
+              << " <x_rowmajor.bin> <labels_int32.bin> <output.csv> <n_threads> [ivf_nlist] [ivf_nprobe] [pls_max_components]\n";
     return 2;
   }
 
@@ -139,10 +164,18 @@ int main(int argc, char** argv) {
   constexpr std::size_t n = 70000;
   constexpr std::size_t p = 784;
 
-  std::vector<double> x = read_double_bin(x_path, n * p);
+  std::vector<double> x64;
+  std::vector<float> x32;
+  kodama::MatrixView view;
+  if (use_float32_input(x_path)) {
+    x32 = read_float_bin(x_path, n * p);
+    view = kodama::MatrixView{x32.data(), n, p};
+  } else {
+    x64 = read_double_bin(x_path, n * p);
+    view = kodama::MatrixView{x64.data(), n, p};
+  }
   std::vector<int> y = read_int_bin(y_path, n);
   std::vector<int> constrain;
-  kodama::MatrixView view{x.data(), n, p};
 
   kodama::KNNOptions knn;
   knn.cv.folds = 5;

@@ -50,15 +50,29 @@ if (nrow(x) != length(labels)) {
   stop("nrow(data) does not match length(labels) for ", dataset_name, call. = FALSE)
 }
 
-x_file <- file.path(output_dir, paste0(dataset_name, "_x_double_rowmajor.bin"))
+x_double_file <- file.path(output_dir, paste0(dataset_name, "_x_double_rowmajor.bin"))
+x_float32_file <- file.path(output_dir, paste0(dataset_name, "_x_float32_rowmajor.bin"))
 y_file <- file.path(output_dir, paste0(dataset_name, "_labels_int32.bin"))
 meta_file <- file.path(output_dir, paste0(dataset_name, "_metadata.csv"))
 labels_file <- file.path(output_dir, paste0(dataset_name, "_label_map.csv"))
 
-con <- file(x_file, "wb")
-on.exit(close(con), add = TRUE)
-writeBin(as.double(t(x)), con, size = 8, endian = "little")
-close(con)
+chunk_rows <- as.integer(Sys.getenv("KODAMA_EXPORT_CHUNK_ROWS", "10000"))
+chunk_rows <- max(1L, chunk_rows)
+
+write_matrix_file <- function(path, bytes) {
+  con <- file(path, "wb")
+  on.exit(close(con), add = TRUE)
+  for (start in seq.int(1L, nrow(x), by = chunk_rows)) {
+    end <- min(nrow(x), start + chunk_rows - 1L)
+    chunk <- x[start:end, , drop = FALSE]
+    writeBin(as.double(t(chunk)), con, size = bytes, endian = "little")
+  }
+  close(con)
+  on.exit(NULL, add = FALSE)
+}
+
+write_matrix_file(x_double_file, 8)
+write_matrix_file(x_float32_file, 4)
 
 con <- file(y_file, "wb")
 on.exit(close(con), add = TRUE)
@@ -72,7 +86,8 @@ write.csv(
     n = nrow(x),
     p = ncol(x),
     n_labels = length(unique(labels)),
-    x_file = normalizePath(x_file, mustWork = FALSE),
+    x_file = normalizePath(x_double_file, mustWork = FALSE),
+    x_float32_file = normalizePath(x_float32_file, mustWork = FALSE),
     labels_file = normalizePath(y_file, mustWork = FALSE)
   ),
   meta_file,

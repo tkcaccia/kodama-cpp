@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <iomanip>
@@ -34,6 +35,15 @@ std::vector<double> read_double_bin(const std::string& path, std::size_t n) {
   return out;
 }
 
+std::vector<float> read_float_bin(const std::string& path, std::size_t n) {
+  std::vector<float> out(n);
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("Cannot open " + path);
+  in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size() * sizeof(float)));
+  if (!in) throw std::runtime_error("Could not read expected float count from " + path);
+  return out;
+}
+
 std::vector<int> read_int_bin(const std::string& path, std::size_t n) {
   std::vector<int> out(n);
   std::ifstream in(path, std::ios::binary);
@@ -41,6 +51,17 @@ std::vector<int> read_int_bin(const std::string& path, std::size_t n) {
   in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size() * sizeof(int)));
   if (!in) throw std::runtime_error("Could not read expected int count from " + path);
   return out;
+}
+
+bool use_float32_input(const std::string& path) {
+  const char* dtype = std::getenv("KODAMA_INPUT_DTYPE");
+  if (dtype != nullptr && std::string(dtype).empty() == false) {
+    const std::string text(dtype);
+    if (text == "float32" || text == "float" || text == "single") return true;
+    if (text == "float64" || text == "double") return false;
+    throw std::runtime_error("KODAMA_INPUT_DTYPE must be float32 or float64.");
+  }
+  return path.find("float32") != std::string::npos;
 }
 
 std::string csv_escape(const std::string& x) {
@@ -68,7 +89,12 @@ BenchRow run_knn(const std::string& dataset, const std::string& name, const std:
        << ";metric=" << kodama::to_string(result.parameters.metric)
        << ";index=" << kodama::to_string(result.parameters.index_type)
        << ";nlist=" << result.parameters.ivf_nlist
-       << ";nprobe=" << result.parameters.ivf_nprobe;
+       << ";nprobe=" << result.parameters.ivf_nprobe
+       << ";hnsw_m=" << result.parameters.hnsw_m
+       << ";hnsw_ef_construction=" << result.parameters.hnsw_ef_construction
+       << ";hnsw_ef_search=" << result.parameters.hnsw_ef_search
+       << ";hnsw_tune_k=" << result.parameters.hnsw_tune_k
+       << ";hnsw_target_recall=" << result.parameters.hnsw_target_recall;
     row.details = os.str();
   } catch (const std::exception& e) {
     row.status = "failed";
@@ -124,12 +150,64 @@ void write_csv(const std::string& path, const std::vector<BenchRow>& rows) {
   }
 }
 
+void write_csv_header(const std::string& path) {
+  std::ofstream out(path);
+  if (!out) throw std::runtime_error("Cannot write " + path);
+  out << "dataset,function,backend,status,accuracy,seconds,peak_memory_mb,selected_components,details\n";
+}
+
+void append_csv_row(const std::string& path, const BenchRow& row) {
+  std::ofstream out(path, std::ios::app);
+  if (!out) throw std::runtime_error("Cannot append " + path);
+  out << std::fixed << std::setprecision(6)
+      << csv_escape(row.dataset) << ','
+      << csv_escape(row.function) << ','
+      << csv_escape(row.backend) << ','
+      << csv_escape(row.status) << ','
+      << row.accuracy << ','
+      << row.seconds << ','
+      << row.peak_memory_mb << ','
+      << row.selected_components << ','
+      << csv_escape(row.details) << '\n';
+}
+
+void print_row(const BenchRow& row) {
+  std::cout << std::fixed << std::setprecision(6)
+            << row.dataset << ','
+            << row.function << ','
+            << row.backend << ','
+            << row.status << ','
+            << row.accuracy << ','
+            << row.seconds << ','
+            << row.peak_memory_mb << ','
+            << row.selected_components << ','
+            << row.details << '\n'
+            << std::flush;
+}
+
+bool method_enabled(const std::string& name) {
+  const char* filter = std::getenv("KODAMA_BENCH_METHODS");
+  if (filter == nullptr || std::string(filter).empty()) return true;
+  std::stringstream ss(filter);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    if (item == name) return true;
+  }
+  return false;
+}
+
+bool method_enabled_by_default(const std::string& name, bool default_enabled) {
+  const char* filter = std::getenv("KODAMA_BENCH_METHODS");
+  if (filter == nullptr || std::string(filter).empty()) return default_enabled;
+  return method_enabled(name);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc < 9) {
     std::cerr << "Usage: " << argv[0]
-              << " <dataset> <x_double_rowmajor.bin> <labels_int32.bin> <n> <p> <output.csv> <n_threads> <pls_max_components> [ivf_nlist] [ivf_nprobe]\n";
+              << " <dataset> <x_rowmajor.bin> <labels_int32.bin> <n> <p> <output.csv> <n_threads> <pls_max_components> [ivf_nlist] [ivf_nprobe]\n";
     return 2;
   }
 
@@ -144,10 +222,18 @@ int main(int argc, char** argv) {
   const int ivf_nlist = argc > 9 ? std::stoi(argv[9]) : 0;
   const int ivf_nprobe = argc > 10 ? std::stoi(argv[10]) : 0;
 
-  std::vector<double> x = read_double_bin(x_path, n * p);
+  std::vector<double> x64;
+  std::vector<float> x32;
+  kodama::MatrixView view;
+  if (use_float32_input(x_path)) {
+    x32 = read_float_bin(x_path, n * p);
+    view = kodama::MatrixView{x32.data(), n, p};
+  } else {
+    x64 = read_double_bin(x_path, n * p);
+    view = kodama::MatrixView{x64.data(), n, p};
+  }
   std::vector<int> y = read_int_bin(y_path, n);
   std::vector<int> constrain;
-  kodama::MatrixView view{x.data(), n, p};
 
   kodama::KNNOptions knn;
   knn.cv.folds = 5;
@@ -169,54 +255,72 @@ int main(int argc, char** argv) {
   pls.scale = true;
   pls.n_threads = n_threads;
 
-  std::vector<BenchRow> rows;
-  rows.push_back(run_knn(dataset, "KNNCV_CPU", "cpu", [&] {
-    kodama::KNNOptions opt = knn;
-    opt.backend = kodama::Backend::CPU;
-    return kodama::KNNCV_CPU(view, y, constrain, opt);
-  }));
-  rows.push_back(run_knn(dataset, "KNNCV_CUDA", "cuda", [&] {
-    kodama::KNNOptions opt = knn;
-    opt.backend = kodama::Backend::CUDA;
-    opt.gpu_device = 0;
-    return kodama::KNNCV_CUDA(view, y, constrain, opt);
-  }));
-  rows.push_back(run_pls(dataset, "PLSDACV_CPU", "cpu", [&] {
-    kodama::PLSOptions opt = pls;
-    opt.backend = kodama::Backend::CPU;
-    return kodama::PLSDACV_CPU(view, y, constrain, opt);
-  }));
-  rows.push_back(run_pls(dataset, "PLSLDACV_CPU", "cpu", [&] {
-    kodama::PLSOptions opt = pls;
-    opt.backend = kodama::Backend::CPU;
-    return kodama::PLSLDACV_CPU(view, y, constrain, opt);
-  }));
-  rows.push_back(run_pls(dataset, "PLSDACV_CUDA", "cuda", [&] {
-    kodama::PLSOptions opt = pls;
-    opt.backend = kodama::Backend::CUDA;
-    opt.gpu_device = 0;
-    return kodama::PLSDACV_CUDA(view, y, constrain, opt);
-  }));
-  rows.push_back(run_pls(dataset, "PLSLDACV_CUDA", "cuda", [&] {
-    kodama::PLSOptions opt = pls;
-    opt.backend = kodama::Backend::CUDA;
-    opt.gpu_device = 0;
-    return kodama::PLSLDACV_CUDA(view, y, constrain, opt);
-  }));
+  write_csv_header(out_path);
+  std::cout << "dataset,function,backend,status,accuracy,seconds,peak_memory_mb,selected_components,details\n" << std::flush;
+  auto record = [&](BenchRow row) {
+    append_csv_row(out_path, row);
+    print_row(row);
+  };
 
-  write_csv(out_path, rows);
-  std::cout << "dataset,function,backend,status,accuracy,seconds,peak_memory_mb,selected_components,details\n";
-  std::cout << std::fixed << std::setprecision(6);
-  for (const BenchRow& row : rows) {
-    std::cout << row.dataset << ','
-              << row.function << ','
-              << row.backend << ','
-              << row.status << ','
-              << row.accuracy << ','
-              << row.seconds << ','
-              << row.peak_memory_mb << ','
-              << row.selected_components << ','
-              << row.details << '\n';
+  if (method_enabled("KNNCV_CPU")) {
+    record(run_knn(dataset, "KNNCV_CPU", "cpu", [&] {
+      kodama::KNNOptions opt = knn;
+      opt.backend = kodama::Backend::CPU;
+      return kodama::KNNCV_CPU(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled("KNNCV_CUDA")) {
+    record(run_knn(dataset, "KNNCV_CUDA", "cuda", [&] {
+      kodama::KNNOptions opt = knn;
+      opt.backend = kodama::Backend::CUDA;
+      opt.gpu_device = 0;
+      return kodama::KNNCV_CUDA(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled("PLSDACV_CPU")) {
+    record(run_pls(dataset, "PLSDACV_CPU", "cpu", [&] {
+      kodama::PLSOptions opt = pls;
+      opt.backend = kodama::Backend::CPU;
+      return kodama::PLSDACV_CPU(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled("PLSLDACV_CPU")) {
+    record(run_pls(dataset, "PLSLDACV_CPU", "cpu", [&] {
+      kodama::PLSOptions opt = pls;
+      opt.backend = kodama::Backend::CPU;
+      return kodama::PLSLDACV_CPU(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled_by_default("PLSCKNNCV_CPU", false)) {
+    record(run_pls(dataset, "PLSCKNNCV_CPU", "cpu", [&] {
+      kodama::PLSOptions opt = pls;
+      opt.backend = kodama::Backend::CPU;
+      return kodama::PLSCKNNCV_CPU(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled("PLSDACV_CUDA")) {
+    record(run_pls(dataset, "PLSDACV_CUDA", "cuda", [&] {
+      kodama::PLSOptions opt = pls;
+      opt.backend = kodama::Backend::CUDA;
+      opt.gpu_device = 0;
+      return kodama::PLSDACV_CUDA(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled("PLSLDACV_CUDA")) {
+    record(run_pls(dataset, "PLSLDACV_CUDA", "cuda", [&] {
+      kodama::PLSOptions opt = pls;
+      opt.backend = kodama::Backend::CUDA;
+      opt.gpu_device = 0;
+      return kodama::PLSLDACV_CUDA(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled_by_default("PLSCKNNCV_CUDA", false)) {
+    record(run_pls(dataset, "PLSCKNNCV_CUDA", "cuda", [&] {
+      kodama::PLSOptions opt = pls;
+      opt.backend = kodama::Backend::CUDA;
+      opt.gpu_device = 0;
+      return kodama::PLSCKNNCV_CUDA(view, y, constrain, opt);
+    }));
   }
   return 0;
 }

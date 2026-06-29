@@ -2,16 +2,53 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(KODAMA_ENABLE_CUDA)
 #include <cublas_v2.h>
+#include <cusolverDn.h>
 #include <cuda_runtime.h>
+
+extern "C" void kodama_cuda_candidate_knn_scores_prefix(
+  const double* t_test,
+  const double* t_train,
+  const double* test_norm2,
+  const double* train_norm2,
+  const int* ncomp,
+  const int* class_offsets,
+  const int* class_indices,
+  const int* candidates,
+  const double* candidate_base,
+  const double* bias,
+  int ntest,
+  int ntrain,
+  int kdim,
+  int n_classes,
+  int nslice,
+  int top_m,
+  int knn_k,
+  double tau,
+  double alpha,
+  double* out_scores,
+  cudaStream_t stream
+);
+
+extern "C" void kodama_cuda_lda_label_sums_row(const double*, const int*, int, int, int, double*, cudaStream_t);
+extern "C" void kodama_cuda_lda_means_row(double*, const double*, int, int, cudaStream_t);
+extern "C" void kodama_cuda_lda_pooled_col(double*, const double*, const double*, int, int, int, cudaStream_t);
+extern "C" void kodama_cuda_lda_copy_cov(const double*, double*, int, int, cudaStream_t);
+extern "C" void kodama_cuda_lda_add_ridge(double*, int, double, double*, cudaStream_t);
+extern "C" void kodama_cuda_lda_means_to_rhs(const double*, double*, int, int, int, cudaStream_t);
+extern "C" void kodama_cuda_lda_finalize_linear_row(const double*, const double*, const double*, double*, double*, int, int, int, int, cudaStream_t);
+extern "C" void kodama_cuda_lda_score_argmax_row(const double*, const double*, const double*, int*, int, int, int, cudaStream_t);
+extern "C" bool kodama_fastpls_simpls_fit_cuda(const double*, int, int, const double*, int, int, int, double*, double*);
 #endif
 
 namespace kodama {
@@ -28,6 +65,12 @@ void check_cuda(cudaError_t code, const char* where) {
 void check_cublas(cublasStatus_t code, const char* where) {
   if (code != CUBLAS_STATUS_SUCCESS) {
     throw std::runtime_error(std::string(where) + ": cuBLAS call failed");
+  }
+}
+
+void check_cusolver(cusolverStatus_t code, const char* where) {
+  if (code != CUSOLVER_STATUS_SUCCESS) {
+    throw std::runtime_error(std::string(where) + ": cuSolver call failed");
   }
 }
 
@@ -78,6 +121,36 @@ class DeviceBuffer {
 
  private:
   double* ptr_ = nullptr;
+  std::size_t size_ = 0;
+};
+
+class DeviceIntBuffer {
+ public:
+  DeviceIntBuffer() = default;
+  explicit DeviceIntBuffer(std::size_t n) { reset(n); }
+
+  ~DeviceIntBuffer() {
+    if (ptr_ != nullptr) cudaFree(ptr_);
+  }
+
+  DeviceIntBuffer(const DeviceIntBuffer&) = delete;
+  DeviceIntBuffer& operator=(const DeviceIntBuffer&) = delete;
+
+  void reset(std::size_t n) {
+    if (ptr_ != nullptr) {
+      cudaFree(ptr_);
+      ptr_ = nullptr;
+    }
+    size_ = n;
+    if (n > 0) check_cuda(cudaMalloc(&ptr_, n * sizeof(int)), "cudaMalloc(int)");
+  }
+
+  int* data() { return ptr_; }
+  const int* data() const { return ptr_; }
+  std::size_t size() const { return size_; }
+
+ private:
+  int* ptr_ = nullptr;
   std::size_t size_ = 0;
 };
 #endif
@@ -148,6 +221,105 @@ void train_center_scale(
   bool scale_columns,
   std::vector<double>& mean,
   std::vector<double>& scale
+);
+
+struct PLSFoldData {
+  int fold = 0;
+  std::vector<int> train;
+  std::vector<int> validation;
+  std::vector<double> mean;
+  std::vector<double> scale;
+  Dense x_train;
+  Dense x_val;
+};
+
+struct PLSFoldXCache {
+  bool valid = false;
+  const void* data = nullptr;
+  std::size_t rows = 0;
+  std::size_t cols = 0;
+  MatrixValueType value_type = MatrixValueType::Float64;
+  bool center = true;
+  bool scale_columns = false;
+  int folds = 0;
+  std::uint64_t seed = 0;
+  std::size_t constrain_hash = 0;
+  std::vector<int> fold_assignments;
+  std::vector<int> fold_ids;
+  std::vector<PLSFoldData> folds_data;
+};
+
+std::size_t hash_int_vector(const std::vector<int>& values) {
+  std::size_t h = 1469598103934665603ull;
+  for (int value : values) {
+    h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(value));
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+bool cache_matches(
+  const PLSFoldXCache& cache,
+  MatrixView x,
+  const std::vector<int>& constrain,
+  const PLSOptions& options
+) {
+  return cache.valid &&
+         cache.data == x.data &&
+         cache.rows == x.rows &&
+         cache.cols == x.cols &&
+         cache.value_type == x.value_type &&
+         cache.center == options.center &&
+         cache.scale_columns == options.scale &&
+         cache.folds == options.cv.folds &&
+         cache.seed == options.cv.seed &&
+         cache.constrain_hash == hash_int_vector(constrain);
+}
+
+const PLSFoldXCache& get_pls_fold_x_cache(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const PLSOptions& options
+) {
+  thread_local PLSFoldXCache cache;
+  if (cache_matches(cache, x, constrain, options)) return cache;
+
+  cache = PLSFoldXCache{};
+  cache.valid = true;
+  cache.data = x.data;
+  cache.rows = x.rows;
+  cache.cols = x.cols;
+  cache.value_type = x.value_type;
+  cache.center = options.center;
+  cache.scale_columns = options.scale;
+  cache.folds = options.cv.folds;
+  cache.seed = options.cv.seed;
+  cache.constrain_hash = hash_int_vector(constrain);
+  cache.fold_assignments = detail::make_folds(labels, constrain, options.cv);
+  cache.fold_ids = detail::sorted_unique_folds(cache.fold_assignments);
+  cache.folds_data.reserve(cache.fold_ids.size());
+
+  for (int fold : cache.fold_ids) {
+    PLSFoldData fold_data;
+    fold_data.fold = fold;
+    fold_data.validation = detail::indices_where_fold(cache.fold_assignments, fold, true);
+    fold_data.train = detail::indices_where_fold(cache.fold_assignments, fold, false);
+    train_center_scale(x, fold_data.train, options.center, options.scale, fold_data.mean, fold_data.scale);
+    fold_data.x_train = subset_scale(x, fold_data.train, fold_data.mean, fold_data.scale);
+    fold_data.x_val = subset_scale(x, fold_data.validation, fold_data.mean, fold_data.scale);
+    cache.folds_data.push_back(std::move(fold_data));
+  }
+  return cache;
+}
+
+void train_center_scale(
+  MatrixView x,
+  const std::vector<int>& rows,
+  bool center,
+  bool scale_columns,
+  std::vector<double>& mean,
+  std::vector<double>& scale
 ) {
   mean.assign(x.cols, 0.0);
   scale.assign(x.cols, 1.0);
@@ -176,26 +348,41 @@ Dense one_hot_centered(const std::vector<int>& labels, const std::vector<int>& r
   std::map<int, int> class_pos;
   for (int i = 0; i < static_cast<int>(classes.size()); ++i) class_pos[classes[static_cast<std::size_t>(i)]] = i;
   y_mean.assign(classes.size(), 0.0);
+  std::vector<int> encoded(static_cast<std::size_t>(y.rows), 0);
   for (int i = 0; i < y.rows; ++i) {
     const int cls = labels[static_cast<std::size_t>(rows[static_cast<std::size_t>(i)])];
     const int j = class_pos[cls];
-    y(i, j) = 1.0;
+    encoded[static_cast<std::size_t>(i)] = j;
     y_mean[static_cast<std::size_t>(j)] += 1.0;
   }
   for (double& v : y_mean) v /= static_cast<double>(rows.size());
   for (int i = 0; i < y.rows; ++i) {
-    for (int j = 0; j < y.cols; ++j) y(i, j) -= y_mean[static_cast<std::size_t>(j)];
+    double* row = y.data.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(y.cols);
+    for (int j = 0; j < y.cols; ++j) row[j] = -y_mean[static_cast<std::size_t>(j)];
+    row[encoded[static_cast<std::size_t>(i)]] += 1.0;
   }
   return y;
 }
 
 Dense crossprod(const Dense& x, const Dense& y) {
   Dense out(x.cols, y.cols);
+  std::vector<long double> accum(static_cast<std::size_t>(x.cols) * static_cast<std::size_t>(y.cols), 0.0L);
+  for (int r = 0; r < x.rows; ++r) {
+    const double* x_row = x.data.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(x.cols);
+    const double* y_row = y.data.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(y.cols);
+    for (int i = 0; i < x.cols; ++i) {
+      const long double xv = x_row[i];
+      for (int j = 0; j < y.cols; ++j) {
+        accum[static_cast<std::size_t>(i) * static_cast<std::size_t>(y.cols) + static_cast<std::size_t>(j)] +=
+          xv * y_row[j];
+      }
+    }
+  }
   for (int i = 0; i < x.cols; ++i) {
     for (int j = 0; j < y.cols; ++j) {
-      long double s = 0.0;
-      for (int r = 0; r < x.rows; ++r) s += static_cast<long double>(x(r, i)) * y(r, j);
-      out(i, j) = static_cast<double>(s);
+      out(i, j) = static_cast<double>(
+        accum[static_cast<std::size_t>(i) * static_cast<std::size_t>(y.cols) + static_cast<std::size_t>(j)]
+      );
     }
   }
   return out;
@@ -277,6 +464,12 @@ Dense first_columns(const Dense& x, int ncomp) {
     for (int j = 0; j < ncomp; ++j) out(i, j) = x(i, j);
   }
   return out;
+}
+
+std::vector<int> components_to_evaluate(const PLSOptions& options, int available_components) {
+  if (available_components < 1) return {};
+  const int requested = options.fixed_components > 0 ? options.fixed_components : options.max_components;
+  return {std::min(requested, available_components)};
 }
 
 Dense solve_linear(Dense a, Dense b) {
@@ -504,17 +697,55 @@ Dense transform_pls_scores_cuda(const Dense& x, const PLSFit& fit, int ncomp, in
 }
 
 PLSFit fit_pls_components_cuda(const Dense& x, const Dense& y, int max_components, int gpu_device) {
-  PLSFit fit = fit_pls_components_from_crossprod(x, y, crossprod_cuda(x, y, gpu_device), max_components);
+  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(fit_pls_components_cuda)");
+  const int max_rank = std::min({max_components, x.cols, std::max(1, x.rows - 1)});
+  std::vector<double> x_colmajor(static_cast<std::size_t>(x.rows) * static_cast<std::size_t>(x.cols));
+  std::vector<double> y_colmajor(static_cast<std::size_t>(y.rows) * static_cast<std::size_t>(y.cols));
+  for (int j = 0; j < x.cols; ++j) {
+    for (int i = 0; i < x.rows; ++i) {
+      x_colmajor[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(x.rows)] = x(i, j);
+    }
+  }
+  for (int j = 0; j < y.cols; ++j) {
+    for (int i = 0; i < y.rows; ++i) {
+      y_colmajor[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(y.rows)] = y(i, j);
+    }
+  }
+
+  std::vector<double> rr_colmajor(static_cast<std::size_t>(x.cols) * static_cast<std::size_t>(max_rank), 0.0);
+  std::vector<double> qq_colmajor(static_cast<std::size_t>(y.cols) * static_cast<std::size_t>(max_rank), 0.0);
+  const bool ok = kodama_fastpls_simpls_fit_cuda(
+    x_colmajor.data(),
+    x.rows,
+    x.cols,
+    y_colmajor.data(),
+    y.cols,
+    max_rank,
+    1,
+    rr_colmajor.data(),
+    qq_colmajor.data()
+  );
+  if (!ok) throw std::runtime_error("fastPLS CUDA SIMPLS fit failed.");
+
+  PLSFit fit{Dense(x.cols, max_rank), Dense(x.cols, max_rank), Dense(y.cols, max_rank), Dense()};
+  for (int a = 0; a < max_rank; ++a) {
+    for (int j = 0; j < x.cols; ++j) {
+      fit.weights(j, a) = rr_colmajor[static_cast<std::size_t>(j) + static_cast<std::size_t>(a) * static_cast<std::size_t>(x.cols)];
+    }
+    for (int j = 0; j < y.cols; ++j) {
+      fit.y_weights(j, a) = qq_colmajor[static_cast<std::size_t>(j) + static_cast<std::size_t>(a) * static_cast<std::size_t>(y.cols)];
+    }
+  }
   fit.train_scores = transform_pls_scores_cuda(x, fit, fit.weights.cols, gpu_device);
   return fit;
 }
 #endif
 
-Dense regression_coefficients(const Dense& t, const Dense& y) {
-  Dense lhs(t.cols, t.cols);
-  Dense rhs(t.cols, y.cols);
-  for (int i = 0; i < t.cols; ++i) {
-    for (int j = 0; j < t.cols; ++j) {
+Dense regression_coefficients(const Dense& t, const Dense& y, int ncomp) {
+  Dense lhs(ncomp, ncomp);
+  Dense rhs(ncomp, y.cols);
+  for (int i = 0; i < ncomp; ++i) {
+    for (int j = 0; j < ncomp; ++j) {
       long double s = 0.0;
       for (int r = 0; r < t.rows; ++r) s += static_cast<long double>(t(r, i)) * t(r, j);
       lhs(i, j) = static_cast<double>(s);
@@ -525,6 +756,56 @@ Dense regression_coefficients(const Dense& t, const Dense& y) {
       rhs(i, j) = static_cast<double>(s);
     }
   }
+  return solve_linear(lhs, rhs);
+}
+
+Dense regression_coefficients(const Dense& t, const Dense& y) {
+  return regression_coefficients(t, y, t.cols);
+}
+
+Dense regression_coefficients_centered_one_hot(
+  const Dense& t,
+  const std::vector<int>& labels,
+  const std::vector<int>& classes,
+  const std::vector<double>& y_mean,
+  int ncomp
+) {
+  if (static_cast<int>(labels.size()) != t.rows) throw std::invalid_argument("PLS-DA label size mismatch.");
+  const int cnum = static_cast<int>(classes.size());
+  Dense lhs(ncomp, ncomp);
+  Dense rhs(ncomp, cnum);
+  std::map<int, int> class_pos;
+  for (int c = 0; c < cnum; ++c) class_pos[classes[static_cast<std::size_t>(c)]] = c;
+  std::vector<int> encoded(labels.size(), 0);
+  for (std::size_t i = 0; i < labels.size(); ++i) encoded[i] = class_pos.at(labels[i]);
+  std::vector<double> score_sums(static_cast<std::size_t>(ncomp), 0.0);
+  std::vector<double> lhs_accum(static_cast<std::size_t>(ncomp) * static_cast<std::size_t>(ncomp), 0.0);
+
+  for (int r = 0; r < t.rows; ++r) {
+    const int c = encoded[static_cast<std::size_t>(r)];
+    const double* t_row = t.data.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(t.cols);
+    for (int a = 0; a < ncomp; ++a) {
+      const double value = t_row[a];
+      rhs(a, c) += value;
+      score_sums[static_cast<std::size_t>(a)] += value;
+      for (int b = a; b < ncomp; ++b) {
+        lhs_accum[static_cast<std::size_t>(a) * static_cast<std::size_t>(ncomp) + static_cast<std::size_t>(b)] +=
+          value * t_row[b];
+      }
+    }
+  }
+  for (int a = 0; a < ncomp; ++a) {
+    for (int b = a; b < ncomp; ++b) {
+      const double value = lhs_accum[static_cast<std::size_t>(a) * static_cast<std::size_t>(ncomp) + static_cast<std::size_t>(b)];
+      lhs(a, b) = value;
+      lhs(b, a) = value;
+    }
+  }
+  for (int a = 0; a < ncomp; ++a) {
+    const double sum = score_sums[static_cast<std::size_t>(a)];
+    for (int c = 0; c < cnum; ++c) rhs(a, c) -= sum * y_mean[static_cast<std::size_t>(c)];
+  }
+
   return solve_linear(lhs, rhs);
 }
 
@@ -542,36 +823,195 @@ Dense y_scores_from_q(const Dense& y, const Dense& q, int ncomp) {
 
 std::vector<int> predict_pls_da(
   const Dense& t_train,
+  const Dense& y_train,
+  const Dense& t_val,
+  const std::vector<int>& classes,
+  const std::vector<double>& y_mean,
+  int ncomp
+) {
+  const Dense coef = regression_coefficients(t_train, y_train, ncomp);
+  std::vector<int> pred(static_cast<std::size_t>(t_val.rows), classes.front());
+  for (int i = 0; i < t_val.rows; ++i) {
+    int best = 0;
+    double best_score = -std::numeric_limits<double>::infinity();
+    for (int c = 0; c < static_cast<int>(classes.size()); ++c) {
+      long double score = c < static_cast<int>(y_mean.size()) ? y_mean[static_cast<std::size_t>(c)] : 0.0;
+      for (int a = 0; a < ncomp; ++a) {
+        score += static_cast<long double>(t_val(i, a)) * coef(a, c);
+      }
+      if (score > best_score) {
+        best_score = static_cast<double>(score);
+        best = c;
+      }
+    }
+    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(best)];
+  }
+  return pred;
+}
+
+std::vector<int> predict_pls_da_labels(
+  const Dense& t_train,
   const std::vector<int>& y_train_labels,
   const Dense& t_val,
-  const std::vector<int>& classes
+  const std::vector<int>& classes,
+  const std::vector<double>& y_mean,
+  int ncomp
+) {
+  const Dense coef = regression_coefficients_centered_one_hot(t_train, y_train_labels, classes, y_mean, ncomp);
+  std::vector<int> pred(static_cast<std::size_t>(t_val.rows), classes.front());
+  for (int i = 0; i < t_val.rows; ++i) {
+    int best = 0;
+    double best_score = -std::numeric_limits<double>::infinity();
+    for (int c = 0; c < static_cast<int>(classes.size()); ++c) {
+      long double score = c < static_cast<int>(y_mean.size()) ? y_mean[static_cast<std::size_t>(c)] : 0.0;
+      for (int a = 0; a < ncomp; ++a) {
+        score += static_cast<long double>(t_val(i, a)) * coef(a, c);
+      }
+      if (score > best_score) {
+        best_score = static_cast<double>(score);
+        best = c;
+      }
+    }
+    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(best)];
+  }
+  return pred;
+}
+
+std::vector<int> predict_pls_da(
+  const Dense& t_train,
+  const Dense& y_train,
+  const Dense& t_val,
+  const std::vector<int>& classes,
+  const std::vector<double>& y_mean
+) {
+  return predict_pls_da(t_train, y_train, t_val, classes, y_mean, t_val.cols);
+}
+
+#if defined(KODAMA_ENABLE_CUDA)
+std::vector<int> predict_pls_da_cuda(
+  const Dense& t_train,
+  const std::vector<int>& y_train_labels,
+  const Dense& t_val,
+  const std::vector<int>& classes,
+  const std::vector<double>& y_mean,
+  int gpu_device
+) {
+  if (t_val.rows < 1) return {};
+  const int n = t_val.rows;
+  const int kk = t_val.cols;
+  const int cnum = static_cast<int>(classes.size());
+  const Dense coef = regression_coefficients_centered_one_hot(t_train, y_train_labels, classes, y_mean, kk);
+
+  std::vector<double> linear(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(kk), 0.0);
+  std::vector<double> constants(static_cast<std::size_t>(cnum), 0.0);
+  for (int c = 0; c < cnum; ++c) {
+    constants[static_cast<std::size_t>(c)] =
+      c < static_cast<int>(y_mean.size()) ? y_mean[static_cast<std::size_t>(c)] : 0.0;
+    for (int a = 0; a < kk; ++a) {
+      linear[static_cast<std::size_t>(c) * static_cast<std::size_t>(kk) + static_cast<std::size_t>(a)] = coef(a, c);
+    }
+  }
+
+  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(predict_pls_da_cuda)");
+  cudaStream_t stream = nullptr;
+  DeviceBuffer d_t(t_val.data.size());
+  DeviceBuffer d_linear(linear.size());
+  DeviceBuffer d_constants(constants.size());
+  DeviceIntBuffer d_pred(static_cast<std::size_t>(n));
+  check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate(predict_pls_da_cuda)");
+  check_cuda(cudaMemcpyAsync(d_t.data(), t_val.data.data(), t_val.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA PLS-DA T");
+  check_cuda(cudaMemcpyAsync(d_linear.data(), linear.data(), linear.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA PLS-DA linear");
+  check_cuda(cudaMemcpyAsync(d_constants.data(), constants.data(), constants.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA PLS-DA constants");
+  kodama_cuda_lda_score_argmax_row(d_t.data(), d_linear.data(), d_constants.data(), d_pred.data(), n, kk, cnum, stream);
+  check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row PLS-DA");
+  std::vector<int> codes(static_cast<std::size_t>(n), 1);
+  check_cuda(cudaMemcpyAsync(codes.data(), d_pred.data(), codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA PLS-DA labels");
+  check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA PLS-DA predict");
+  cudaStreamDestroy(stream);
+
+  std::vector<int> pred(static_cast<std::size_t>(n), classes.front());
+  for (int i = 0; i < n; ++i) {
+    const int cls = std::max(1, std::min(cnum, codes[static_cast<std::size_t>(i)])) - 1;
+    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
+  }
+  return pred;
+}
+#endif
+
+std::vector<int> predict_pls_lda(
+  const Dense& t_train,
+  const std::vector<int>& y_train,
+  const Dense& t_val,
+  const std::vector<int>& classes,
+  int ncomp
 ) {
   const int cnum = static_cast<int>(classes.size());
   std::map<int, int> cpos;
   for (int i = 0; i < cnum; ++i) cpos[classes[static_cast<std::size_t>(i)]] = i;
-  Dense cent(cnum, t_train.cols);
+  Dense cent(cnum, ncomp);
   std::vector<int> counts(static_cast<std::size_t>(cnum), 0);
   for (int i = 0; i < t_train.rows; ++i) {
-    const int c = cpos[y_train_labels[static_cast<std::size_t>(i)]];
+    const int c = cpos[y_train[static_cast<std::size_t>(i)]];
     counts[static_cast<std::size_t>(c)]++;
-    for (int a = 0; a < t_train.cols; ++a) cent(c, a) += t_train(i, a);
+    for (int a = 0; a < ncomp; ++a) cent(c, a) += t_train(i, a);
   }
   for (int c = 0; c < cnum; ++c) {
     const double inv = counts[static_cast<std::size_t>(c)] > 0 ? 1.0 / counts[static_cast<std::size_t>(c)] : 0.0;
-    for (int a = 0; a < t_train.cols; ++a) cent(c, a) *= inv;
+    for (int a = 0; a < ncomp; ++a) cent(c, a) *= inv;
   }
+
+  Dense pooled(ncomp, ncomp);
+  for (int i = 0; i < t_train.rows; ++i) {
+    const int c = cpos[y_train[static_cast<std::size_t>(i)]];
+    for (int r = 0; r < ncomp; ++r) {
+      const double dr = t_train(i, r) - cent(c, r);
+      for (int col = 0; col < ncomp; ++col) {
+        const double dc = t_train(i, col) - cent(c, col);
+        pooled(r, col) += dr * dc;
+      }
+    }
+  }
+  const double df = static_cast<double>(std::max(1, t_train.rows - cnum));
+  double trace = 0.0;
+  for (int r = 0; r < ncomp; ++r) {
+    for (int col = 0; col < ncomp; ++col) pooled(r, col) /= df;
+    trace += pooled(r, r);
+  }
+  const double ridge = 1e-8 * (std::isfinite(trace) && trace > 0.0 ? trace / std::max(1, ncomp) : 1.0);
+  for (int r = 0; r < ncomp; ++r) pooled(r, r) += ridge;
+
+  Dense rhs(ncomp, cnum);
+  for (int c = 0; c < cnum; ++c) {
+    for (int a = 0; a < ncomp; ++a) rhs(a, c) = cent(c, a);
+  }
+  Dense solved = solve_linear(pooled, rhs);
+
+  Dense linear(cnum, ncomp);
+  std::vector<double> constants(static_cast<std::size_t>(cnum), 0.0);
+  for (int c = 0; c < cnum; ++c) {
+    double dot_mu = 0.0;
+    for (int a = 0; a < ncomp; ++a) {
+      linear(c, a) = solved(a, c);
+      dot_mu += cent(c, a) * linear(c, a);
+    }
+    const double prior = std::max(
+      static_cast<double>(counts[static_cast<std::size_t>(c)]) / std::max(1, t_train.rows),
+      std::numeric_limits<double>::min()
+    );
+    constants[static_cast<std::size_t>(c)] = -0.5 * dot_mu + std::log(prior);
+  }
+
   std::vector<int> pred(static_cast<std::size_t>(t_val.rows), classes.front());
   for (int i = 0; i < t_val.rows; ++i) {
     int best = 0;
-    double best_dist = std::numeric_limits<double>::infinity();
+    double best_score = -std::numeric_limits<double>::infinity();
     for (int c = 0; c < cnum; ++c) {
-      long double d2 = 0.0;
-      for (int a = 0; a < t_val.cols; ++a) {
-        const double d = t_val(i, a) - cent(c, a);
-        d2 += static_cast<long double>(d) * d;
+      long double score = constants[static_cast<std::size_t>(c)];
+      for (int a = 0; a < ncomp; ++a) {
+        score += static_cast<long double>(t_val(i, a)) * linear(c, a);
       }
-      if (d2 < best_dist) {
-        best_dist = static_cast<double>(d2);
+      if (score > best_score) {
+        best_score = static_cast<double>(score);
         best = c;
       }
     }
@@ -586,49 +1026,553 @@ std::vector<int> predict_pls_lda(
   const Dense& t_val,
   const std::vector<int>& classes
 ) {
-  const int cnum = static_cast<int>(classes.size());
-  std::map<int, int> cpos;
-  for (int i = 0; i < cnum; ++i) cpos[classes[static_cast<std::size_t>(i)]] = i;
-  Dense cent(cnum, t_train.cols);
-  std::vector<int> counts(static_cast<std::size_t>(cnum), 0);
-  for (int i = 0; i < t_train.rows; ++i) {
-    const int c = cpos[y_train[static_cast<std::size_t>(i)]];
-    counts[static_cast<std::size_t>(c)]++;
-    for (int a = 0; a < t_train.cols; ++a) cent(c, a) += t_train(i, a);
-  }
-  for (int c = 0; c < cnum; ++c) {
-    const double inv = counts[static_cast<std::size_t>(c)] > 0 ? 1.0 / counts[static_cast<std::size_t>(c)] : 0.0;
-    for (int a = 0; a < t_train.cols; ++a) cent(c, a) *= inv;
-  }
-  std::vector<double> var(static_cast<std::size_t>(t_train.cols), 1e-9);
-  for (int i = 0; i < t_train.rows; ++i) {
-    const int c = cpos[y_train[static_cast<std::size_t>(i)]];
-    for (int a = 0; a < t_train.cols; ++a) {
-      const double d = t_train(i, a) - cent(c, a);
-      var[static_cast<std::size_t>(a)] += d * d;
-    }
-  }
-  for (double& v : var) v /= std::max(1, t_train.rows - cnum);
+  return predict_pls_lda(t_train, y_train, t_val, classes, t_val.cols);
+}
 
-  std::vector<int> pred(static_cast<std::size_t>(t_val.rows), classes.front());
-  for (int i = 0; i < t_val.rows; ++i) {
-    int best = 0;
-    double best_dist = std::numeric_limits<double>::infinity();
-    for (int c = 0; c < cnum; ++c) {
-      long double d2 = 0.0;
-      for (int a = 0; a < t_val.cols; ++a) {
-        const double d = t_val(i, a) - cent(c, a);
-        d2 += static_cast<long double>(d) * d / var[static_cast<std::size_t>(a)];
-      }
-      if (d2 < best_dist) {
-        best_dist = static_cast<double>(d2);
-        best = c;
-      }
-    }
-    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(best)];
+#if defined(KODAMA_ENABLE_CUDA)
+struct CudaLDAModel {
+  Dense linear;
+  std::vector<double> constants;
+};
+
+CudaLDAModel train_pls_lda_cuda(
+  const Dense& t_train,
+  const std::vector<int>& y_train,
+  const std::vector<int>& classes,
+  int gpu_device
+) {
+  if (t_train.rows < 1 || t_train.cols < 1) throw std::invalid_argument("CUDA LDA requires a non-empty score matrix.");
+  if (static_cast<int>(y_train.size()) != t_train.rows) throw std::invalid_argument("CUDA LDA label size mismatch.");
+  const int n = t_train.rows;
+  const int k = t_train.cols;
+  const int cnum = static_cast<int>(classes.size());
+  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(train_pls_lda_cuda)");
+
+  std::map<int, int> cpos;
+  for (int c = 0; c < cnum; ++c) cpos[classes[static_cast<std::size_t>(c)]] = c;
+  std::vector<int> encoded(static_cast<std::size_t>(n), 1);
+  std::vector<double> counts(static_cast<std::size_t>(cnum), 0.0);
+  for (int i = 0; i < n; ++i) {
+    const int cls = cpos.at(y_train[static_cast<std::size_t>(i)]);
+    encoded[static_cast<std::size_t>(i)] = cls + 1;
+    counts[static_cast<std::size_t>(cls)] += 1.0;
+  }
+
+  cudaStream_t stream = nullptr;
+  cublasHandle_t blas = nullptr;
+  cusolverDnHandle_t solver = nullptr;
+  DeviceBuffer d_t(t_train.data.size());
+  DeviceIntBuffer d_labels(encoded.size());
+  DeviceBuffer d_counts(counts.size());
+  DeviceBuffer d_means(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
+  DeviceBuffer d_pooled(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
+  DeviceBuffer d_cov(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
+  DeviceBuffer d_rhs(static_cast<std::size_t>(k) * static_cast<std::size_t>(cnum));
+  DeviceBuffer d_linear(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
+  DeviceBuffer d_constants(static_cast<std::size_t>(cnum));
+  DeviceBuffer d_lambda(1);
+  DeviceIntBuffer d_info(1);
+  double* d_work = nullptr;
+
+  auto cleanup = [&]() {
+    if (d_work != nullptr) cudaFree(d_work);
+    if (solver != nullptr) cusolverDnDestroy(solver);
+    if (blas != nullptr) cublasDestroy(blas);
+    if (stream != nullptr) cudaStreamDestroy(stream);
+  };
+
+  try {
+    check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate(train_pls_lda_cuda)");
+    check_cublas(cublasCreate(&blas), "cublasCreate(train_pls_lda_cuda)");
+    check_cublas(cublasSetStream(blas, stream), "cublasSetStream(train_pls_lda_cuda)");
+    check_cusolver(cusolverDnCreate(&solver), "cusolverDnCreate(train_pls_lda_cuda)");
+    check_cusolver(cusolverDnSetStream(solver, stream), "cusolverDnSetStream(train_pls_lda_cuda)");
+    check_cuda(cudaMemcpyAsync(d_t.data(), t_train.data.data(), t_train.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA T");
+    check_cuda(cudaMemcpyAsync(d_labels.data(), encoded.data(), encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA labels");
+    check_cuda(cudaMemcpyAsync(d_counts.data(), counts.data(), counts.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA counts");
+
+    kodama_cuda_lda_label_sums_row(d_t.data(), d_labels.data(), n, k, cnum, d_means.data(), stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_label_sums_row");
+    kodama_cuda_lda_means_row(d_means.data(), d_counts.data(), k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_row");
+
+    const double one = 1.0;
+    const double zero = 0.0;
+    check_cublas(
+      cublasDgemm(
+        blas,
+        CUBLAS_OP_N,
+        CUBLAS_OP_T,
+        k,
+        k,
+        n,
+        &one,
+        d_t.data(),
+        k,
+        d_t.data(),
+        k,
+        &zero,
+        d_pooled.data(),
+        k
+      ),
+      "cublasDgemm CUDA LDA TtT"
+    );
+    kodama_cuda_lda_pooled_col(d_pooled.data(), d_means.data(), d_counts.data(), n, k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_pooled_col");
+    kodama_cuda_lda_copy_cov(d_pooled.data(), d_cov.data(), k, k, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_copy_cov");
+    kodama_cuda_lda_add_ridge(d_cov.data(), k, 1e-8, d_lambda.data(), stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_add_ridge");
+    kodama_cuda_lda_means_to_rhs(d_means.data(), d_rhs.data(), k, k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_to_rhs");
+
+    int lwork = 0;
+    check_cusolver(cusolverDnDpotrf_bufferSize(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, &lwork), "cusolverDnDpotrf_bufferSize CUDA LDA");
+    check_cuda(cudaMalloc(&d_work, sizeof(double) * static_cast<std::size_t>(std::max(lwork, 1))), "cudaMalloc CUDA LDA work");
+    check_cusolver(cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, d_work, lwork, d_info.data()), "cusolverDnDpotrf CUDA LDA");
+    int info = 0;
+    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA potrf info");
+    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA potrf");
+    if (info != 0) throw std::runtime_error("cusolverDnDpotrf CUDA LDA returned non-zero info.");
+    check_cusolver(cusolverDnDpotrs(solver, CUBLAS_FILL_MODE_LOWER, k, cnum, d_cov.data(), k, d_rhs.data(), k, d_info.data()), "cusolverDnDpotrs CUDA LDA");
+    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA potrs info");
+    kodama_cuda_lda_finalize_linear_row(d_rhs.data(), d_means.data(), d_counts.data(), d_linear.data(), d_constants.data(), n, k, k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_finalize_linear_row");
+    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA solve");
+    if (info != 0) throw std::runtime_error("cusolverDnDpotrs CUDA LDA returned non-zero info.");
+
+    CudaLDAModel model{Dense(cnum, k), std::vector<double>(static_cast<std::size_t>(cnum), 0.0)};
+    check_cuda(cudaMemcpy(model.linear.data.data(), d_linear.data(), model.linear.data.size() * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy CUDA LDA linear");
+    check_cuda(cudaMemcpy(model.constants.data(), d_constants.data(), model.constants.size() * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy CUDA LDA constants");
+    cleanup();
+    return model;
+  } catch (...) {
+    cleanup();
+    throw;
+  }
+}
+
+std::vector<int> predict_pls_lda_cuda(
+  const Dense& t_val,
+  const CudaLDAModel& model,
+  const std::vector<int>& classes,
+  int gpu_device
+) {
+  if (t_val.rows < 1) return {};
+  const int n = t_val.rows;
+  const int k = t_val.cols;
+  const int cnum = static_cast<int>(classes.size());
+  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(predict_pls_lda_cuda)");
+  cudaStream_t stream = nullptr;
+  DeviceBuffer d_t(t_val.data.size());
+  DeviceBuffer d_linear(model.linear.data.size());
+  DeviceBuffer d_constants(model.constants.size());
+  DeviceIntBuffer d_pred(static_cast<std::size_t>(n));
+  check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate(predict_pls_lda_cuda)");
+  check_cuda(cudaMemcpyAsync(d_t.data(), t_val.data.data(), t_val.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict T");
+  check_cuda(cudaMemcpyAsync(d_linear.data(), model.linear.data.data(), model.linear.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict linear");
+  check_cuda(cudaMemcpyAsync(d_constants.data(), model.constants.data(), model.constants.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict constants");
+  kodama_cuda_lda_score_argmax_row(d_t.data(), d_linear.data(), d_constants.data(), d_pred.data(), n, k, cnum, stream);
+  check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row");
+  std::vector<int> codes(static_cast<std::size_t>(n), 1);
+  check_cuda(cudaMemcpyAsync(codes.data(), d_pred.data(), codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA predict labels");
+  check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA predict");
+  cudaStreamDestroy(stream);
+  std::vector<int> pred(static_cast<std::size_t>(n), classes.front());
+  for (int i = 0; i < n; ++i) {
+    const int cls = std::max(1, std::min(cnum, codes[static_cast<std::size_t>(i)])) - 1;
+    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
   }
   return pred;
 }
+
+#endif
+
+// Candidate-kNN classifier ported from fastPLS (GPL-3): it scores class
+// centroids in normalized PLS score space, reranks only the best candidate
+// classes, and reuses prefix dot products across component counts.
+void candidate_insert_top(
+  std::vector<double>& scores,
+  std::vector<int>& index,
+  double value,
+  int cls
+) {
+  const int k = static_cast<int>(scores.size());
+  for (int j = 0; j < k; ++j) {
+    if (value > scores[static_cast<std::size_t>(j)]) {
+      for (int h = k - 1; h > j; --h) {
+        scores[static_cast<std::size_t>(h)] = scores[static_cast<std::size_t>(h - 1)];
+        index[static_cast<std::size_t>(h)] = index[static_cast<std::size_t>(h - 1)];
+      }
+      scores[static_cast<std::size_t>(j)] = value;
+      index[static_cast<std::size_t>(j)] = cls;
+      return;
+    }
+  }
+}
+
+Dense cumulative_norm2(const Dense& x) {
+  Dense out(x.rows, x.cols);
+  for (int i = 0; i < x.rows; ++i) {
+    double acc = 0.0;
+    for (int j = 0; j < x.cols; ++j) {
+      acc += x(i, j) * x(i, j);
+      out(i, j) = acc;
+    }
+  }
+  return out;
+}
+
+double prefix_row_norm(const Dense& norm2, int row, int ncomp) {
+  if (row < 0 || row >= norm2.rows || ncomp < 1 || ncomp > norm2.cols) return 0.0;
+  const double val = norm2(row, ncomp - 1);
+  return std::isfinite(val) && val > 0.0 ? std::sqrt(val) : 0.0;
+}
+
+Dense candidate_prefix_centroids(
+  const Dense& t_train,
+  const Dense& train_norm2,
+  const std::vector<int>& y_codes,
+  int n_classes,
+  int ncomp
+) {
+  Dense cent(n_classes, ncomp);
+  std::vector<double> counts(static_cast<std::size_t>(n_classes), 0.0);
+  for (int i = 0; i < t_train.rows; ++i) {
+    const int cls = y_codes[static_cast<std::size_t>(i)];
+    if (cls < 1 || cls > n_classes) continue;
+    const double nrm = prefix_row_norm(train_norm2, i, ncomp);
+    if (nrm <= 0.0) continue;
+    const int c = cls - 1;
+    counts[static_cast<std::size_t>(c)] += 1.0;
+    for (int d = 0; d < ncomp; ++d) cent(c, d) += t_train(i, d) / nrm;
+  }
+  for (int c = 0; c < n_classes; ++c) {
+    if (counts[static_cast<std::size_t>(c)] > 0.0) {
+      const double inv = 1.0 / counts[static_cast<std::size_t>(c)];
+      for (int d = 0; d < ncomp; ++d) cent(c, d) *= inv;
+    }
+    long double n2 = 0.0;
+    for (int d = 0; d < ncomp; ++d) n2 += static_cast<long double>(cent(c, d)) * cent(c, d);
+    const double nrm = std::sqrt(static_cast<double>(n2));
+    if (std::isfinite(nrm) && nrm > 0.0) {
+      for (int d = 0; d < ncomp; ++d) cent(c, d) /= nrm;
+    }
+  }
+  return cent;
+}
+
+std::vector<int> labels_to_codes(
+  const std::vector<int>& y,
+  const std::vector<int>& classes
+) {
+  std::map<int, int> pos;
+  for (int i = 0; i < static_cast<int>(classes.size()); ++i) {
+    pos[classes[static_cast<std::size_t>(i)]] = i + 1;
+  }
+  std::vector<int> out(y.size(), 0);
+  for (std::size_t i = 0; i < y.size(); ++i) out[i] = pos.at(y[i]);
+  return out;
+}
+
+std::vector<std::vector<int>> predict_pls_cknn_prefix(
+  const Dense& t_train,
+  const std::vector<int>& y_train_labels,
+  const Dense& t_val,
+  const std::vector<int>& classes,
+  const std::vector<int>& components,
+  int top_m_in,
+  int knn_k_in,
+  double tau_in,
+  double alpha_in,
+  int n_threads
+) {
+  if (t_train.cols != t_val.cols) throw std::invalid_argument("PLS-cKNN train/test score dimensions do not match.");
+  if (t_train.rows != static_cast<int>(y_train_labels.size())) throw std::invalid_argument("PLS-cKNN label length mismatch.");
+  if (components.empty()) throw std::invalid_argument("PLS-cKNN requires at least one component.");
+  const int ncomp_total = *std::max_element(components.begin(), components.end());
+  if (ncomp_total < 1 || ncomp_total > t_train.cols || ncomp_total > t_val.cols) {
+    throw std::invalid_argument("PLS-cKNN component count is out of range.");
+  }
+  const int n_classes = static_cast<int>(classes.size());
+  const int top_m = std::max(1, std::min(top_m_in, n_classes));
+  const int knn_k = std::max(1, knn_k_in);
+  const double tau = (std::isfinite(tau_in) && tau_in > 0.0) ? tau_in : 0.2;
+  const double alpha = std::isfinite(alpha_in) ? alpha_in : 0.5;
+  const std::vector<int> y_codes = labels_to_codes(y_train_labels, classes);
+
+  std::vector<std::vector<int>> class_rows(static_cast<std::size_t>(n_classes));
+  for (int i = 0; i < static_cast<int>(y_codes.size()); ++i) {
+    const int cls = y_codes[static_cast<std::size_t>(i)];
+    if (cls >= 1 && cls <= n_classes) class_rows[static_cast<std::size_t>(cls - 1)].push_back(i);
+  }
+
+  const Dense train_norm2 = cumulative_norm2(t_train);
+  const Dense test_norm2 = cumulative_norm2(t_val);
+  std::vector<char> should_score(static_cast<std::size_t>(ncomp_total + 1), 0);
+  std::vector<Dense> centroids_by_comp(static_cast<std::size_t>(ncomp_total + 1));
+  for (int a : components) {
+    should_score[static_cast<std::size_t>(a)] = 1;
+    centroids_by_comp[static_cast<std::size_t>(a)] =
+      candidate_prefix_centroids(t_train, train_norm2, y_codes, n_classes, a);
+  }
+
+  std::vector<std::vector<int>> pred_by_comp(
+    static_cast<std::size_t>(ncomp_total),
+    std::vector<int>(static_cast<std::size_t>(t_val.rows), classes.front())
+  );
+
+  const int workers = std::max(1, std::min(n_threads, t_val.rows));
+  auto worker = [&](int begin, int end) {
+    std::vector<double> row_scores(static_cast<std::size_t>(top_m), -std::numeric_limits<double>::infinity());
+    std::vector<int> row_index(static_cast<std::size_t>(top_m), -1);
+    std::vector<double> rerank_scores(static_cast<std::size_t>(top_m), -std::numeric_limits<double>::infinity());
+    std::vector<int> rerank_index(static_cast<std::size_t>(top_m), -1);
+    std::vector<double> train_dot(static_cast<std::size_t>(t_train.rows), 0.0);
+
+    for (int i = begin; i < end; ++i) {
+      std::fill(train_dot.begin(), train_dot.end(), 0.0);
+      for (int a = 1; a <= ncomp_total; ++a) {
+        const int d = a - 1;
+        const double test_val = t_val(i, d);
+        for (int r = 0; r < t_train.rows; ++r) train_dot[static_cast<std::size_t>(r)] += t_train(r, d) * test_val;
+        if (!should_score[static_cast<std::size_t>(a)]) continue;
+
+        const Dense& cent = centroids_by_comp[static_cast<std::size_t>(a)];
+        std::fill(row_scores.begin(), row_scores.end(), -std::numeric_limits<double>::infinity());
+        std::fill(row_index.begin(), row_index.end(), -1);
+        const double test_norm = prefix_row_norm(test_norm2, i, a);
+        for (int cls = 0; cls < n_classes; ++cls) {
+          double base = 0.0;
+          if (test_norm > 0.0) {
+            for (int j = 0; j < a; ++j) base += t_val(i, j) * cent(cls, j);
+            base /= test_norm;
+          }
+          candidate_insert_top(row_scores, row_index, base, cls + 1);
+        }
+
+        std::fill(rerank_scores.begin(), rerank_scores.end(), -std::numeric_limits<double>::infinity());
+        std::fill(rerank_index.begin(), rerank_index.end(), -1);
+        for (int slot = 0; slot < top_m; ++slot) {
+          const int cls = row_index[static_cast<std::size_t>(slot)];
+          if (cls < 1 || cls > n_classes) continue;
+          const std::vector<int>& rows = class_rows[static_cast<std::size_t>(cls - 1)];
+          double local = -std::numeric_limits<double>::infinity();
+          if (!rows.empty()) {
+            const int use_k = std::max(1, std::min(knn_k, static_cast<int>(rows.size())));
+            std::vector<double> top_vals(static_cast<std::size_t>(use_k), -std::numeric_limits<double>::infinity());
+            std::vector<int> top_dummy(static_cast<std::size_t>(use_k), -1);
+            for (int train_row : rows) {
+              const double train_norm = prefix_row_norm(train_norm2, train_row, a);
+              const double sim = (test_norm > 0.0 && train_norm > 0.0) ?
+                train_dot[static_cast<std::size_t>(train_row)] / (test_norm * train_norm) :
+                0.0;
+              candidate_insert_top(top_vals, top_dummy, sim, 0);
+            }
+            if (!std::isfinite(tau) || tau <= 0.0) {
+              local = 0.0;
+              for (int h = 0; h < use_k; ++h) local += top_vals[static_cast<std::size_t>(h)];
+              local /= static_cast<double>(use_k);
+            } else {
+              const double mx = top_vals[0];
+              if (std::isfinite(mx)) {
+                double acc = 0.0;
+                for (int h = 0; h < use_k; ++h) acc += std::exp((top_vals[static_cast<std::size_t>(h)] - mx) / tau);
+                local = mx + tau * std::log(acc / static_cast<double>(use_k));
+              }
+            }
+          }
+          const double score = local + alpha * row_scores[static_cast<std::size_t>(slot)];
+          candidate_insert_top(rerank_scores, rerank_index, score, cls);
+        }
+        const int best_code = rerank_index[0] > 0 ? rerank_index[0] : row_index[0];
+        const int best_pos = std::max(1, best_code) - 1;
+        pred_by_comp[static_cast<std::size_t>(d)][static_cast<std::size_t>(i)] =
+          classes[static_cast<std::size_t>(std::min(best_pos, n_classes - 1))];
+      }
+    }
+  };
+
+  std::vector<std::thread> threads;
+  threads.reserve(static_cast<std::size_t>(workers - 1));
+  const int chunk = (t_val.rows + workers - 1) / workers;
+  int begin = 0;
+  for (int w = 0; w < workers; ++w) {
+    const int end = std::min(t_val.rows, begin + chunk);
+    if (begin >= end) break;
+    if (w + 1 == workers) {
+      worker(begin, end);
+    } else {
+      threads.emplace_back(worker, begin, end);
+    }
+    begin = end;
+  }
+  for (std::thread& th : threads) th.join();
+  return pred_by_comp;
+}
+
+#if defined(KODAMA_ENABLE_CUDA)
+std::vector<std::vector<int>> predict_pls_cknn_prefix_cuda(
+  const Dense& t_train,
+  const std::vector<int>& y_train_labels,
+  const Dense& t_val,
+  const std::vector<int>& classes,
+  const std::vector<int>& components,
+  int top_m_in,
+  int knn_k_in,
+  double tau_in,
+  double alpha_in,
+  int gpu_device
+) {
+  if (t_train.cols != t_val.cols) throw std::invalid_argument("CUDA PLS-cKNN train/test score dimensions do not match.");
+  if (t_train.rows != static_cast<int>(y_train_labels.size())) throw std::invalid_argument("CUDA PLS-cKNN label length mismatch.");
+  if (components.empty()) throw std::invalid_argument("CUDA PLS-cKNN requires at least one component.");
+  const int max_component = *std::max_element(components.begin(), components.end());
+  if (max_component < 1 || max_component > t_train.cols || max_component > t_val.cols) {
+    throw std::invalid_argument("CUDA PLS-cKNN component count is out of range.");
+  }
+  const int n_classes = static_cast<int>(classes.size());
+  const int top_m = std::max(1, std::min(top_m_in, n_classes));
+  const int knn_k = std::max(1, std::min(knn_k_in, 32));
+  const double tau = (std::isfinite(tau_in) && tau_in > 0.0) ? tau_in : 0.2;
+  const double alpha = std::isfinite(alpha_in) ? alpha_in : 0.5;
+  const std::vector<int> y_codes = labels_to_codes(y_train_labels, classes);
+
+  const Dense train_norm2 = cumulative_norm2(t_train);
+  const Dense test_norm2 = cumulative_norm2(t_val);
+
+  std::vector<std::vector<int>> class_rows(static_cast<std::size_t>(n_classes));
+  for (int i = 0; i < static_cast<int>(y_codes.size()); ++i) {
+    const int cls = y_codes[static_cast<std::size_t>(i)];
+    if (cls >= 1 && cls <= n_classes) class_rows[static_cast<std::size_t>(cls - 1)].push_back(i);
+  }
+  std::vector<int> class_offsets(static_cast<std::size_t>(n_classes + 1), 0);
+  std::vector<int> class_indices;
+  class_indices.reserve(y_codes.size());
+  for (int cls = 0; cls < n_classes; ++cls) {
+    class_offsets[static_cast<std::size_t>(cls)] = static_cast<int>(class_indices.size());
+    class_indices.insert(class_indices.end(), class_rows[static_cast<std::size_t>(cls)].begin(), class_rows[static_cast<std::size_t>(cls)].end());
+  }
+  class_offsets[static_cast<std::size_t>(n_classes)] = static_cast<int>(class_indices.size());
+
+  std::vector<int> ncomp_values = components;
+
+  const std::size_t grid_cols = static_cast<std::size_t>(ncomp_values.size()) * static_cast<std::size_t>(top_m);
+  std::vector<int> candidates(grid_cols * static_cast<std::size_t>(t_val.rows), 0);
+  std::vector<double> candidate_base(grid_cols * static_cast<std::size_t>(t_val.rows), -std::numeric_limits<double>::infinity());
+  std::vector<double> row_scores(static_cast<std::size_t>(top_m), -std::numeric_limits<double>::infinity());
+  std::vector<int> row_index(static_cast<std::size_t>(top_m), -1);
+  for (std::size_t s = 0; s < ncomp_values.size(); ++s) {
+    const int a = ncomp_values[s];
+    const Dense cent = candidate_prefix_centroids(t_train, train_norm2, y_codes, n_classes, a);
+    for (int i = 0; i < t_val.rows; ++i) {
+      std::fill(row_scores.begin(), row_scores.end(), -std::numeric_limits<double>::infinity());
+      std::fill(row_index.begin(), row_index.end(), -1);
+      const double test_norm = prefix_row_norm(test_norm2, i, a);
+      for (int cls = 0; cls < n_classes; ++cls) {
+        double base = 0.0;
+        if (test_norm > 0.0) {
+          for (int d = 0; d < a; ++d) base += t_val(i, d) * cent(cls, d);
+          base /= test_norm;
+        }
+        candidate_insert_top(row_scores, row_index, base, cls + 1);
+      }
+      for (int slot = 0; slot < top_m; ++slot) {
+        const std::size_t col = s * static_cast<std::size_t>(top_m) + static_cast<std::size_t>(slot);
+        const std::size_t offset = col * static_cast<std::size_t>(t_val.rows) + static_cast<std::size_t>(i);
+        candidates[offset] = row_index[static_cast<std::size_t>(slot)];
+        candidate_base[offset] = row_scores[static_cast<std::size_t>(slot)];
+      }
+    }
+  }
+
+  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(predict_pls_cknn_prefix_cuda)");
+  cudaStream_t stream = nullptr;
+  check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate(predict_pls_cknn_prefix_cuda)");
+
+  const std::size_t n_test_values = t_val.data.size();
+  const std::size_t n_train_values = t_train.data.size();
+  const std::size_t n_norm_test = test_norm2.data.size();
+  const std::size_t n_norm_train = train_norm2.data.size();
+  const std::size_t n_grid = candidate_base.size();
+  DeviceBuffer d_test(n_test_values);
+  DeviceBuffer d_train(n_train_values);
+  DeviceBuffer d_test_norm(n_norm_test);
+  DeviceBuffer d_train_norm(n_norm_train);
+  DeviceIntBuffer d_ncomp(ncomp_values.size());
+  DeviceIntBuffer d_offsets(class_offsets.size());
+  DeviceIntBuffer d_indices(class_indices.size());
+  DeviceIntBuffer d_candidates(candidates.size());
+  DeviceBuffer d_base(n_grid);
+  DeviceBuffer d_bias(static_cast<std::size_t>(n_classes));
+  DeviceBuffer d_scores(n_grid);
+  std::vector<double> bias(static_cast<std::size_t>(n_classes), 0.0);
+
+  check_cuda(cudaMemcpyAsync(d_test.data(), t_val.data.data(), n_test_values * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN Ttest");
+  check_cuda(cudaMemcpyAsync(d_train.data(), t_train.data.data(), n_train_values * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN Ttrain");
+  check_cuda(cudaMemcpyAsync(d_test_norm.data(), test_norm2.data.data(), n_norm_test * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN test_norm2");
+  check_cuda(cudaMemcpyAsync(d_train_norm.data(), train_norm2.data.data(), n_norm_train * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN train_norm2");
+  check_cuda(cudaMemcpyAsync(d_ncomp.data(), ncomp_values.data(), ncomp_values.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN ncomp");
+  check_cuda(cudaMemcpyAsync(d_offsets.data(), class_offsets.data(), class_offsets.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN offsets");
+  check_cuda(cudaMemcpyAsync(d_indices.data(), class_indices.data(), class_indices.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN indices");
+  check_cuda(cudaMemcpyAsync(d_candidates.data(), candidates.data(), candidates.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN candidates");
+  check_cuda(cudaMemcpyAsync(d_base.data(), candidate_base.data(), n_grid * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN base");
+  check_cuda(cudaMemcpyAsync(d_bias.data(), bias.data(), bias.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync cKNN bias");
+
+  kodama_cuda_candidate_knn_scores_prefix(
+    d_test.data(),
+    d_train.data(),
+    d_test_norm.data(),
+    d_train_norm.data(),
+    d_ncomp.data(),
+    d_offsets.data(),
+    d_indices.data(),
+    d_candidates.data(),
+    d_base.data(),
+    d_bias.data(),
+    t_val.rows,
+    t_train.rows,
+    t_val.cols,
+    n_classes,
+    static_cast<int>(ncomp_values.size()),
+    top_m,
+    knn_k,
+    tau,
+    alpha,
+    d_scores.data(),
+    stream
+  );
+  check_cuda(cudaGetLastError(), "kodama_cuda_candidate_knn_scores_prefix");
+  std::vector<double> scores(n_grid, -std::numeric_limits<double>::infinity());
+  check_cuda(cudaMemcpyAsync(scores.data(), d_scores.data(), n_grid * sizeof(double), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync cKNN scores");
+  check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize cKNN scores");
+  cudaStreamDestroy(stream);
+
+  std::vector<std::vector<int>> pred_by_comp(
+    static_cast<std::size_t>(max_component),
+    std::vector<int>(static_cast<std::size_t>(t_val.rows), classes.front())
+  );
+  for (std::size_t s = 0; s < ncomp_values.size(); ++s) {
+    const int a = ncomp_values[s];
+    for (int i = 0; i < t_val.rows; ++i) {
+      int best_code = 1;
+      double best_score = -std::numeric_limits<double>::infinity();
+      for (int slot = 0; slot < top_m; ++slot) {
+        const std::size_t col = s * static_cast<std::size_t>(top_m) + static_cast<std::size_t>(slot);
+        const std::size_t offset = col * static_cast<std::size_t>(t_val.rows) + static_cast<std::size_t>(i);
+        if (scores[offset] > best_score) {
+          best_score = scores[offset];
+          best_code = candidates[offset];
+        }
+      }
+      const int best_pos = std::max(1, best_code) - 1;
+      pred_by_comp[static_cast<std::size_t>(a - 1)][static_cast<std::size_t>(i)] =
+        classes[static_cast<std::size_t>(std::min(best_pos, n_classes - 1))];
+    }
+  }
+  return pred_by_comp;
+}
+#endif
 
 }  // namespace
 
@@ -645,57 +1589,100 @@ PLSCVResult run_plscv_cpu(
   if (options.max_components < 1) throw std::invalid_argument("PLSOptions::max_components must be positive.");
   if (options.fixed_components < 0) throw std::invalid_argument("PLSOptions::fixed_components must be non-negative.");
   if (options.fixed_components > options.max_components) throw std::invalid_argument("PLSOptions::fixed_components cannot exceed max_components.");
+  if (options.cknn_k < 1) throw std::invalid_argument("PLSOptions::cknn_k must be positive.");
+  if (options.cknn_top_m < 1) throw std::invalid_argument("PLSOptions::cknn_top_m must be positive.");
 
   detail::Timer timer;
   PLSCVResult result;
   result.true_labels = labels;
-  result.fold_assignments = detail::make_folds(labels, constrain, options.cv);
+  const bool use_fold_cache = !options.cv.stratified;
+  const PLSFoldXCache* fold_cache = use_fold_cache ?
+    &get_pls_fold_x_cache(x, labels, constrain, options) : nullptr;
+  result.fold_assignments = fold_cache != nullptr ?
+    fold_cache->fold_assignments : detail::make_folds(labels, constrain, options.cv);
   result.accuracy_by_components.assign(static_cast<std::size_t>(options.max_components), 0.0);
   std::vector<std::vector<int>> pred_by_comp(
     static_cast<std::size_t>(options.max_components),
     std::vector<int>(labels.size(), labels.empty() ? 0 : labels.front())
   );
   const std::vector<int> classes = detail::unique_labels(labels);
-  const std::vector<int> fold_ids = detail::sorted_unique_folds(result.fold_assignments);
+  const std::vector<int> fold_ids = fold_cache != nullptr ?
+    fold_cache->fold_ids : detail::sorted_unique_folds(result.fold_assignments);
+  int evaluated_component = options.fixed_components > 0 ? options.fixed_components : options.max_components;
 
-  for (int fold : fold_ids) {
-    const std::vector<int> validation = detail::indices_where_fold(result.fold_assignments, fold, true);
-    const std::vector<int> train = detail::indices_where_fold(result.fold_assignments, fold, false);
-    std::vector<double> x_mean;
-    std::vector<double> x_scale;
-    train_center_scale(x, train, options.center, options.scale, x_mean, x_scale);
-    Dense x_train = subset_scale(x, train, x_mean, x_scale);
-    Dense x_val = subset_scale(x, validation, x_mean, x_scale);
+  for (std::size_t fold_pos = 0; fold_pos < fold_ids.size(); ++fold_pos) {
+    const int fold = fold_ids[fold_pos];
+    std::vector<int> validation_storage;
+    std::vector<int> train_storage;
+    Dense x_train_storage;
+    Dense x_val_storage;
+    const std::vector<int>* validation = nullptr;
+    const std::vector<int>* train = nullptr;
+    const Dense* x_train = nullptr;
+    const Dense* x_val = nullptr;
+    if (fold_cache != nullptr) {
+      const PLSFoldData& fold_data = fold_cache->folds_data[fold_pos];
+      validation = &fold_data.validation;
+      train = &fold_data.train;
+      x_train = &fold_data.x_train;
+      x_val = &fold_data.x_val;
+    } else {
+      validation_storage = detail::indices_where_fold(result.fold_assignments, fold, true);
+      train_storage = detail::indices_where_fold(result.fold_assignments, fold, false);
+      std::vector<double> x_mean;
+      std::vector<double> x_scale;
+      train_center_scale(x, train_storage, options.center, options.scale, x_mean, x_scale);
+      x_train_storage = subset_scale(x, train_storage, x_mean, x_scale);
+      x_val_storage = subset_scale(x, validation_storage, x_mean, x_scale);
+      validation = &validation_storage;
+      train = &train_storage;
+      x_train = &x_train_storage;
+      x_val = &x_val_storage;
+    }
     std::vector<double> y_mean;
-    Dense y_train = one_hot_centered(labels, train, classes, y_mean);
-    PLSFit fit = fit_pls_components(x_train, y_train, options.max_components);
-    std::vector<int> y_train_labels(train.size(), 0);
-    for (std::size_t i = 0; i < train.size(); ++i) y_train_labels[i] = labels[static_cast<std::size_t>(train[i])];
+    Dense y_train = one_hot_centered(labels, *train, classes, y_mean);
+    std::vector<int> y_train_labels(train->size(), 0);
+    for (std::size_t i = 0; i < train->size(); ++i) y_train_labels[i] = labels[static_cast<std::size_t>((*train)[i])];
+    PLSFit fit = fit_pls_components(*x_train, y_train, options.max_components);
+    const std::vector<int> eval_components = components_to_evaluate(options, fit.weights.cols);
+    evaluated_component = std::min(evaluated_component, eval_components.front());
 
-    for (int a = 1; a <= fit.weights.cols; ++a) {
-      Dense t_train = first_columns(fit.train_scores, a);
-      Dense t_val = transform_pls_scores(x_val, fit, a);
-      std::vector<int> fold_pred = mode == PLSMode::PLS_LDA ?
-        predict_pls_lda(t_train, y_train_labels, t_val, classes) :
-        predict_pls_da(t_train, y_train_labels, t_val, classes);
-      for (std::size_t i = 0; i < validation.size(); ++i) {
-        pred_by_comp[static_cast<std::size_t>(a - 1)][static_cast<std::size_t>(validation[i])] = fold_pred[i];
+    if (mode == PLSMode::PLS_CKNN) {
+      Dense t_val_full = transform_pls_scores(*x_val, fit, fit.weights.cols);
+      std::vector<std::vector<int>> fold_pred_by_comp = predict_pls_cknn_prefix(
+        fit.train_scores,
+        y_train_labels,
+        t_val_full,
+        classes,
+        eval_components,
+        options.cknn_top_m,
+        options.cknn_k,
+        options.cknn_tau,
+        options.cknn_alpha,
+        options.n_threads
+      );
+      for (int a : eval_components) {
+        const std::vector<int>& fold_pred = fold_pred_by_comp[static_cast<std::size_t>(a - 1)];
+        for (std::size_t i = 0; i < validation->size(); ++i) {
+          pred_by_comp[static_cast<std::size_t>(a - 1)][static_cast<std::size_t>((*validation)[i])] = fold_pred[i];
+        }
+      }
+    } else {
+      Dense t_val_full = transform_pls_scores(*x_val, fit, fit.weights.cols);
+      for (int a : eval_components) {
+        std::vector<int> fold_pred = mode == PLSMode::PLS_LDA ?
+          predict_pls_lda(fit.train_scores, y_train_labels, t_val_full, classes, a) :
+          predict_pls_da_labels(fit.train_scores, y_train_labels, t_val_full, classes, y_mean, a);
+        for (std::size_t i = 0; i < validation->size(); ++i) {
+          pred_by_comp[static_cast<std::size_t>(a - 1)][static_cast<std::size_t>((*validation)[i])] = fold_pred[i];
+        }
       }
     }
   }
 
-  int best_comp = 1;
-  double best_acc = -1.0;
-  for (int a = 1; a <= options.max_components; ++a) {
-    result.accuracy_by_components[static_cast<std::size_t>(a - 1)] =
-      detail::accuracy(labels, pred_by_comp[static_cast<std::size_t>(a - 1)]);
-    if (result.accuracy_by_components[static_cast<std::size_t>(a - 1)] > best_acc) {
-      best_acc = result.accuracy_by_components[static_cast<std::size_t>(a - 1)];
-      best_comp = a;
-    }
-  }
-  if (options.fixed_components > 0) best_comp = options.fixed_components;
-
+  const int best_comp = std::min(evaluated_component, static_cast<int>(pred_by_comp.size()));
+  result.accuracy_by_components[static_cast<std::size_t>(best_comp - 1)] =
+    detail::accuracy(labels, pred_by_comp[static_cast<std::size_t>(best_comp - 1)]);
   result.selected_components = best_comp;
   result.predicted_labels = pred_by_comp[static_cast<std::size_t>(best_comp - 1)];
   result.global_accuracy = detail::accuracy(labels, result.predicted_labels);
@@ -717,6 +1704,10 @@ PLSCVResult run_plscv_cpu(
   result.parameters.max_components = options.max_components;
   result.parameters.selected_components = best_comp;
   result.parameters.fixed_components = options.fixed_components;
+  result.parameters.cknn_k = options.cknn_k;
+  result.parameters.cknn_top_m = options.cknn_top_m;
+  result.parameters.cknn_tau = options.cknn_tau;
+  result.parameters.cknn_alpha = options.cknn_alpha;
   result.parameters.center = options.center;
   result.parameters.scale = options.scale;
   result.parameters.gpu_device = options.gpu_device;
@@ -736,58 +1727,105 @@ PLSCVResult run_plscv_cuda(
   if (options.max_components < 1) throw std::invalid_argument("PLSOptions::max_components must be positive.");
   if (options.fixed_components < 0) throw std::invalid_argument("PLSOptions::fixed_components must be non-negative.");
   if (options.fixed_components > options.max_components) throw std::invalid_argument("PLSOptions::fixed_components cannot exceed max_components.");
+  if (options.cknn_k < 1) throw std::invalid_argument("PLSOptions::cknn_k must be positive.");
+  if (options.cknn_top_m < 1) throw std::invalid_argument("PLSOptions::cknn_top_m must be positive.");
 
   detail::Timer timer;
   check_cuda(cudaSetDevice(options.gpu_device), "cudaSetDevice(run_plscv_cuda)");
   PLSCVResult result;
   result.true_labels = labels;
-  result.fold_assignments = detail::make_folds(labels, constrain, options.cv);
+  const bool use_fold_cache = !options.cv.stratified;
+  const PLSFoldXCache* fold_cache = use_fold_cache ?
+    &get_pls_fold_x_cache(x, labels, constrain, options) : nullptr;
+  result.fold_assignments = fold_cache != nullptr ?
+    fold_cache->fold_assignments : detail::make_folds(labels, constrain, options.cv);
   result.accuracy_by_components.assign(static_cast<std::size_t>(options.max_components), 0.0);
   std::vector<std::vector<int>> pred_by_comp(
     static_cast<std::size_t>(options.max_components),
     std::vector<int>(labels.size(), labels.empty() ? 0 : labels.front())
   );
   const std::vector<int> classes = detail::unique_labels(labels);
-  const std::vector<int> fold_ids = detail::sorted_unique_folds(result.fold_assignments);
+  const std::vector<int> fold_ids = fold_cache != nullptr ?
+    fold_cache->fold_ids : detail::sorted_unique_folds(result.fold_assignments);
+  int evaluated_component = options.fixed_components > 0 ? options.fixed_components : options.max_components;
 
-  for (int fold : fold_ids) {
-    const std::vector<int> validation = detail::indices_where_fold(result.fold_assignments, fold, true);
-    const std::vector<int> train = detail::indices_where_fold(result.fold_assignments, fold, false);
-    std::vector<double> x_mean;
-    std::vector<double> x_scale;
-    train_center_scale(x, train, options.center, options.scale, x_mean, x_scale);
-    Dense x_train = subset_scale(x, train, x_mean, x_scale);
-    Dense x_val = subset_scale(x, validation, x_mean, x_scale);
+  for (std::size_t fold_pos = 0; fold_pos < fold_ids.size(); ++fold_pos) {
+    const int fold = fold_ids[fold_pos];
+    std::vector<int> validation_storage;
+    std::vector<int> train_storage;
+    Dense x_train_storage;
+    Dense x_val_storage;
+    const std::vector<int>* validation = nullptr;
+    const std::vector<int>* train = nullptr;
+    const Dense* x_train = nullptr;
+    const Dense* x_val = nullptr;
+    if (fold_cache != nullptr) {
+      const PLSFoldData& fold_data = fold_cache->folds_data[fold_pos];
+      validation = &fold_data.validation;
+      train = &fold_data.train;
+      x_train = &fold_data.x_train;
+      x_val = &fold_data.x_val;
+    } else {
+      validation_storage = detail::indices_where_fold(result.fold_assignments, fold, true);
+      train_storage = detail::indices_where_fold(result.fold_assignments, fold, false);
+      std::vector<double> x_mean;
+      std::vector<double> x_scale;
+      train_center_scale(x, train_storage, options.center, options.scale, x_mean, x_scale);
+      x_train_storage = subset_scale(x, train_storage, x_mean, x_scale);
+      x_val_storage = subset_scale(x, validation_storage, x_mean, x_scale);
+      validation = &validation_storage;
+      train = &train_storage;
+      x_train = &x_train_storage;
+      x_val = &x_val_storage;
+    }
     std::vector<double> y_mean;
-    Dense y_train = one_hot_centered(labels, train, classes, y_mean);
-    PLSFit fit = fit_pls_components_cuda(x_train, y_train, options.max_components, options.gpu_device);
-    std::vector<int> y_train_labels(train.size(), 0);
-    for (std::size_t i = 0; i < train.size(); ++i) y_train_labels[i] = labels[static_cast<std::size_t>(train[i])];
+    Dense y_train = one_hot_centered(labels, *train, classes, y_mean);
+    PLSFit fit = fit_pls_components_cuda(*x_train, y_train, options.max_components, options.gpu_device);
+    std::vector<int> y_train_labels(train->size(), 0);
+    for (std::size_t i = 0; i < train->size(); ++i) y_train_labels[i] = labels[static_cast<std::size_t>((*train)[i])];
+    const std::vector<int> eval_components = components_to_evaluate(options, fit.weights.cols);
+    evaluated_component = std::min(evaluated_component, eval_components.front());
 
-    for (int a = 1; a <= fit.weights.cols; ++a) {
-      Dense t_train = first_columns(fit.train_scores, a);
-      Dense t_val = transform_pls_scores_cuda(x_val, fit, a, options.gpu_device);
-      std::vector<int> fold_pred = mode == PLSMode::PLS_LDA ?
-        predict_pls_lda(t_train, y_train_labels, t_val, classes) :
-        predict_pls_da(t_train, y_train_labels, t_val, classes);
-      for (std::size_t i = 0; i < validation.size(); ++i) {
-        pred_by_comp[static_cast<std::size_t>(a - 1)][static_cast<std::size_t>(validation[i])] = fold_pred[i];
+    if (mode == PLSMode::PLS_CKNN) {
+      Dense t_val_full = transform_pls_scores_cuda(*x_val, fit, fit.weights.cols, options.gpu_device);
+      std::vector<std::vector<int>> fold_pred_by_comp = predict_pls_cknn_prefix_cuda(
+        fit.train_scores,
+        y_train_labels,
+        t_val_full,
+        classes,
+        eval_components,
+        options.cknn_top_m,
+        options.cknn_k,
+        options.cknn_tau,
+        options.cknn_alpha,
+        options.gpu_device
+      );
+      for (int a : eval_components) {
+        const std::vector<int>& fold_pred = fold_pred_by_comp[static_cast<std::size_t>(a - 1)];
+        for (std::size_t i = 0; i < validation->size(); ++i) {
+          pred_by_comp[static_cast<std::size_t>(a - 1)][static_cast<std::size_t>((*validation)[i])] = fold_pred[i];
+        }
+      }
+    } else {
+      Dense t_val_full = transform_pls_scores_cuda(*x_val, fit, fit.weights.cols, options.gpu_device);
+      for (int a : eval_components) {
+        std::vector<int> fold_pred;
+        if (mode == PLSMode::PLS_LDA) {
+          CudaLDAModel lda = train_pls_lda_cuda(fit.train_scores, y_train_labels, classes, options.gpu_device);
+          fold_pred = predict_pls_lda_cuda(t_val_full, lda, classes, options.gpu_device);
+        } else {
+          fold_pred = predict_pls_da_cuda(fit.train_scores, y_train_labels, t_val_full, classes, y_mean, options.gpu_device);
+        }
+        for (std::size_t i = 0; i < validation->size(); ++i) {
+          pred_by_comp[static_cast<std::size_t>(a - 1)][static_cast<std::size_t>((*validation)[i])] = fold_pred[i];
+        }
       }
     }
   }
 
-  int best_comp = 1;
-  double best_acc = -1.0;
-  for (int a = 1; a <= options.max_components; ++a) {
-    result.accuracy_by_components[static_cast<std::size_t>(a - 1)] =
-      detail::accuracy(labels, pred_by_comp[static_cast<std::size_t>(a - 1)]);
-    if (result.accuracy_by_components[static_cast<std::size_t>(a - 1)] > best_acc) {
-      best_acc = result.accuracy_by_components[static_cast<std::size_t>(a - 1)];
-      best_comp = a;
-    }
-  }
-  if (options.fixed_components > 0) best_comp = options.fixed_components;
-
+  const int best_comp = std::min(evaluated_component, static_cast<int>(pred_by_comp.size()));
+  result.accuracy_by_components[static_cast<std::size_t>(best_comp - 1)] =
+    detail::accuracy(labels, pred_by_comp[static_cast<std::size_t>(best_comp - 1)]);
   result.selected_components = best_comp;
   result.predicted_labels = pred_by_comp[static_cast<std::size_t>(best_comp - 1)];
   result.global_accuracy = detail::accuracy(labels, result.predicted_labels);
@@ -809,6 +1847,10 @@ PLSCVResult run_plscv_cuda(
   result.parameters.max_components = options.max_components;
   result.parameters.selected_components = best_comp;
   result.parameters.fixed_components = options.fixed_components;
+  result.parameters.cknn_k = options.cknn_k;
+  result.parameters.cknn_top_m = options.cknn_top_m;
+  result.parameters.cknn_tau = options.cknn_tau;
+  result.parameters.cknn_alpha = options.cknn_alpha;
   result.parameters.center = options.center;
   result.parameters.scale = options.scale;
   result.parameters.gpu_device = options.gpu_device;
@@ -829,12 +1871,21 @@ PLSCVResult PLSLDACV(MatrixView x, const std::vector<int>& labels, const std::ve
   return PLSLDACV_CPU(x, labels, constrain, options);
 }
 
+PLSCVResult PLSCKNNCV(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+  if (options.backend == Backend::CUDA) return PLSCKNNCV_CUDA(x, labels, constrain, options);
+  return PLSCKNNCV_CPU(x, labels, constrain, options);
+}
+
 PLSCVResult PLSDACV_CPU(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
   return run_plscv_cpu(x, labels, constrain, options, PLSMode::PLS_DA);
 }
 
 PLSCVResult PLSLDACV_CPU(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
   return run_plscv_cpu(x, labels, constrain, options, PLSMode::PLS_LDA);
+}
+
+PLSCVResult PLSCKNNCV_CPU(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+  return run_plscv_cpu(x, labels, constrain, options, PLSMode::PLS_CKNN);
 }
 
 PLSCVResult PLSDACV_CUDA(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
@@ -863,6 +1914,104 @@ PLSCVResult PLSLDACV_CUDA(MatrixView x, const std::vector<int>& labels, const st
   (void)options;
   throw std::runtime_error("PLSLDACV_CUDA requires a CUDA/cuBLAS build.");
 #endif
+}
+
+PLSCVResult PLSCKNNCV_CUDA(MatrixView x, const std::vector<int>& labels, const std::vector<int>& constrain, const PLSOptions& options) {
+#if defined(KODAMA_ENABLE_CUDA)
+  PLSOptions cuda_options = options;
+  cuda_options.backend = Backend::CUDA;
+  return run_plscv_cuda(x, labels, constrain, cuda_options, PLSMode::PLS_CKNN);
+#else
+  (void)x;
+  (void)labels;
+  (void)constrain;
+  (void)options;
+  throw std::runtime_error("PLSCKNNCV_CUDA requires a CUDA/cuBLAS build.");
+#endif
+}
+
+std::vector<int> PLSLDAPredict_CPU(
+  MatrixView train,
+  const std::vector<int>& labels,
+  MatrixView test,
+  const PLSOptions& options
+) {
+  if (train.data == nullptr || test.data == nullptr) throw std::invalid_argument("PLSLDAPredict input matrix pointer is null.");
+  if (train.rows != labels.size()) throw std::invalid_argument("PLSLDAPredict labels size must match training rows.");
+  if (train.cols != test.cols) throw std::invalid_argument("PLSLDAPredict train/test column mismatch.");
+  if (train.rows == 0 || test.rows == 0 || train.cols == 0) return {};
+  const std::vector<int> classes = detail::unique_labels(labels);
+  if (classes.empty()) return {};
+  if (classes.size() == 1) return std::vector<int>(test.rows, classes.front());
+
+  std::vector<int> train_rows(train.rows);
+  std::iota(train_rows.begin(), train_rows.end(), 0);
+  std::vector<int> test_rows(test.rows);
+  std::iota(test_rows.begin(), test_rows.end(), 0);
+  std::vector<double> mean;
+  std::vector<double> scale;
+  train_center_scale(train, train_rows, options.center, options.scale, mean, scale);
+  Dense x_train = subset_scale(train, train_rows, mean, scale);
+  Dense x_test = subset_scale(test, test_rows, mean, scale);
+  std::vector<double> y_mean;
+  Dense y_train = one_hot_centered(labels, train_rows, classes, y_mean);
+  const int requested = options.fixed_components > 0 ? options.fixed_components : options.max_components;
+  const int ncomp = std::max(1, std::min({requested, x_train.cols, std::max(1, x_train.rows - 1)}));
+  PLSFit fit = fit_pls_components(x_train, y_train, ncomp);
+  fit.train_scores = transform_pls_scores(x_train, fit, fit.weights.cols);
+  Dense t_test = transform_pls_scores(x_test, fit, fit.weights.cols);
+  return predict_pls_lda(fit.train_scores, labels, t_test, classes, fit.weights.cols);
+}
+
+std::vector<int> PLSLDAPredict_CUDA(
+  MatrixView train,
+  const std::vector<int>& labels,
+  MatrixView test,
+  const PLSOptions& options
+) {
+#if defined(KODAMA_ENABLE_CUDA)
+  if (train.data == nullptr || test.data == nullptr) throw std::invalid_argument("PLSLDAPredict input matrix pointer is null.");
+  if (train.rows != labels.size()) throw std::invalid_argument("PLSLDAPredict labels size must match training rows.");
+  if (train.cols != test.cols) throw std::invalid_argument("PLSLDAPredict train/test column mismatch.");
+  if (train.rows == 0 || test.rows == 0 || train.cols == 0) return {};
+  const std::vector<int> classes = detail::unique_labels(labels);
+  if (classes.empty()) return {};
+  if (classes.size() == 1) return std::vector<int>(test.rows, classes.front());
+
+  std::vector<int> train_rows(train.rows);
+  std::iota(train_rows.begin(), train_rows.end(), 0);
+  std::vector<int> test_rows(test.rows);
+  std::iota(test_rows.begin(), test_rows.end(), 0);
+  std::vector<double> mean;
+  std::vector<double> scale;
+  train_center_scale(train, train_rows, options.center, options.scale, mean, scale);
+  Dense x_train = subset_scale(train, train_rows, mean, scale);
+  Dense x_test = subset_scale(test, test_rows, mean, scale);
+  std::vector<double> y_mean;
+  Dense y_train = one_hot_centered(labels, train_rows, classes, y_mean);
+  const int requested = options.fixed_components > 0 ? options.fixed_components : options.max_components;
+  const int ncomp = std::max(1, std::min({requested, x_train.cols, std::max(1, x_train.rows - 1)}));
+  PLSFit fit = fit_pls_components_cuda(x_train, y_train, ncomp, options.gpu_device);
+  Dense t_test = transform_pls_scores_cuda(x_test, fit, fit.weights.cols, options.gpu_device);
+  CudaLDAModel lda = train_pls_lda_cuda(fit.train_scores, labels, classes, options.gpu_device);
+  return predict_pls_lda_cuda(t_test, lda, classes, options.gpu_device);
+#else
+  (void)train;
+  (void)labels;
+  (void)test;
+  (void)options;
+  throw std::runtime_error("PLSLDAPredict_CUDA requires a CUDA/cuBLAS build.");
+#endif
+}
+
+std::vector<int> PLSLDAPredict(
+  MatrixView train,
+  const std::vector<int>& labels,
+  MatrixView test,
+  const PLSOptions& options
+) {
+  if (options.backend == Backend::CUDA) return PLSLDAPredict_CUDA(train, labels, test, options);
+  return PLSLDAPredict_CPU(train, labels, test, options);
 }
 
 }  // namespace kodama

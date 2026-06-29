@@ -1,11 +1,17 @@
 build/
-cmake-build-*/
+build-*/
+results/
+
 *.o
 *.a
 *.so
 *.dylib
 *.dll
 *.exe
-.DS_Store
-compile_commands.json
 
+.DS_Store
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/

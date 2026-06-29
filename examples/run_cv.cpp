@@ -10,7 +10,7 @@ int main() {
   const int classes = 3;
   const int p = 6;
   const int n = n_per_class * classes;
-  std::vector<double> x(static_cast<std::size_t>(n * p));
+  std::vector<float> x(static_cast<std::size_t>(n * p));
   std::vector<int> y(static_cast<std::size_t>(n));
   std::vector<int> constrain(static_cast<std::size_t>(n));
 
@@ -23,7 +23,7 @@ int main() {
       constrain[static_cast<std::size_t>(row)] = row / 2;  // keep paired replicates in the same CV fold
       for (int j = 0; j < p; ++j) {
         const double signal = (j == c || j == c + 3) ? 2.5 : -0.5;
-        x[static_cast<std::size_t>(row * p + j)] = signal + noise(rng);
+        x[static_cast<std::size_t>(row * p + j)] = static_cast<float>(signal + noise(rng));
       }
     }
   }

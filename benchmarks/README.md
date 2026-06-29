@@ -16,11 +16,14 @@ the C++ API.
 This directory includes two helper files for command-line benchmarking:
 
 - `export_rdata_dataset_to_bin.R`: exports an RData file containing `$data` and
-  `$labels` to row-major double and int32 label binaries.
+  `$labels` to row-major float64, row-major float32, and int32 label binaries.
 - `run_pls50_all_benchmark_datasets.sh`: builds the CUDA target, exports each
   benchmark dataset, runs `KNNCV`, `PLSDACV`, and `PLSLDACV` with
   `PLS_MAX_COMPONENTS=50`, and writes one CSV per dataset plus a combined
-  summary.
+  summary. `PLS_MAX_COMPONENTS` is the requested component count; the benchmark
+  does not perform an internal best-component search. The benchmark uses the
+  float32 matrix by default; set `KODAMA_INPUT_DTYPE=float64` to run from the
+  double matrix instead.
 
 On chiamaka, run:
 
@@ -29,12 +32,24 @@ cd /mnt/sata_ssd/kodama-cpp
 bash benchmarks/run_pls50_all_benchmark_datasets.sh
 ```
 
+For a fast float32 end-to-end smoke test, including the CUDA paths when
+available, run:
+
+```bash
+cd /mnt/sata_ssd/kodama-cpp
+ENV_DIR=/home/chiamaka/.fastEmbedR/micromamba/envs/fastembedr-faissgpu-cuvs \
+KODAMA_BUILD_DIR=/mnt/sata_ssd/kodama-cpp/build-cuda \
+KODAMA_ENABLE_CUDA=ON \
+  bash benchmarks/run_float32_smoke.sh
+```
+
 Default output:
 
 ```text
 /mnt/sata_ssd/kodama-cpp-benchmarks/pls50_all_datasets/
   bin/
     <dataset>_x_double_rowmajor.bin
+    <dataset>_x_float32_rowmajor.bin
     <dataset>_labels_int32.bin
     <dataset>_metadata.csv
     <dataset>_label_map.csv
@@ -74,8 +89,8 @@ constraint policy
 k for KNNCV
 metric for KNNCV
 index type for KNNCV
-max components for PLSDACV / PLSLDACV
-selected components for PLSDACV / PLSLDACV
+requested components for PLSDACV / PLSLDACV
+evaluated components for PLSDACV / PLSLDACV
 global accuracy
 fold accuracy
 confusion matrix

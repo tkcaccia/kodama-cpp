@@ -30,6 +30,7 @@ const char* to_string(DistanceMetric metric) {
   switch (metric) {
     case DistanceMetric::Cosine: return "cosine";
     case DistanceMetric::InnerProduct: return "inner_product";
+    case DistanceMetric::Euclidean: return "euclidean";
   }
   return "unknown";
 }
@@ -37,6 +38,7 @@ const char* to_string(DistanceMetric metric) {
 const char* to_string(KNNIndexType index_type) {
   switch (index_type) {
     case KNNIndexType::FaissIVFFlat: return "faiss_ivf_flat";
+    case KNNIndexType::FaissHNSWFlat: return "faiss_hnsw_flat";
     case KNNIndexType::CuvsIVFFlat: return "cuvs_ivf_flat";
   }
   return "unknown";
@@ -46,6 +48,15 @@ const char* to_string(PLSMode mode) {
   switch (mode) {
     case PLSMode::PLS_DA: return "pls_da";
     case PLSMode::PLS_LDA: return "pls_lda";
+    case PLSMode::PLS_CKNN: return "pls_cknn";
+  }
+  return "unknown";
+}
+
+const char* to_string(CoreClassifier classifier) {
+  switch (classifier) {
+    case CoreClassifier::PLS_LDA: return "pls_lda";
+    case CoreClassifier::KNN: return "knn";
   }
   return "unknown";
 }
@@ -85,15 +96,37 @@ std::vector<int> make_folds(
     throw std::invalid_argument("Number of folds must be at least 2.");
   }
   const int n = static_cast<int>(labels.size());
-  std::vector<int> group_id = constrain;
-  if (group_id.empty()) {
-    group_id.resize(static_cast<std::size_t>(n));
-    std::iota(group_id.begin(), group_id.end(), 0);
-  }
-
-  std::map<int, std::vector<int>> members;
-  for (int i = 0; i < n; ++i) {
-    members[group_id[static_cast<std::size_t>(i)]].push_back(i);
+  std::mt19937_64 rng(options.seed);
+  if (constrain.empty()) {
+    std::vector<int> folds(static_cast<std::size_t>(n), 0);
+    if (options.stratified) {
+      std::map<int, std::vector<int>> by_label;
+      for (int i = 0; i < n; ++i) {
+        by_label[labels[static_cast<std::size_t>(i)]].push_back(i);
+      }
+      std::vector<int> fold_load(static_cast<std::size_t>(options.folds), 0);
+      for (auto& kv : by_label) {
+        auto& ids = kv.second;
+        std::shuffle(ids.begin(), ids.end(), rng);
+        std::fill(fold_load.begin(), fold_load.end(), 0);
+        for (int idx : ids) {
+          const int fold = static_cast<int>(
+            std::min_element(fold_load.begin(), fold_load.end()) - fold_load.begin()
+          );
+          folds[static_cast<std::size_t>(idx)] = fold;
+          fold_load[static_cast<std::size_t>(fold)] += 1;
+        }
+      }
+    } else {
+      std::vector<int> order(static_cast<std::size_t>(n));
+      std::iota(order.begin(), order.end(), 0);
+      std::shuffle(order.begin(), order.end(), rng);
+      for (std::size_t i = 0; i < order.size(); ++i) {
+        folds[static_cast<std::size_t>(order[i])] =
+          static_cast<int>(i % static_cast<std::size_t>(options.folds));
+      }
+    }
+    return folds;
   }
 
   struct Group {
@@ -102,6 +135,11 @@ std::vector<int> make_folds(
     int size = 0;
   };
   std::vector<Group> groups;
+  std::map<int, std::vector<int>> members;
+  for (int i = 0; i < n; ++i) {
+    members[constrain[static_cast<std::size_t>(i)]].push_back(i);
+  }
+
   groups.reserve(members.size());
   for (const auto& kv : members) {
     std::map<int, int> counts;
@@ -117,9 +155,9 @@ std::vector<int> make_folds(
     groups.push_back(Group{kv.first, best_label, static_cast<int>(kv.second.size())});
   }
 
-  std::mt19937_64 rng(options.seed);
   std::vector<int> group_fold(groups.size(), 0);
   std::unordered_map<int, std::size_t> group_pos;
+  group_pos.reserve(groups.size());
   for (std::size_t i = 0; i < groups.size(); ++i) group_pos[groups[i].id] = i;
 
   if (options.stratified) {
@@ -127,10 +165,11 @@ std::vector<int> make_folds(
     for (std::size_t i = 0; i < groups.size(); ++i) {
       by_label[groups[i].label].push_back(i);
     }
+    std::vector<int> fold_load(static_cast<std::size_t>(options.folds), 0);
     for (auto& kv : by_label) {
       auto& ids = kv.second;
       std::shuffle(ids.begin(), ids.end(), rng);
-      std::vector<int> fold_load(static_cast<std::size_t>(options.folds), 0);
+      std::fill(fold_load.begin(), fold_load.end(), 0);
       for (std::size_t pos = 0; pos < ids.size(); ++pos) {
         const int fold = static_cast<int>(
           std::min_element(fold_load.begin(), fold_load.end()) - fold_load.begin()

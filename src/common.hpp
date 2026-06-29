@@ -55,4 +55,3 @@ std::vector<int> indices_where_fold(const std::vector<int>& folds, int fold, boo
 std::vector<int> sorted_unique_folds(const std::vector<int>& folds);
 
 }  // namespace kodama::detail
-
