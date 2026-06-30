@@ -45,6 +45,15 @@ silhouette_sample <- function(y, labels, n.sample = 5000L, seed = 11L) {
   mean(cluster::silhouette(as.integer(as.factor(labels[idx])), dist(y[idx, , drop = FALSE]))[, 3])
 }
 
+pairwise_label_ari <- function(res, n.pairs = 400L, seed = 7L) {
+  m <- nrow(res)
+  if (m < 2L) return(NA_real_)
+  set.seed(seed)
+  pair_count <- min(as.integer(n.pairs), as.integer(m * (m - 1L) / 2L))
+  pairs <- t(replicate(pair_count, sample.int(m, 2L)))
+  apply(pairs, 1L, function(ii) ari(res[ii[1L], ], res[ii[2L], ]))
+}
+
 cluster_compactness <- function(y, labels, dataset, variant) {
   labels <- as.factor(labels)
   global_radius <- sqrt(rowSums((y - matrix(colMeans(y), nrow(y), 2L, byrow = TRUE))^2))
@@ -174,6 +183,7 @@ run_case <- function(dataset, variant) {
   classes <- apply(kk$res, 1L, function(z) length(unique(z[z != 0L])))
   largest <- apply(kk$res, 1L, function(z) max(tabulate(as.integer(as.factor(z)))) / length(z))
   aris <- apply(kk$res, 1L, function(z) ari(z, d$labels))
+  pair_ari <- pairwise_label_ari(kk$res)
 
   cat(format(Sys.time()), "UMAP", key, "\n")
   umap_timed <- elapsed({
@@ -197,7 +207,7 @@ run_case <- function(dataset, variant) {
     variant = variant,
     M = 100L,
     workers = workers,
-    n = nrow(kk$res),
+    n = nrow(x),
     p = ncol(x),
     load_sec = load_timed$seconds,
     pca_sec = input$pca_sec,
@@ -220,8 +230,17 @@ run_case <- function(dataset, variant) {
       plot_timed$seconds + save_timed$seconds,
     median_acc = median(kk$acc),
     median_classes = median(classes),
+    min_classes = min(classes),
+    max_classes = max(classes),
     median_ari = median(aris),
+    min_ari = min(aris),
+    max_ari = max(aris),
     median_largest = median(largest),
+    min_largest = min(largest),
+    max_largest = max(largest),
+    m_label_pair_ari_median = median(pair_ari, na.rm = TRUE),
+    m_label_pair_ari_min = min(pair_ari, na.rm = TRUE),
+    m_label_pair_ari_max = max(pair_ari, na.rm = TRUE),
     umap_silhouette = sil_timed$value,
     compactness_median = median(comp$compactness),
     compactness_min = min(comp$compactness),
