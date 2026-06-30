@@ -203,6 +203,16 @@ Rcpp::List kodama_matrix_cpp_temp(
     Rcpp::Named("res_constrain") = res_constrain,
     Rcpp::Named("n.cores") = result.n_threads,
     Rcpp::Named("runtime_seconds") = result.runtime_seconds,
+    Rcpp::Named("timing") = Rcpp::List::create(
+      Rcpp::Named("input_copy_seconds") = result.input_copy_seconds,
+      Rcpp::Named("spatial_precompute_seconds") = result.spatial_precompute_seconds,
+      Rcpp::Named("graph_seconds") = result.graph_seconds,
+      Rcpp::Named("spatial_graph_seconds") = result.spatial_graph_seconds,
+      Rcpp::Named("optimization_wall_seconds") = result.optimization_wall_seconds,
+      Rcpp::Named("optimization_sum_seconds") = result.optimization_sum_seconds,
+      Rcpp::Named("dissimilarity_seconds") = result.dissimilarity_seconds,
+      Rcpp::Named("runtime_seconds") = result.runtime_seconds
+    ),
     Rcpp::Named("peak_memory_mb") = result.peak_memory_mb
   );
 }

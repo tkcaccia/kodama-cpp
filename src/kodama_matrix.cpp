@@ -906,10 +906,14 @@ KODAMAMatrixResult run_kodama_matrix(
     }
   }
 
+  detail::Timer input_copy_timer;
   const std::vector<float> full_float = copy_float32(x);
   const std::vector<int> constrain = normalize_constrain(constrain_in, x.rows);
   const bool constrain_is_identity = is_identity_constrain(constrain);
   const std::vector<int> fixed = normalize_fixed(fixed_in, x.rows);
+  const double input_copy_seconds = input_copy_timer.seconds();
+
+  detail::Timer spatial_precompute_timer;
   const std::vector<float> spatial_jitter = options.spatial.empty() ?
     std::vector<float>() :
     spatial_jitter_from_graph(
@@ -919,6 +923,7 @@ KODAMAMatrixResult run_kodama_matrix(
       std::max(20, options.graph_neighbors > 0 ? options.graph_neighbors : 100),
       options.n_threads
     );
+  const double spatial_precompute_seconds = spatial_precompute_timer.seconds();
   const int requested_neighbors = options.graph_neighbors > 0 ? options.graph_neighbors : 100;
   const int neighbors = std::max(1, static_cast<int>(std::floor(std::min({
     static_cast<double>(options.landmarks),
@@ -931,6 +936,8 @@ KODAMAMatrixResult run_kodama_matrix(
   result.samples = static_cast<int>(x.rows);
   result.cycles = options.cycles;
   result.n_threads = options.n_threads;
+  result.input_copy_seconds = input_copy_seconds;
+  result.spatial_precompute_seconds = spatial_precompute_seconds;
   result.acc.assign(static_cast<std::size_t>(options.runs), std::numeric_limits<double>::quiet_NaN());
   result.v.assign(static_cast<std::size_t>(options.runs) * options.cycles, std::numeric_limits<double>::quiet_NaN());
   result.res.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
@@ -939,6 +946,7 @@ KODAMAMatrixResult run_kodama_matrix(
     std::cerr << "[kodama] building global KNN graph for " << x.rows
               << " samples and " << neighbors << " neighbors" << std::endl;
   }
+  detail::Timer graph_timer;
   const NeighborGraph global_graph =
 #if defined(KODAMA_ENABLE_CUDA)
     options.backend == Backend::CUDA ?
@@ -963,12 +971,14 @@ KODAMAMatrixResult run_kodama_matrix(
       options.metric,
       options.n_threads
     );
+  result.graph_seconds = graph_timer.seconds();
 
   result.knn = trim_self_neighbors(global_graph, static_cast<int>(x.rows), neighbors);
   if (!options.spatial.empty() && options.spatial_graph_mix) {
     if (options.progress) {
       std::cerr << "[kodama] building spatial KNN graph for final KODAMA graph" << std::endl;
     }
+    detail::Timer spatial_graph_timer;
     const NeighborGraph spatial_global_graph =
 #if defined(KODAMA_ENABLE_CUDA)
       options.backend == Backend::CUDA ?
@@ -992,12 +1002,14 @@ KODAMAMatrixResult run_kodama_matrix(
         neighbors + 1,
         DistanceMetric::Euclidean,
         options.n_threads
-      );
+    );
     NeighborGraph spatial_trimmed = trim_self_neighbors(spatial_global_graph, static_cast<int>(x.rows), neighbors);
     result.knn = merge_feature_spatial_graphs(result.knn, spatial_trimmed, static_cast<int>(x.rows), neighbors);
+    result.spatial_graph_seconds = spatial_graph_timer.seconds();
   }
   result.base_knn = result.knn;
 
+  detail::Timer optimization_timer;
   const int workers = std::max(1, std::min(options.n_threads, options.runs));
   std::atomic<int> next_run{1};
   std::vector<IterationResult> iterations(static_cast<std::size_t>(options.runs));
@@ -1036,6 +1048,7 @@ KODAMAMatrixResult run_kodama_matrix(
     }));
   }
   for (auto& future : futures) future.get();
+  result.optimization_wall_seconds = optimization_timer.seconds();
 
   for (int run_id = 1; run_id <= options.runs; ++run_id) {
     const IterationResult& iter = iterations[static_cast<std::size_t>(run_id - 1)];
@@ -1046,7 +1059,7 @@ KODAMAMatrixResult run_kodama_matrix(
     for (int c = 0; c < options.cycles && c < static_cast<int>(iter.acc.size()); ++c) {
       result.v[row * static_cast<std::size_t>(options.cycles) + static_cast<std::size_t>(c)] = iter.acc[static_cast<std::size_t>(c)];
     }
-    result.runtime_seconds += iter.runtime;
+    result.optimization_sum_seconds += iter.runtime;
     result.peak_memory_mb = std::max(result.peak_memory_mb, iter.memory);
   }
 
@@ -1054,6 +1067,7 @@ KODAMAMatrixResult run_kodama_matrix(
     if (options.progress) {
       std::cerr << "[kodama] applying KODAMA dissimilarity to KNN graph" << std::endl;
     }
+    detail::Timer dissimilarity_timer;
 #if defined(KODAMA_ENABLE_CUDA)
     if (options.backend == Backend::CUDA) {
       detail::apply_kodama_dissimilarity_cuda(result.knn, result.res, result.runs, result.samples, options.knn.gpu_device, true);
@@ -1065,6 +1079,7 @@ KODAMAMatrixResult run_kodama_matrix(
         if (result.knn.indices[i] >= 0) result.knn.indices[i] += 1;
       }
     }
+    result.dissimilarity_seconds = dissimilarity_timer.seconds();
   } else if (options.progress) {
     std::cerr << "[kodama] skipping final KODAMA dissimilarity for graph+labels output" << std::endl;
   }

@@ -296,6 +296,13 @@ struct KODAMAMatrixResult {
   int cycles = 0;
   int n_threads = 1;
   double runtime_seconds = 0.0;
+  double input_copy_seconds = 0.0;
+  double spatial_precompute_seconds = 0.0;
+  double graph_seconds = 0.0;
+  double spatial_graph_seconds = 0.0;
+  double optimization_wall_seconds = 0.0;
+  double optimization_sum_seconds = 0.0;
+  double dissimilarity_seconds = 0.0;
   double peak_memory_mb = 0.0;
 };
 
