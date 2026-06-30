@@ -64,10 +64,10 @@ math, spatial constraints, KODAMA dissimilarity, or visualization
 initialization. This should be treated as a scheduling option, not as an
 algorithmic change.
 
-Decision: Accepted as an optional fastest CUDA scheduling setting for MERFISH
-and Br8100 PCA20. Not promoted to a universal default until MNIST and larger
-datasets are checked, because Br8100 trades a small amount of silhouette and
-compactness for the speed gain.
+Decision: Accepted as a tested optional CUDA scheduling setting for MERFISH,
+Br8100, and MNIST PCA20. It is not promoted as a hidden universal default:
+callers should still choose the requested number of M workers explicitly.
+Br8100 and MNIST trade a small amount of compactness for the speed gain.
 
 Evidence:
 
@@ -77,4 +77,5 @@ Evidence:
 | MERFISH | pca20 | 2 | 242.551 | 1.151 | 0.207211 | 52 | 0.262248 | 0.638624 |
 | Br8100 | pca20 | 1 | 259.031 | 1.000 | 0.305622 | 37 | 0.281394 | 0.721051 |
 | Br8100 | pca20 | 2 | 226.457 | 1.144 | 0.305622 | 37 | 0.275143 | 0.709127 |
-
+| MNIST | pca20 | 1 | 538.495 | 1.000 | 0.066169 | 298 | 0.435103 | 0.712651 |
+| MNIST | pca20 | 2 | 415.366 | 1.296 | 0.066169 | 298 | 0.439905 | 0.709147 |
