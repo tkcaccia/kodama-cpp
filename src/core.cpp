@@ -264,6 +264,15 @@ struct PrecomputedKNN {
   KNNParametersUsed parameters;
 };
 
+struct KNNPredictionScratch {
+  std::unordered_map<int, int> label_to_code;
+  std::vector<int> label_values;
+  std::vector<int> label_codes;
+  std::vector<int> vote_counts;
+  std::vector<double> vote_scores;
+  std::vector<int> touched;
+};
+
 KNNParametersUsed resolve_core_knn_parameters(const KNNOptions& options) {
   KNNParametersUsed used;
   used.backend = Backend::CPU;
@@ -445,62 +454,69 @@ PrecomputedKNN precompute_knn_cv_cuda(
 }
 #endif
 
-CVPrediction predict_precomputed_knn(const PrecomputedKNN& precomputed, const std::vector<int>& labels) {
+CVPrediction predict_precomputed_knn(
+  const PrecomputedKNN& precomputed,
+  const std::vector<int>& labels,
+  KNNPredictionScratch& scratch
+) {
   CVPrediction out;
   out.predicted.assign(labels.size(), 0);
-  std::unordered_map<int, int> label_to_code;
-  label_to_code.reserve(labels.size());
-  std::vector<int> label_values;
-  label_values.reserve(labels.size());
-  std::vector<int> label_codes(labels.size(), 0);
+  scratch.label_to_code.clear();
+  scratch.label_to_code.reserve(labels.size());
+  scratch.label_values.clear();
+  scratch.label_values.reserve(labels.size());
+  scratch.label_codes.resize(labels.size());
   for (std::size_t i = 0; i < labels.size(); ++i) {
     const int label = labels[i];
-    auto it = label_to_code.find(label);
-    if (it == label_to_code.end()) {
-      const int code = static_cast<int>(label_values.size());
-      it = label_to_code.emplace(label, code).first;
-      label_values.push_back(label);
+    auto it = scratch.label_to_code.find(label);
+    if (it == scratch.label_to_code.end()) {
+      const int code = static_cast<int>(scratch.label_values.size());
+      it = scratch.label_to_code.emplace(label, code).first;
+      scratch.label_values.push_back(label);
     }
-    label_codes[i] = it->second;
+    scratch.label_codes[i] = it->second;
   }
 
-  std::vector<int> vote_counts(label_values.size(), 0);
-  std::vector<double> vote_scores(label_values.size(), 0.0);
-  std::vector<int> touched;
-  touched.reserve(static_cast<std::size_t>(precomputed.parameters.k));
+  if (scratch.vote_counts.size() < scratch.label_values.size()) {
+    scratch.vote_counts.resize(scratch.label_values.size(), 0);
+  }
+  if (scratch.vote_scores.size() < scratch.label_values.size()) {
+    scratch.vote_scores.resize(scratch.label_values.size(), 0.0);
+  }
+  scratch.touched.reserve(static_cast<std::size_t>(precomputed.parameters.k));
   for (const PrecomputedKNNFold& fold : precomputed.fold_data) {
     const std::size_t k = static_cast<std::size_t>(fold.k);
     for (std::size_t qi = 0; qi < fold.validation.size(); ++qi) {
-      touched.clear();
+      scratch.touched.clear();
       const std::size_t row_offset = qi * k;
       const int* neighbor_rows = fold.neighbor_rows.data() + row_offset;
       const float* neighbor_scores = fold.scores.data() + row_offset;
       for (std::size_t j = 0; j < k; ++j) {
         const int row = neighbor_rows[j];
         if (row < 0) continue;
-        const int code = label_codes[static_cast<std::size_t>(row)];
-        if (vote_counts[static_cast<std::size_t>(code)] == 0) {
-          touched.push_back(code);
+        const int code = scratch.label_codes[static_cast<std::size_t>(row)];
+        if (scratch.vote_counts[static_cast<std::size_t>(code)] == 0) {
+          scratch.touched.push_back(code);
         }
-        vote_counts[static_cast<std::size_t>(code)]++;
-        vote_scores[static_cast<std::size_t>(code)] += static_cast<double>(neighbor_scores[j]);
+        scratch.vote_counts[static_cast<std::size_t>(code)]++;
+        scratch.vote_scores[static_cast<std::size_t>(code)] += static_cast<double>(neighbor_scores[j]);
       }
 
       int best_label = 0;
       int best_count = -1;
       double best_score = -std::numeric_limits<double>::infinity();
-      for (int code : touched) {
+      for (int code : scratch.touched) {
         const std::size_t idx = static_cast<std::size_t>(code);
-        const int label = label_values[idx];
-        if (vote_counts[idx] > best_count ||
-            (vote_counts[idx] == best_count && vote_scores[idx] > best_score) ||
-            (vote_counts[idx] == best_count && vote_scores[idx] == best_score && label < best_label)) {
+        const int label = scratch.label_values[idx];
+        if (scratch.vote_counts[idx] > best_count ||
+            (scratch.vote_counts[idx] == best_count && scratch.vote_scores[idx] > best_score) ||
+            (scratch.vote_counts[idx] == best_count && scratch.vote_scores[idx] == best_score && label < best_label)) {
           best_label = label;
-          best_count = vote_counts[idx];
-          best_score = vote_scores[idx];
+          best_count = scratch.vote_counts[idx];
+          best_score = scratch.vote_scores[idx];
         }
-        vote_counts[idx] = 0;
-        vote_scores[idx] = 0.0;
+        scratch.vote_counts[idx] = 0;
+        scratch.vote_scores[idx] = 0.0;
       }
       out.predicted[static_cast<std::size_t>(fold.validation[qi])] = best_label;
     }
@@ -838,8 +854,9 @@ CoreResult CoreKNN_CPU(
   knn_options.knn.backend = Backend::CPU;
   detail::validate_inputs(x, initial_clbest, constrain);
   const PrecomputedKNN precomputed = precompute_knn_cv_cpu(x, initial_clbest, constrain, knn_options.knn);
+  KNNPredictionScratch scratch;
   return maximize_core(x, initial_clbest, constrain, fixed, knn_options, [&](const std::vector<int>& labels) {
-    return predict_precomputed_knn(precomputed, labels);
+    return predict_precomputed_knn(precomputed, labels, scratch);
   });
 }
 
@@ -881,8 +898,9 @@ CoreResult CoreKNN_CUDA(
   knn_options.knn.backend = Backend::CUDA;
   detail::validate_inputs(x, initial_clbest, constrain);
   const PrecomputedKNN precomputed = precompute_knn_cv_cuda(x, initial_clbest, constrain, knn_options.knn);
+  KNNPredictionScratch scratch;
   return maximize_core(x, initial_clbest, constrain, fixed, knn_options, [&](const std::vector<int>& labels) {
-    return predict_precomputed_knn(precomputed, labels);
+    return predict_precomputed_knn(precomputed, labels, scratch);
   });
 #else
   (void)x;

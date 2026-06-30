@@ -202,6 +202,11 @@ Rcpp::List kodama_matrix_cpp_temp(
     Rcpp::Named("data") = data,
     Rcpp::Named("res_constrain") = res_constrain,
     Rcpp::Named("n.cores") = result.n_threads,
+    Rcpp::Named("gpu_auto_workers") = result.gpu_auto_workers,
+    Rcpp::Named("gpu_sm_count") = result.gpu_sm_count,
+    Rcpp::Named("gpu_free_memory_mb") = result.gpu_free_memory_mb,
+    Rcpp::Named("gpu_total_memory_mb") = result.gpu_total_memory_mb,
+    Rcpp::Named("gpu_worker_memory_estimate_mb") = result.gpu_worker_memory_estimate_mb,
     Rcpp::Named("runtime_seconds") = result.runtime_seconds,
     Rcpp::Named("timing") = Rcpp::List::create(
       Rcpp::Named("input_copy_seconds") = result.input_copy_seconds,

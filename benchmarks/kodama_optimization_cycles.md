@@ -124,3 +124,64 @@ Worst truth-label compactness on the final UMAP:
 | MERFISH | PVH | 3173 | 0.629097 |
 | Br8100 | Layer6 | 2430 | 0.725800 |
 | MNIST | 1 | 7877 | 0.709224 |
+
+## Cycle 5: CUDA Auto M Workers and KNN Vote Scratch Reuse
+
+Thought: KODAMA M runs are independent, but the right number of concurrent
+CUDA M workers depends on the GPU, dataset size, graph width, classifier, and
+free memory. Manual `n.cores=2` helped in Cycle 3, but it should not be a
+hard-coded benchmark setting. The library should have an opt-in automatic mode
+that selects a conservative worker count from GPU capacity. Separately, KNN
+core prediction repeatedly votes over the same precomputed CV neighbor lists;
+the vote scratch buffers can be reused across T cycles without changing the
+neighbor search, labels, vote rule, or objective.
+
+Implementation:
+
+- `n.cores=0` with CUDA enables automatic M-worker selection.
+- Explicit `n.cores > 0` remains manual and unchanged.
+- The selector reads CUDA free/total memory and SM count, estimates per-worker
+  memory from `n`, `p`, landmarks, graph neighbors, classifier, components, and
+  KNN `k`, then chooses a conservative worker count.
+- The selected worker count and GPU diagnostics are returned in the R wrapper
+  and written by the benchmark script.
+- `CoreKNN_CPU` and `CoreKNN_CUDA` now reuse label-code and vote buffers across
+  repeated predictions; KNN CV neighbors are still computed once before the T
+  cycle and the vote mathematics is unchanged.
+
+Decision: Accepted. This is a clean CUDA scheduling and KNN implementation
+improvement. On chiamaka the auto selector chose 2 workers for the 36-SM,
+~16 GB GPU. Compared with manual one-worker KNN, auto improved KODAMA wall time
+while preserving median accuracy and median ARI. MERFISH labels were identical
+between manual and auto runs. Br8100 had a few changed M solutions, but median
+row agreement was 1 and median ARI was slightly higher with auto.
+
+Evidence, KNN CUDA, M=100, PCA20 input, `knn.k=30`:
+
+| dataset | workers | selected workers | KODAMA sec | speedup vs 1 worker | median acc | median ARI | UMAP silhouette | compactness min |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| MERFISH | 1 | 1 | 38.815 | 1.000 | 0.472050 | 0.221672 | 0.273261 | 0.605142 |
+| MERFISH | 0 auto | 2 | 32.442 | 1.196 | 0.472050 | 0.221672 | 0.266715 | 0.588225 |
+| Br8100 | 1 | 1 | 25.397 | 1.000 | 0.818300 | 0.337290 | 0.241789 | 0.678282 |
+| Br8100 | 0 auto | 2 | 20.201 | 1.257 | 0.818300 | 0.338477 | 0.239645 | 0.679925 |
+
+Auto-worker diagnostics:
+
+| dataset | SM count | free memory MiB | total memory MiB | worker estimate MiB |
+| --- | ---: | ---: | ---: | ---: |
+| MERFISH | 36 | 15180.81 | 15841.31 | 527.51 |
+| Br8100 | 36 | 14794.81 | 15841.31 | 523.12 |
+
+Step timing highlights for auto:
+
+| dataset | KODAMA optimization wall sec | KODAMA graph sec | KODAMA dissimilarity sec | UMAP sec | compactness sec | total sec |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MERFISH | 32.033 | 0.190 | 0.016 | 0.445 | 0.018 | 45.569 |
+| Br8100 | 20.001 | 0.098 | 0.009 | 0.187 | 0.005 | 25.073 |
+
+Next GPU traffic target: the full input matrix is still supplied to FAISS
+k-means from host memory in each M run. FAISS GPU indices can consume device
+pointers, but FAISS `Clustering` still performs centroid updates at the host
+algorithm level, so true matrix residency for landmark k-means should be done
+as a dedicated cuVS/custom GPU k-means path rather than by passing a device
+pointer into the current FAISS clustering call.

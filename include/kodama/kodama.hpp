@@ -295,6 +295,11 @@ struct KODAMAMatrixResult {
   int samples = 0;
   int cycles = 0;
   int n_threads = 1;
+  bool gpu_auto_workers = false;
+  int gpu_sm_count = 0;
+  double gpu_free_memory_mb = 0.0;
+  double gpu_total_memory_mb = 0.0;
+  double gpu_worker_memory_estimate_mb = 0.0;
   double runtime_seconds = 0.0;
   double input_copy_seconds = 0.0;
   double spatial_precompute_seconds = 0.0;

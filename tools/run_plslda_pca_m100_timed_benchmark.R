@@ -156,8 +156,12 @@ run_case <- function(dataset, variant) {
   input <- make_input(d$data, variant)
   x <- input$x
   workers <- as.integer(Sys.getenv("KODAMA_CUDA_M_WORKERS", "1"))
+  classifier <- Sys.getenv("KODAMA_CLASSIFIER", "pls_lda")
+  ncomp <- as.integer(Sys.getenv("KODAMA_NCOMP", as.character(min(50L, ncol(x)))))
+  knn_k <- as.integer(Sys.getenv("KODAMA_KNN_K", "30"))
   cat(format(Sys.time()), "RUN", key, "M=100 n", nrow(x), "p", ncol(x),
-      "workers", workers, "pca_sec", round(input$pca_sec, 3), "\n")
+      "workers", workers, "classifier", classifier, "knn_k", knn_k,
+      "ncomp", ncomp, "pca_sec", round(input$pca_sec, 3), "\n")
 
   kodama_timed <- elapsed({
     KODAMA.matrix.cpp(
@@ -165,12 +169,13 @@ run_case <- function(dataset, variant) {
       spatial = d$spatial,
       M = 100L,
       Tcycle = 20L,
-      ncomp = min(50L, ncol(x)),
+      ncomp = min(ncomp, ncol(x)),
       landmarks = 10000L,
       splitting = ifelse(nrow(x) < 40000L, 100L, 300L),
       n.cores = workers,
       graph.neighbors = 100L,
-      classifier = "pls_lda",
+      knn.k = knn_k,
+      classifier = classifier,
       backend = "cuda",
       seed = 987L,
       progress = TRUE,
@@ -205,10 +210,19 @@ run_case <- function(dataset, variant) {
   summary <- data.frame(
     dataset = dataset,
     variant = variant,
+    classifier = classifier,
     M = 100L,
     workers = workers,
+    selected_workers = as.integer(kk$n.cores),
+    gpu_auto_workers = isTRUE(kk$gpu_auto_workers),
+    gpu_sm_count = as.integer(kk$gpu_sm_count %||% 0L),
+    gpu_free_memory_mb = as.numeric(kk$gpu_free_memory_mb %||% NA_real_),
+    gpu_total_memory_mb = as.numeric(kk$gpu_total_memory_mb %||% NA_real_),
+    gpu_worker_memory_estimate_mb = as.numeric(kk$gpu_worker_memory_estimate_mb %||% NA_real_),
     n = nrow(x),
     p = ncol(x),
+    ncomp = min(ncomp, ncol(x)),
+    knn_k = knn_k,
     load_sec = load_timed$seconds,
     pca_sec = input$pca_sec,
     kodama_input_copy_sec = timing_value(kk, "input_copy_seconds"),

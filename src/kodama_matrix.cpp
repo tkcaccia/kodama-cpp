@@ -22,6 +22,7 @@
 #ifdef KODAMA_ENABLE_CUDA
 #include "kodama_matrix_cuda.hpp"
 
+#include <cuda_runtime.h>
 #include <faiss/gpu/GpuIndexFlat.h>
 #include <faiss/gpu/StandardGpuResources.h>
 #endif
@@ -603,6 +604,88 @@ struct IterationScratch {
   std::vector<int> run_constrain;
 };
 
+struct GpuWorkerPlan {
+  int workers = 1;
+  bool automatic = false;
+  int sm_count = 0;
+  double free_memory_mb = 0.0;
+  double total_memory_mb = 0.0;
+  double worker_memory_estimate_mb = 0.0;
+};
+
+#ifdef KODAMA_ENABLE_CUDA
+GpuWorkerPlan resolve_gpu_worker_plan(
+  const KODAMAMatrixOptions& options,
+  int samples,
+  int features,
+  int landmarks,
+  int graph_neighbors
+) {
+  GpuWorkerPlan plan;
+  plan.workers = std::max(1, std::min(options.n_threads, options.runs));
+  if (options.backend != Backend::CUDA || options.n_threads > 0) return plan;
+
+  plan.automatic = true;
+  plan.workers = 1;
+  cudaSetDevice(options.knn.gpu_device);
+  cudaDeviceProp prop{};
+  if (cudaGetDeviceProperties(&prop, options.knn.gpu_device) == cudaSuccess) {
+    plan.sm_count = prop.multiProcessorCount;
+  }
+  std::size_t free_bytes = 0;
+  std::size_t total_bytes = 0;
+  if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess) {
+    plan.free_memory_mb = static_cast<double>(free_bytes) / (1024.0 * 1024.0);
+    plan.total_memory_mb = static_cast<double>(total_bytes) / (1024.0 * 1024.0);
+  }
+
+  const double x_bytes = static_cast<double>(samples) * static_cast<double>(features) * sizeof(float);
+  const double landmark_bytes = static_cast<double>(landmarks) * static_cast<double>(features) * sizeof(float);
+  const double graph_bytes = static_cast<double>(samples) * static_cast<double>(graph_neighbors) *
+    static_cast<double>(sizeof(int) + sizeof(float));
+  const double component_bytes = static_cast<double>(landmarks) *
+    static_cast<double>(std::max(1, options.components)) * sizeof(double);
+  double worker_bytes = 512.0 * 1024.0 * 1024.0;
+  worker_bytes += 1.5 * x_bytes;
+  worker_bytes += 6.0 * landmark_bytes;
+  worker_bytes += 0.25 * graph_bytes;
+  if (options.classifier == CoreClassifier::PLS_LDA) {
+    worker_bytes += 10.0 * component_bytes;
+  } else {
+    worker_bytes += static_cast<double>(landmarks) * static_cast<double>(std::max(1, options.knn.k)) *
+      static_cast<double>(sizeof(int) + sizeof(float));
+  }
+  plan.worker_memory_estimate_mb = worker_bytes / (1024.0 * 1024.0);
+
+  int sm_cap = 2;
+  if (plan.sm_count >= 132) sm_cap = 6;
+  else if (plan.sm_count >= 96) sm_cap = 5;
+  else if (plan.sm_count >= 72) sm_cap = 4;
+  else if (plan.sm_count >= 48) sm_cap = 3;
+
+  int memory_cap = 1;
+  if (free_bytes > 0 && worker_bytes > 0.0) {
+    memory_cap = static_cast<int>(std::floor((0.70 * static_cast<double>(free_bytes)) / worker_bytes));
+    memory_cap = std::max(1, memory_cap);
+  }
+
+  plan.workers = std::max(1, std::min({options.runs, sm_cap, memory_cap}));
+  return plan;
+}
+#else
+GpuWorkerPlan resolve_gpu_worker_plan(
+  const KODAMAMatrixOptions& options,
+  int,
+  int,
+  int,
+  int
+) {
+  GpuWorkerPlan plan;
+  plan.workers = std::max(1, std::min(options.n_threads, options.runs));
+  return plan;
+}
+#endif
+
 void apply_kodama_dissimilarity(NeighborGraph& graph, const std::vector<int>& res, int runs, int samples, int n_threads) {
   if (runs <= 0 || samples <= 0 || graph.neighbors <= 0) return;
   OmpThreadScope threads(n_threads);
@@ -889,13 +972,34 @@ KODAMAMatrixResult run_kodama_matrix(
   if (options.cycles < 0) throw std::invalid_argument("KODAMAMatrixOptions::cycles must be non-negative.");
 
   detail::Timer timer;
-  options.n_threads = std::max(1, options.n_threads);
   if (options.landmarks <= 0) options.landmarks = 10000;
   if (static_cast<std::size_t>(options.landmarks) >= x.rows) {
     options.landmarks = static_cast<int>(std::ceil(static_cast<double>(x.rows) * 0.75));
   }
   options.landmarks = std::max(2, std::min(options.landmarks, static_cast<int>(x.rows) - 1));
   options.components = std::max(1, std::min(options.components, static_cast<int>(std::min(x.rows, x.cols))));
+  const int requested_neighbors = options.graph_neighbors > 0 ? options.graph_neighbors : 100;
+  GpuWorkerPlan worker_plan;
+  if (options.backend == Backend::CUDA && options.n_threads <= 0) {
+    worker_plan = resolve_gpu_worker_plan(
+      options,
+      static_cast<int>(x.rows),
+      static_cast<int>(x.cols),
+      options.landmarks,
+      requested_neighbors
+    );
+    options.n_threads = worker_plan.workers;
+    if (options.progress) {
+      std::cerr << "[kodama] CUDA auto workers selected " << worker_plan.workers
+                << " (SM=" << worker_plan.sm_count
+                << ", free=" << worker_plan.free_memory_mb << " MiB"
+                << ", per_worker_est=" << worker_plan.worker_memory_estimate_mb << " MiB)"
+                << std::endl;
+    }
+  } else {
+    options.n_threads = std::max(1, options.n_threads);
+    worker_plan.workers = std::min(options.n_threads, options.runs);
+  }
   if (!options.spatial.empty()) {
     if (options.spatial_cols <= 0) throw std::invalid_argument("KODAMAMatrixOptions::spatial_cols must be positive when spatial is provided.");
     if (options.spatial.size() != x.rows * static_cast<std::size_t>(options.spatial_cols)) {
@@ -924,7 +1028,6 @@ KODAMAMatrixResult run_kodama_matrix(
       options.n_threads
     );
   const double spatial_precompute_seconds = spatial_precompute_timer.seconds();
-  const int requested_neighbors = options.graph_neighbors > 0 ? options.graph_neighbors : 100;
   const int neighbors = std::max(1, static_cast<int>(std::floor(std::min({
     static_cast<double>(options.landmarks),
     static_cast<double>(x.rows) * 0.75 - 1.0,
@@ -936,6 +1039,11 @@ KODAMAMatrixResult run_kodama_matrix(
   result.samples = static_cast<int>(x.rows);
   result.cycles = options.cycles;
   result.n_threads = options.n_threads;
+  result.gpu_auto_workers = worker_plan.automatic;
+  result.gpu_sm_count = worker_plan.sm_count;
+  result.gpu_free_memory_mb = worker_plan.free_memory_mb;
+  result.gpu_total_memory_mb = worker_plan.total_memory_mb;
+  result.gpu_worker_memory_estimate_mb = worker_plan.worker_memory_estimate_mb;
   result.input_copy_seconds = input_copy_seconds;
   result.spatial_precompute_seconds = spatial_precompute_seconds;
   result.acc.assign(static_cast<std::size_t>(options.runs), std::numeric_limits<double>::quiet_NaN());
