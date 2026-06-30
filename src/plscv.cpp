@@ -407,6 +407,39 @@ Dense one_hot_centered(const std::vector<int>& labels, const std::vector<int>& r
   return y;
 }
 
+std::vector<double> one_hot_centered_colmajor(
+  const std::vector<int>& labels,
+  const std::vector<int>& rows,
+  const std::vector<int>& classes,
+  std::vector<double>& y_mean
+) {
+  std::map<int, int> class_pos;
+  for (int i = 0; i < static_cast<int>(classes.size()); ++i) class_pos[classes[static_cast<std::size_t>(i)]] = i;
+
+  const int n = static_cast<int>(rows.size());
+  const int m = static_cast<int>(classes.size());
+  y_mean.assign(classes.size(), 0.0);
+  std::vector<int> encoded(static_cast<std::size_t>(n), 0);
+  for (int i = 0; i < n; ++i) {
+    const int cls = labels[static_cast<std::size_t>(rows[static_cast<std::size_t>(i)])];
+    const int j = class_pos[cls];
+    encoded[static_cast<std::size_t>(i)] = j;
+    y_mean[static_cast<std::size_t>(j)] += 1.0;
+  }
+  for (double& v : y_mean) v /= static_cast<double>(rows.size());
+
+  std::vector<double> y_colmajor(static_cast<std::size_t>(n) * static_cast<std::size_t>(m), 0.0);
+  for (int j = 0; j < m; ++j) {
+    double* col = y_colmajor.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(n);
+    std::fill(col, col + n, -y_mean[static_cast<std::size_t>(j)]);
+  }
+  for (int i = 0; i < n; ++i) {
+    const int j = encoded[static_cast<std::size_t>(i)];
+    y_colmajor[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(n)] += 1.0;
+  }
+  return y_colmajor;
+}
+
 Dense crossprod(const Dense& x, const Dense& y) {
   Dense out(x.cols, y.cols);
   std::vector<long double> accum(static_cast<std::size_t>(x.cols) * static_cast<std::size_t>(y.cols), 0.0L);
@@ -739,30 +772,30 @@ Dense transform_pls_scores_cuda(const Dense& x, const PLSFit& fit, int ncomp, in
   return out;
 }
 
-PLSFit fit_pls_components_cuda(const Dense& x, const Dense& y, int max_components, int gpu_device) {
+PLSFit fit_pls_components_cuda_colmajor_y(
+  const Dense& x,
+  const double* y_colmajor,
+  int y_cols,
+  int max_components,
+  int gpu_device
+) {
   check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(fit_pls_components_cuda)");
   const int max_rank = std::min({max_components, x.cols, std::max(1, x.rows - 1)});
   std::vector<double> x_colmajor(static_cast<std::size_t>(x.rows) * static_cast<std::size_t>(x.cols));
-  std::vector<double> y_colmajor(static_cast<std::size_t>(y.rows) * static_cast<std::size_t>(y.cols));
   for (int j = 0; j < x.cols; ++j) {
     for (int i = 0; i < x.rows; ++i) {
       x_colmajor[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(x.rows)] = x(i, j);
     }
   }
-  for (int j = 0; j < y.cols; ++j) {
-    for (int i = 0; i < y.rows; ++i) {
-      y_colmajor[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(y.rows)] = y(i, j);
-    }
-  }
 
   std::vector<double> rr_colmajor(static_cast<std::size_t>(x.cols) * static_cast<std::size_t>(max_rank), 0.0);
-  std::vector<double> qq_colmajor(static_cast<std::size_t>(y.cols) * static_cast<std::size_t>(max_rank), 0.0);
+  std::vector<double> qq_colmajor(static_cast<std::size_t>(y_cols) * static_cast<std::size_t>(max_rank), 0.0);
   const bool ok = kodama_fastpls_simpls_fit_cuda(
     x_colmajor.data(),
     x.rows,
     x.cols,
-    y_colmajor.data(),
-    y.cols,
+    y_colmajor,
+    y_cols,
     max_rank,
     1,
     rr_colmajor.data(),
@@ -770,17 +803,27 @@ PLSFit fit_pls_components_cuda(const Dense& x, const Dense& y, int max_component
   );
   if (!ok) throw std::runtime_error("fastPLS CUDA SIMPLS fit failed.");
 
-  PLSFit fit{Dense(x.cols, max_rank), Dense(x.cols, max_rank), Dense(y.cols, max_rank), Dense()};
+  PLSFit fit{Dense(x.cols, max_rank), Dense(x.cols, max_rank), Dense(y_cols, max_rank), Dense()};
   for (int a = 0; a < max_rank; ++a) {
     for (int j = 0; j < x.cols; ++j) {
       fit.weights(j, a) = rr_colmajor[static_cast<std::size_t>(j) + static_cast<std::size_t>(a) * static_cast<std::size_t>(x.cols)];
     }
-    for (int j = 0; j < y.cols; ++j) {
-      fit.y_weights(j, a) = qq_colmajor[static_cast<std::size_t>(j) + static_cast<std::size_t>(a) * static_cast<std::size_t>(y.cols)];
+    for (int j = 0; j < y_cols; ++j) {
+      fit.y_weights(j, a) = qq_colmajor[static_cast<std::size_t>(j) + static_cast<std::size_t>(a) * static_cast<std::size_t>(y_cols)];
     }
   }
   fit.train_scores = transform_pls_scores_cuda(x, fit, fit.weights.cols, gpu_device);
   return fit;
+}
+
+PLSFit fit_pls_components_cuda(const Dense& x, const Dense& y, int max_components, int gpu_device) {
+  std::vector<double> y_colmajor(static_cast<std::size_t>(y.rows) * static_cast<std::size_t>(y.cols));
+  for (int j = 0; j < y.cols; ++j) {
+    for (int i = 0; i < y.rows; ++i) {
+      y_colmajor[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(y.rows)] = y(i, j);
+    }
+  }
+  return fit_pls_components_cuda_colmajor_y(x, y_colmajor.data(), y.cols, max_components, gpu_device);
 }
 #endif
 
@@ -1935,11 +1978,17 @@ PLSCVResult run_plscv_cuda(
       x_train = &x_train_storage;
       x_val = &x_val_storage;
     }
-    std::vector<double> y_mean;
-    Dense y_train = one_hot_centered(labels, *train, classes, y_mean);
-    PLSFit fit = fit_pls_components_cuda(*x_train, y_train, options.max_components, options.gpu_device);
     std::vector<int> y_train_labels(train->size(), 0);
     for (std::size_t i = 0; i < train->size(); ++i) y_train_labels[i] = labels[static_cast<std::size_t>((*train)[i])];
+    std::vector<double> y_mean;
+    const std::vector<double> y_train_colmajor = one_hot_centered_colmajor(labels, *train, classes, y_mean);
+    PLSFit fit = fit_pls_components_cuda_colmajor_y(
+      *x_train,
+      y_train_colmajor.data(),
+      static_cast<int>(classes.size()),
+      options.max_components,
+      options.gpu_device
+    );
     const std::vector<int> eval_components = components_to_evaluate(options, fit.weights.cols);
     evaluated_component = std::min(evaluated_component, eval_components.front());
 

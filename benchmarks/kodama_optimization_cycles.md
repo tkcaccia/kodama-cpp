@@ -19,6 +19,10 @@ compactness on the final plot.
   - pairwise ARI among M label vectors;
   - final-plot truth-label silhouette;
   - per-truth-label compactness on the final plot.
+- Acceptance rule: a large quality improvement can outweigh a moderate speed
+  regression. When quality is unchanged, speed decides. Quality is judged from
+  median CV accuracy, median ARI against truth, final-plot silhouette, and
+  per-truth-label compactness.
 
 ## Cycle 1: PLS-LDA PCA20 Input
 
@@ -79,3 +83,44 @@ Evidence:
 | Br8100 | pca20 | 2 | 226.457 | 1.144 | 0.305622 | 37 | 0.275143 | 0.709127 |
 | MNIST | pca20 | 1 | 538.495 | 1.000 | 0.066169 | 298 | 0.435103 | 0.712651 |
 | MNIST | pca20 | 2 | 415.366 | 1.296 | 0.066169 | 298 | 0.439905 | 0.709147 |
+
+## Cycle 4: Direct Column-Major CUDA Response Matrix
+
+Thought: the CUDA PLS-LDA path used the same centered one-hot response as the
+CPU path, then converted it to column-major storage before launching SIMPLS.
+The CUDA backend already consumes column-major matrices, so constructing the
+centered one-hot response directly in that layout removes a full matrix copy
+without changing the labels, centering, SIMPLS math, LDA decoder, spatial
+constraints, KODAMA dissimilarity, or visualization initialization.
+
+Decision: Accepted. It is a clean implementation improvement for CUDA PLS-LDA.
+Median ARI is unchanged or slightly higher. KODAMA wall time improves on all
+three M=100 validation datasets, with the largest gain on MNIST, where the
+class response matrix is widest. MERFISH has a small worst-label compactness
+tradeoff, but unchanged labels and better silhouette; MNIST has a small
+silhouette tradeoff but unchanged median ARI and better worst-label
+compactness.
+
+Evidence versus the accepted Cycle 3 two-worker CUDA baseline:
+
+| dataset | variant | baseline KODAMA sec | candidate KODAMA sec | speedup sec | baseline median ARI | candidate median ARI | baseline silhouette | candidate silhouette | baseline compactness min | candidate compactness min |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| MERFISH | pca20 | 242.551 | 237.666 | 4.885 | 0.207211 | 0.207211 | 0.262248 | 0.265871 | 0.638624 | 0.629097 |
+| Br8100 | pca20 | 226.457 | 222.350 | 4.107 | 0.305622 | 0.305625 | 0.275143 | 0.279176 | 0.709127 | 0.725800 |
+| MNIST | pca20 | 415.366 | 352.204 | 63.162 | 0.066169 | 0.066169 | 0.439905 | 0.438118 | 0.709147 | 0.709224 |
+
+Step timing highlights:
+
+| dataset | KODAMA optimization wall sec | KODAMA graph sec | KODAMA dissimilarity sec | UMAP sec | compactness sec | total sec |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MERFISH | 237.202 | 0.197 | 0.016 | 0.444 | 0.018 | 250.808 |
+| Br8100 | 222.157 | 0.095 | 0.009 | 0.177 | 0.005 | 227.326 |
+| MNIST | 351.753 | 0.322 | 0.063 | 0.864 | 0.024 | 380.475 |
+
+Worst truth-label compactness on the final UMAP:
+
+| dataset | worst truth label | n | compactness |
+| --- | --- | ---: | ---: |
+| MERFISH | PVH | 3173 | 0.629097 |
+| Br8100 | Layer6 | 2430 | 0.725800 |
+| MNIST | 1 | 7877 | 0.709224 |
