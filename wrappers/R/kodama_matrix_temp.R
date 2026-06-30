@@ -175,12 +175,24 @@
   x
 }
 
-.kodama_visual_init <- function(x, method = c("opentsne", "umap")) {
+.kodama_visual_init <- function(x,
+                                method = c("opentsne", "umap"),
+                                backend = "cpu",
+                                seed = 4L) {
   method <- match.arg(method)
-  if (!is.list(x) || is.null(x$visual_init)) return(NULL)
-  init <- x$visual_init
-  if (is.matrix(init)) return(init)
-  if (is.list(init) && !is.null(init[[method]])) return(init[[method]])
+  if (!is.list(x)) return(NULL)
+  if (!is.null(x$visual_init)) {
+    init <- x$visual_init
+    if (is.matrix(init)) return(init)
+    if (is.list(init) && !is.null(init[[method]])) return(init[[method]])
+  }
+  if (!is.null(x$data)) {
+    init <- tryCatch(
+      .kodama_make_visual_init(.kodama_as_numeric_matrix(x$data), seed = seed, backend = backend),
+      error = function(e) NULL
+    )
+    if (is.list(init) && !is.null(init[[method]])) return(init[[method]])
+  }
   NULL
 }
 
@@ -424,7 +436,7 @@ KODAMA.umap.cuda.cpp <- function(knn,
                                  spectral.n.iter = 20L,
                                  seed = 1234L) {
   source <- knn
-  if (is.null(init)) init <- .kodama_visual_init(source, "umap")
+  if (is.null(init)) init <- .kodama_visual_init(source, "umap", backend = "cuda", seed = seed)
   knn <- .kodama_extract_knn(source)
   knn <- .kodama_strip_self_knn(knn, as.integer(n.neighbors))
   kodama_umap_cuda_temp(
@@ -481,7 +493,7 @@ KODAMA.umap.knn.fastEmbedR <- function(knn,
   }
   backend <- match.arg(backend)
   source <- knn
-  init <- if (isTRUE(use.visual.init)) .kodama_visual_init(source, "umap") else NULL
+  init <- if (isTRUE(use.visual.init)) .kodama_visual_init(source, "umap", backend = backend, seed = seed) else NULL
   if (!is.null(init) && backend == "cuda") {
     if (is.null(n.neighbors)) n.neighbors <- 30L
     knn_for_width <- .kodama_extract_knn(source)
@@ -529,7 +541,7 @@ KODAMA.opentsne.cuda.cpp <- function(knn,
                                      n.iter = 500L,
                                      seed = 4L) {
   source <- knn
-  if (is.null(init)) init <- .kodama_visual_init(source, "opentsne")
+  if (is.null(init)) init <- .kodama_visual_init(source, "opentsne", backend = "cuda", seed = seed)
   knn <- .kodama_extract_knn(source)
   if (is.null(n.neighbors)) n.neighbors <- ceiling(perplexity)
   knn <- .kodama_strip_self_knn(knn, as.integer(n.neighbors))
@@ -610,7 +622,7 @@ KODAMA.opentsne.knn.fastEmbedR <- function(knn,
   }
   backend <- match.arg(backend)
   source <- knn
-  if (is.null(Y.init) && isTRUE(use.visual.init)) Y.init <- .kodama_visual_init(source, "opentsne")
+  if (is.null(Y.init) && isTRUE(use.visual.init)) Y.init <- .kodama_visual_init(source, "opentsne", backend = backend, seed = seed)
   knn <- .kodama_extract_knn(source)
   if (is.null(n.neighbors)) n.neighbors <- ceiling(perplexity)
   # KODAMA.visualization uses 3 * perplexity neighbours for t-SNE from the
