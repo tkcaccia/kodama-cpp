@@ -13,9 +13,11 @@ option(KODAMA_ENABLE_CUDA "Build CUDA FAISS/cuVS backends" OFF)
 add_library(kodama_cpp
   src/common.cpp
   src/core.cpp
+  src/graph_cluster.cpp
   src/kodama_matrix.cpp
   src/knncv.cpp
   src/plscv.cpp
+  src/visualization.cpp
 )
 
 add_library(kodama::kodama_cpp ALIAS kodama_cpp)
@@ -117,6 +119,14 @@ if(KODAMA_ENABLE_CUDA)
       /usr/local/cuda-13.0/targets/x86_64-linux/lib
       /usr/lib/x86_64-linux-gnu
   )
+  find_library(CUDA_CUFFT_LIBRARY
+    NAMES cufft
+    HINTS
+      $ENV{CONDA_PREFIX}/targets/x86_64-linux/lib
+      /usr/local/cuda/lib64
+      /usr/local/cuda-13.0/targets/x86_64-linux/lib
+      /usr/lib/x86_64-linux-gnu
+  )
   find_path(ARMADILLO_INCLUDE_DIR
     NAMES armadillo
     HINTS /usr/include /usr/local/include $ENV{CONDA_PREFIX}/include
@@ -125,8 +135,8 @@ if(KODAMA_ENABLE_CUDA)
     NAMES mkl_rt
     HINTS $ENV{CONDA_PREFIX}/lib
   )
-  if(NOT CUDA_TOOLKIT_INCLUDE_DIR OR NOT CUDA_CUBLAS_LIBRARY OR NOT CUDA_RUNTIME_LIBRARY OR NOT CUDA_CUSOLVER_LIBRARY OR NOT CUDA_CURAND_LIBRARY)
-    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires CUDA headers, libcublas, libcusolver, libcurand, and libcudart.")
+  if(NOT CUDA_TOOLKIT_INCLUDE_DIR OR NOT CUDA_CUBLAS_LIBRARY OR NOT CUDA_RUNTIME_LIBRARY OR NOT CUDA_CUSOLVER_LIBRARY OR NOT CUDA_CURAND_LIBRARY OR NOT CUDA_CUFFT_LIBRARY)
+    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires CUDA headers, libcublas, libcusolver, libcurand, libcufft, and libcudart.")
   endif()
   if(NOT ARMADILLO_INCLUDE_DIR)
     message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires Armadillo headers for the fastPLS CUDA SIMPLS backend.")
@@ -155,10 +165,26 @@ if(KODAMA_ENABLE_CUDA)
   if(NOT CUVS_LIBRARY)
     message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires libcuvs.")
   endif()
+  find_path(CUGRAPH_INCLUDE_DIR
+    NAMES cugraph_c/community_algorithms.h
+    HINTS /usr/local/include $ENV{CONDA_PREFIX}/include
+  )
+  find_library(CUGRAPH_LIBRARY
+    NAMES cugraph_c
+    HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
+  )
+  if(CUGRAPH_INCLUDE_DIR AND CUGRAPH_LIBRARY)
+    target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUGRAPH=1)
+    target_include_directories(kodama_cpp PRIVATE ${CUGRAPH_INCLUDE_DIR})
+    target_link_libraries(kodama_cpp PRIVATE ${CUGRAPH_LIBRARY})
+    message(STATUS "RAPIDS cuGraph found: enabling CUDA Louvain/Leiden graph clustering")
+  else()
+    message(STATUS "RAPIDS cuGraph not found: CUDA graph clustering will report unavailable")
+  endif()
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1 KODAMA_ENABLE_CUVS=1)
   target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR} ${CUVS_INCLUDE_DIR} ${ARMADILLO_INCLUDE_DIR})
   target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-I${ARMADILLO_INCLUDE_DIR}>)
-  target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY} ${CUVS_LIBRARY} ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
+  target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY} ${CUVS_LIBRARY} ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
   if(MKL_RT_LIBRARY)
     target_link_libraries(kodama_cpp PRIVATE ${MKL_RT_LIBRARY})
   endif()
@@ -170,9 +196,9 @@ if(KODAMA_ENABLE_CUDA)
   if(CONDA_STDCXX_LIBRARY)
     target_link_libraries(kodama_cpp PRIVATE ${CONDA_STDCXX_LIBRARY})
   endif()
-  target_sources(kodama_cpp PRIVATE src/pls_cknn_cuda.cu src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/fastpls_cuda_simpls.cpp)
+  target_sources(kodama_cpp PRIVATE src/pls_cknn_cuda.cu src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/fastpls_cuda_simpls.cpp)
   set_property(TARGET kodama_cpp PROPERTY CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
-  set_source_files_properties(src/pls_cknn_cuda.cu src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu PROPERTIES LANGUAGE CUDA)
+  set_source_files_properties(src/pls_cknn_cuda.cu src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu PROPERTIES LANGUAGE CUDA)
 endif()
 
 include(GNUInstallDirs)

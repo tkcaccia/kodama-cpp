@@ -996,6 +996,7 @@ KODAMAMatrixResult run_kodama_matrix(
     NeighborGraph spatial_trimmed = trim_self_neighbors(spatial_global_graph, static_cast<int>(x.rows), neighbors);
     result.knn = merge_feature_spatial_graphs(result.knn, spatial_trimmed, static_cast<int>(x.rows), neighbors);
   }
+  result.base_knn = result.knn;
 
   const int workers = std::max(1, std::min(options.n_threads, options.runs));
   std::atomic<int> next_run{1};
@@ -1049,19 +1050,23 @@ KODAMAMatrixResult run_kodama_matrix(
     result.peak_memory_mb = std::max(result.peak_memory_mb, iter.memory);
   }
 
-  if (options.progress) {
-    std::cerr << "[kodama] applying KODAMA dissimilarity to KNN graph" << std::endl;
-  }
-#if defined(KODAMA_ENABLE_CUDA)
-  if (options.backend == Backend::CUDA) {
-    detail::apply_kodama_dissimilarity_cuda(result.knn, result.res, result.runs, result.samples, options.knn.gpu_device, true);
-  } else
-#endif
-  {
-    apply_kodama_dissimilarity(result.knn, result.res, result.runs, result.samples, options.n_threads);
-    for (std::size_t i = 0; i < result.knn.indices.size(); ++i) {
-      if (result.knn.indices[i] >= 0) result.knn.indices[i] += 1;
+  if (options.apply_kodama_dissimilarity) {
+    if (options.progress) {
+      std::cerr << "[kodama] applying KODAMA dissimilarity to KNN graph" << std::endl;
     }
+#if defined(KODAMA_ENABLE_CUDA)
+    if (options.backend == Backend::CUDA) {
+      detail::apply_kodama_dissimilarity_cuda(result.knn, result.res, result.runs, result.samples, options.knn.gpu_device, true);
+    } else
+#endif
+    {
+      apply_kodama_dissimilarity(result.knn, result.res, result.runs, result.samples, options.n_threads);
+      for (std::size_t i = 0; i < result.knn.indices.size(); ++i) {
+        if (result.knn.indices[i] >= 0) result.knn.indices[i] += 1;
+      }
+    }
+  } else if (options.progress) {
+    std::cerr << "[kodama] skipping final KODAMA dissimilarity for graph+labels output" << std::endl;
   }
   result.runtime_seconds = timer.seconds();
   result.peak_memory_mb = std::max(result.peak_memory_mb, detail::peak_memory_mb());

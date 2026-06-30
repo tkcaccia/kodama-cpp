@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -93,6 +94,48 @@ class CudaBlasContext {
  private:
   cublasHandle_t handle_ = nullptr;
 };
+
+class CudaLDAContext {
+ public:
+  explicit CudaLDAContext(int device) : device_(device) {
+    check_cuda(cudaSetDevice(device_), "cudaSetDevice(CudaLDAContext)");
+    check_cuda(cudaStreamCreate(&stream_), "cudaStreamCreate(CudaLDAContext)");
+    check_cublas(cublasCreate(&blas_), "cublasCreate(CudaLDAContext)");
+    check_cublas(cublasSetStream(blas_, stream_), "cublasSetStream(CudaLDAContext)");
+    check_cusolver(cusolverDnCreate(&solver_), "cusolverDnCreate(CudaLDAContext)");
+    check_cusolver(cusolverDnSetStream(solver_, stream_), "cusolverDnSetStream(CudaLDAContext)");
+  }
+
+  ~CudaLDAContext() {
+    if (solver_ != nullptr) cusolverDnDestroy(solver_);
+    if (blas_ != nullptr) cublasDestroy(blas_);
+    if (stream_ != nullptr) cudaStreamDestroy(stream_);
+  }
+
+  CudaLDAContext(const CudaLDAContext&) = delete;
+  CudaLDAContext& operator=(const CudaLDAContext&) = delete;
+
+  int device() const { return device_; }
+  cudaStream_t stream() const { return stream_; }
+  cublasHandle_t blas() const { return blas_; }
+  cusolverDnHandle_t solver() const { return solver_; }
+
+ private:
+  int device_ = 0;
+  cudaStream_t stream_ = nullptr;
+  cublasHandle_t blas_ = nullptr;
+  cusolverDnHandle_t solver_ = nullptr;
+};
+
+CudaLDAContext& cuda_lda_context(int device) {
+  thread_local std::unique_ptr<CudaLDAContext> context;
+  if (!context || context->device() != device) {
+    context = std::make_unique<CudaLDAContext>(device);
+  } else {
+    check_cuda(cudaSetDevice(device), "cudaSetDevice(cuda_lda_context)");
+  }
+  return *context;
+}
 
 class DeviceBuffer {
  public:
@@ -1046,7 +1089,10 @@ CudaLDAModel train_pls_lda_cuda(
   const int n = t_train.rows;
   const int k = t_train.cols;
   const int cnum = static_cast<int>(classes.size());
-  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(train_pls_lda_cuda)");
+  CudaLDAContext& context = cuda_lda_context(gpu_device);
+  cudaStream_t stream = context.stream();
+  cublasHandle_t blas = context.blas();
+  cusolverDnHandle_t solver = context.solver();
 
   std::map<int, int> cpos;
   for (int c = 0; c < cnum; ++c) cpos[classes[static_cast<std::size_t>(c)]] = c;
@@ -1058,9 +1104,6 @@ CudaLDAModel train_pls_lda_cuda(
     counts[static_cast<std::size_t>(cls)] += 1.0;
   }
 
-  cudaStream_t stream = nullptr;
-  cublasHandle_t blas = nullptr;
-  cusolverDnHandle_t solver = nullptr;
   DeviceBuffer d_t(t_train.data.size());
   DeviceIntBuffer d_labels(encoded.size());
   DeviceBuffer d_counts(counts.size());
@@ -1076,17 +1119,9 @@ CudaLDAModel train_pls_lda_cuda(
 
   auto cleanup = [&]() {
     if (d_work != nullptr) cudaFree(d_work);
-    if (solver != nullptr) cusolverDnDestroy(solver);
-    if (blas != nullptr) cublasDestroy(blas);
-    if (stream != nullptr) cudaStreamDestroy(stream);
   };
 
   try {
-    check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate(train_pls_lda_cuda)");
-    check_cublas(cublasCreate(&blas), "cublasCreate(train_pls_lda_cuda)");
-    check_cublas(cublasSetStream(blas, stream), "cublasSetStream(train_pls_lda_cuda)");
-    check_cusolver(cusolverDnCreate(&solver), "cusolverDnCreate(train_pls_lda_cuda)");
-    check_cusolver(cusolverDnSetStream(solver, stream), "cusolverDnSetStream(train_pls_lda_cuda)");
     check_cuda(cudaMemcpyAsync(d_t.data(), t_train.data.data(), t_train.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA T");
     check_cuda(cudaMemcpyAsync(d_labels.data(), encoded.data(), encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA labels");
     check_cuda(cudaMemcpyAsync(d_counts.data(), counts.data(), counts.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA counts");
@@ -1152,6 +1187,130 @@ CudaLDAModel train_pls_lda_cuda(
   }
 }
 
+std::vector<int> train_predict_pls_lda_cuda(
+  const Dense& t_train,
+  const std::vector<int>& y_train,
+  const Dense& t_val,
+  const std::vector<int>& classes,
+  int gpu_device
+) {
+  if (t_train.rows < 1 || t_train.cols < 1) throw std::invalid_argument("CUDA LDA requires a non-empty score matrix.");
+  if (static_cast<int>(y_train.size()) != t_train.rows) throw std::invalid_argument("CUDA LDA label size mismatch.");
+  if (t_val.rows < 1) return {};
+  if (t_val.cols != t_train.cols) throw std::invalid_argument("CUDA LDA train/validation score column mismatch.");
+  const int n = t_train.rows;
+  const int k = t_train.cols;
+  const int n_val = t_val.rows;
+  const int cnum = static_cast<int>(classes.size());
+  CudaLDAContext& context = cuda_lda_context(gpu_device);
+  cudaStream_t stream = context.stream();
+  cublasHandle_t blas = context.blas();
+  cusolverDnHandle_t solver = context.solver();
+
+  std::map<int, int> cpos;
+  for (int c = 0; c < cnum; ++c) cpos[classes[static_cast<std::size_t>(c)]] = c;
+  std::vector<int> encoded(static_cast<std::size_t>(n), 1);
+  std::vector<double> counts(static_cast<std::size_t>(cnum), 0.0);
+  for (int i = 0; i < n; ++i) {
+    const int cls = cpos.at(y_train[static_cast<std::size_t>(i)]);
+    encoded[static_cast<std::size_t>(i)] = cls + 1;
+    counts[static_cast<std::size_t>(cls)] += 1.0;
+  }
+
+  DeviceBuffer d_t(t_train.data.size());
+  DeviceIntBuffer d_labels(encoded.size());
+  DeviceBuffer d_counts(counts.size());
+  DeviceBuffer d_means(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
+  DeviceBuffer d_pooled(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
+  DeviceBuffer d_cov(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
+  DeviceBuffer d_rhs(static_cast<std::size_t>(k) * static_cast<std::size_t>(cnum));
+  DeviceBuffer d_linear(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
+  DeviceBuffer d_constants(static_cast<std::size_t>(cnum));
+  DeviceBuffer d_lambda(1);
+  DeviceIntBuffer d_info(1);
+  DeviceBuffer d_t_val(t_val.data.size());
+  DeviceIntBuffer d_pred(static_cast<std::size_t>(n_val));
+  double* d_work = nullptr;
+
+  auto cleanup = [&]() {
+    if (d_work != nullptr) cudaFree(d_work);
+  };
+
+  try {
+    check_cuda(cudaMemcpyAsync(d_t.data(), t_train.data.data(), t_train.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA T");
+    check_cuda(cudaMemcpyAsync(d_labels.data(), encoded.data(), encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA labels");
+    check_cuda(cudaMemcpyAsync(d_counts.data(), counts.data(), counts.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA counts");
+
+    kodama_cuda_lda_label_sums_row(d_t.data(), d_labels.data(), n, k, cnum, d_means.data(), stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_label_sums_row");
+    kodama_cuda_lda_means_row(d_means.data(), d_counts.data(), k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_row");
+
+    const double one = 1.0;
+    const double zero = 0.0;
+    check_cublas(
+      cublasDgemm(
+        blas,
+        CUBLAS_OP_N,
+        CUBLAS_OP_T,
+        k,
+        k,
+        n,
+        &one,
+        d_t.data(),
+        k,
+        d_t.data(),
+        k,
+        &zero,
+        d_pooled.data(),
+        k
+      ),
+      "cublasDgemm CUDA LDA TtT"
+    );
+    kodama_cuda_lda_pooled_col(d_pooled.data(), d_means.data(), d_counts.data(), n, k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_pooled_col");
+    kodama_cuda_lda_copy_cov(d_pooled.data(), d_cov.data(), k, k, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_copy_cov");
+    kodama_cuda_lda_add_ridge(d_cov.data(), k, 1e-8, d_lambda.data(), stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_add_ridge");
+    kodama_cuda_lda_means_to_rhs(d_means.data(), d_rhs.data(), k, k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_to_rhs");
+
+    int lwork = 0;
+    check_cusolver(cusolverDnDpotrf_bufferSize(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, &lwork), "cusolverDnDpotrf_bufferSize CUDA LDA");
+    check_cuda(cudaMalloc(&d_work, sizeof(double) * static_cast<std::size_t>(std::max(lwork, 1))), "cudaMalloc CUDA LDA work");
+    check_cusolver(cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, d_work, lwork, d_info.data()), "cusolverDnDpotrf CUDA LDA");
+    int info = 0;
+    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA potrf info");
+    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA potrf");
+    if (info != 0) throw std::runtime_error("cusolverDnDpotrf CUDA LDA returned non-zero info.");
+    check_cusolver(cusolverDnDpotrs(solver, CUBLAS_FILL_MODE_LOWER, k, cnum, d_cov.data(), k, d_rhs.data(), k, d_info.data()), "cusolverDnDpotrs CUDA LDA");
+    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA potrs info");
+    kodama_cuda_lda_finalize_linear_row(d_rhs.data(), d_means.data(), d_counts.data(), d_linear.data(), d_constants.data(), n, k, k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_finalize_linear_row");
+    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA solve");
+    if (info != 0) throw std::runtime_error("cusolverDnDpotrs CUDA LDA returned non-zero info.");
+
+    check_cuda(cudaMemcpyAsync(d_t_val.data(), t_val.data.data(), t_val.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict T");
+    kodama_cuda_lda_score_argmax_row(d_t_val.data(), d_linear.data(), d_constants.data(), d_pred.data(), n_val, k, cnum, stream);
+    check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row");
+    std::vector<int> codes(static_cast<std::size_t>(n_val), 1);
+    check_cuda(cudaMemcpyAsync(codes.data(), d_pred.data(), codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA predict labels");
+    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA predict");
+    cleanup();
+
+    std::vector<int> pred(static_cast<std::size_t>(n_val), classes.front());
+    for (int i = 0; i < n_val; ++i) {
+      const int cls = std::max(1, std::min(cnum, codes[static_cast<std::size_t>(i)])) - 1;
+      pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
+    }
+    return pred;
+  } catch (...) {
+    cleanup();
+    throw;
+  }
+}
+
 std::vector<int> predict_pls_lda_cuda(
   const Dense& t_val,
   const CudaLDAModel& model,
@@ -1162,13 +1321,12 @@ std::vector<int> predict_pls_lda_cuda(
   const int n = t_val.rows;
   const int k = t_val.cols;
   const int cnum = static_cast<int>(classes.size());
-  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(predict_pls_lda_cuda)");
-  cudaStream_t stream = nullptr;
+  CudaLDAContext& context = cuda_lda_context(gpu_device);
+  cudaStream_t stream = context.stream();
   DeviceBuffer d_t(t_val.data.size());
   DeviceBuffer d_linear(model.linear.data.size());
   DeviceBuffer d_constants(model.constants.size());
   DeviceIntBuffer d_pred(static_cast<std::size_t>(n));
-  check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate(predict_pls_lda_cuda)");
   check_cuda(cudaMemcpyAsync(d_t.data(), t_val.data.data(), t_val.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict T");
   check_cuda(cudaMemcpyAsync(d_linear.data(), model.linear.data.data(), model.linear.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict linear");
   check_cuda(cudaMemcpyAsync(d_constants.data(), model.constants.data(), model.constants.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict constants");
@@ -1177,7 +1335,6 @@ std::vector<int> predict_pls_lda_cuda(
   std::vector<int> codes(static_cast<std::size_t>(n), 1);
   check_cuda(cudaMemcpyAsync(codes.data(), d_pred.data(), codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA predict labels");
   check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA predict");
-  cudaStreamDestroy(stream);
   std::vector<int> pred(static_cast<std::size_t>(n), classes.front());
   for (int i = 0; i < n; ++i) {
     const int cls = std::max(1, std::min(cnum, codes[static_cast<std::size_t>(i)])) - 1;
@@ -1811,8 +1968,7 @@ PLSCVResult run_plscv_cuda(
       for (int a : eval_components) {
         std::vector<int> fold_pred;
         if (mode == PLSMode::PLS_LDA) {
-          CudaLDAModel lda = train_pls_lda_cuda(fit.train_scores, y_train_labels, classes, options.gpu_device);
-          fold_pred = predict_pls_lda_cuda(t_val_full, lda, classes, options.gpu_device);
+          fold_pred = train_predict_pls_lda_cuda(fit.train_scores, y_train_labels, t_val_full, classes, options.gpu_device);
         } else {
           fold_pred = predict_pls_da_cuda(fit.train_scores, y_train_labels, t_val_full, classes, y_mean, options.gpu_device);
         }

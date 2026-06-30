@@ -61,6 +61,25 @@ const char* to_string(CoreClassifier classifier) {
   return "unknown";
 }
 
+const char* to_string(GraphWeightType weight_type) {
+  switch (weight_type) {
+    case GraphWeightType::SNN: return "snn";
+    case GraphWeightType::Distance: return "distance";
+    case GraphWeightType::Adaptive: return "adaptive";
+    case GraphWeightType::Binary: return "binary";
+  }
+  return "unknown";
+}
+
+const char* to_string(GraphClusterMethod method) {
+  switch (method) {
+    case GraphClusterMethod::Louvain: return "louvain";
+    case GraphClusterMethod::Leiden: return "leiden";
+    case GraphClusterMethod::RandomWalking: return "random_walking";
+  }
+  return "unknown";
+}
+
 }  // namespace kodama
 
 namespace kodama::detail {

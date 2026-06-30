@@ -36,6 +36,19 @@ enum class CoreClassifier {
   KNN
 };
 
+enum class GraphWeightType {
+  SNN,
+  Distance,
+  Adaptive,
+  Binary
+};
+
+enum class GraphClusterMethod {
+  Louvain,
+  Leiden,
+  RandomWalking
+};
+
 enum class MatrixValueType {
   Float64,
   Float32
@@ -210,6 +223,44 @@ struct NeighborGraph {
   int neighbors = 0;
 };
 
+struct GraphClusterOptions {
+  GraphClusterMethod method = GraphClusterMethod::Louvain;
+  Backend backend = Backend::CPU;
+  GraphWeightType weight_type = GraphWeightType::Distance;
+  DistanceMetric metric = DistanceMetric::Euclidean;
+  int k = 30;
+  int n_threads = 1;
+  int n_runs = 1;
+  int n_iterations = 10;
+  int random_walk_steps = 4;
+  int target_clusters = 0;
+  int target_max_steps = 80;
+  int gpu_device = 0;
+  double resolution = 1.0;
+  double target_resolution_init = 0.0;
+  double target_delta = 0.2;
+  double prune = 0.0;
+  bool mutual = false;
+  std::uint64_t seed = 1;
+};
+
+struct GraphClusterResult {
+  std::vector<int> membership;
+  double modularity = 0.0;
+  int n_communities = 0;
+  int selected_run = 1;
+  std::vector<double> all_modularity;
+  int n_vertices = 0;
+  int n_edges = 0;
+  int target_clusters = 0;
+  int target_gap = 0;
+  bool target_exact = true;
+  double selected_resolution = 1.0;
+  double runtime_seconds = 0.0;
+  Backend backend = Backend::CPU;
+  GraphClusterMethod method = GraphClusterMethod::Louvain;
+};
+
 struct KODAMAMatrixOptions {
   int runs = 100;
   int cycles = 20;
@@ -227,6 +278,7 @@ struct KODAMAMatrixOptions {
   Backend backend = Backend::CPU;
   CoreClassifier classifier = CoreClassifier::KNN;
   bool progress = false;
+  bool apply_kodama_dissimilarity = true;
   std::vector<float> spatial;
   KNNOptions knn;
   PLSOptions pls;
@@ -237,6 +289,7 @@ struct KODAMAMatrixResult {
   std::vector<double> v;
   std::vector<int> res;
   std::vector<int> res_constrain;
+  NeighborGraph base_knn;
   NeighborGraph knn;
   int runs = 0;
   int samples = 0;
@@ -244,6 +297,47 @@ struct KODAMAMatrixResult {
   int n_threads = 1;
   double runtime_seconds = 0.0;
   double peak_memory_mb = 0.0;
+};
+
+struct UMAPOptions {
+  int n_components = 2;
+  int n_epochs = 200;
+  int n_neighbors = 30;
+  int negative_sample_rate = 5;
+  double learning_rate = 1.0;
+  double min_dist = 0.01;
+  double repulsion_strength = 1.0;
+  int spectral_n_iter = 20;
+  int seed = 1234;
+  int gpu_device = 0;
+  std::vector<float> init;
+};
+
+struct OpenTSNEOptions {
+  int n_components = 2;
+  int n_neighbors = 0;
+  double perplexity = 15.0;
+  int early_exaggeration_iter = 250;
+  int n_iter = 500;
+  double early_exaggeration = 12.0;
+  double exaggeration = 1.0;
+  double learning_rate = 0.0;
+  bool learning_rate_auto = true;
+  double initial_momentum = 0.8;
+  double final_momentum = 0.8;
+  double min_gain = 0.01;
+  double max_step_norm = 5.0;
+  int seed = 4;
+  int gpu_device = 0;
+  std::vector<float> init;
+};
+
+struct EmbeddingResult {
+  std::vector<float> embedding;
+  int samples = 0;
+  int components = 2;
+  Backend backend = Backend::CPU;
+  double runtime_seconds = 0.0;
 };
 
 KNNCVResult KNNCV(
@@ -439,10 +533,60 @@ KODAMAMatrixResult KODAMAMatrix(
   const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
 );
 
+EmbeddingResult KODAMAUMAP_CUDA(
+  const NeighborGraph& graph,
+  const UMAPOptions& options = UMAPOptions()
+);
+
+EmbeddingResult KODAMAOpenTSNE_CUDA(
+  const NeighborGraph& graph,
+  const OpenTSNEOptions& options = OpenTSNEOptions()
+);
+
+NeighborGraph KODAMAKNNGraph_CPU(
+  MatrixView x,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
+NeighborGraph KODAMAKNNGraph_CUDA(
+  MatrixView x,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
+NeighborGraph KODAMAKNNGraph(
+  MatrixView x,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
+GraphClusterResult KODAMAGraphCluster_CPU(
+  const NeighborGraph& graph,
+  int samples,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
+GraphClusterResult KODAMAGraphCluster_CUDA(
+  const NeighborGraph& graph,
+  int samples,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
+GraphClusterResult KODAMAGraphCluster(
+  const NeighborGraph& graph,
+  int samples,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
+GraphClusterResult KODAMAEmbeddingCluster(
+  MatrixView embedding,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
 const char* to_string(Backend backend);
 const char* to_string(DistanceMetric metric);
 const char* to_string(KNNIndexType index_type);
 const char* to_string(PLSMode mode);
 const char* to_string(CoreClassifier classifier);
+const char* to_string(GraphWeightType weight_type);
+const char* to_string(GraphClusterMethod method);
 
 }  // namespace kodama
