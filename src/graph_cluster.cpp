@@ -1,4 +1,5 @@
 #include "kodama/kodama.hpp"
+#include "spatial_grid_knn.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -21,6 +22,8 @@
 #endif
 
 #ifdef KODAMA_ENABLE_CUDA
+#include "kodama_matrix_cuda.hpp"
+
 #include <faiss/gpu/GpuIndexFlat.h>
 #include <faiss/gpu/StandardGpuResources.h>
 #endif
@@ -68,7 +71,7 @@ struct OmpScope {
 std::vector<float> copy_float32(MatrixView x) {
   std::vector<float> out(x.rows * x.cols);
   for (std::size_t i = 0; i < x.rows; ++i) {
-    for (std::size_t j = 0; j < x.cols; ++j) out[i * x.cols + j] = static_cast<float>(x(i, j));
+    for (std::size_t j = 0; j < x.cols; ++j) out[i * x.cols + j] = x.value_float(i, j);
   }
   return out;
 }
@@ -198,6 +201,36 @@ struct EdgeList {
   std::vector<double> weight;
 };
 
+struct DisjointSet {
+  std::vector<int> parent;
+  std::vector<int> rank;
+
+  explicit DisjointSet(int n) : parent(static_cast<std::size_t>(n)), rank(static_cast<std::size_t>(n), 0) {
+    std::iota(parent.begin(), parent.end(), 0);
+  }
+
+  int find(int x) {
+    int root = x;
+    while (parent[static_cast<std::size_t>(root)] != root) root = parent[static_cast<std::size_t>(root)];
+    while (parent[static_cast<std::size_t>(x)] != x) {
+      const int next = parent[static_cast<std::size_t>(x)];
+      parent[static_cast<std::size_t>(x)] = root;
+      x = next;
+    }
+    return root;
+  }
+
+  bool unite(int a, int b) {
+    int ra = find(a);
+    int rb = find(b);
+    if (ra == rb) return false;
+    if (rank[static_cast<std::size_t>(ra)] < rank[static_cast<std::size_t>(rb)]) std::swap(ra, rb);
+    parent[static_cast<std::size_t>(rb)] = ra;
+    if (rank[static_cast<std::size_t>(ra)] == rank[static_cast<std::size_t>(rb)]) ++rank[static_cast<std::size_t>(ra)];
+    return true;
+  }
+};
+
 EdgeList edge_list_from_graph(const NeighborGraph& graph, int n, const GraphClusterOptions& options) {
   if (n < 2 || graph.neighbors < 1) throw std::invalid_argument("graph clustering requires a non-empty graph.");
   if (graph.indices.size() != static_cast<std::size_t>(n) * graph.neighbors ||
@@ -304,6 +337,146 @@ EdgeList edge_list_from_graph(const NeighborGraph& graph, int n, const GraphClus
   return out;
 }
 
+std::vector<int> components_from_edges(const EdgeList& edges) {
+  DisjointSet dsu(edges.n);
+  for (std::size_t e = 0; e < edges.from.size(); ++e) {
+    const int u = edges.from[e];
+    const int v = edges.to[e];
+    const double w = edges.weight[e];
+    if (u >= 0 && u < edges.n && v >= 0 && v < edges.n && u != v && std::isfinite(w) && w > 0.0) dsu.unite(u, v);
+  }
+  std::unordered_map<int, int> remap;
+  remap.reserve(static_cast<std::size_t>(edges.n));
+  std::vector<int> comp(static_cast<std::size_t>(edges.n), 0);
+  int next = 0;
+  for (int i = 0; i < edges.n; ++i) {
+    const int root = dsu.find(i);
+    auto it = remap.find(root);
+    if (it == remap.end()) it = remap.emplace(root, next++).first;
+    comp[static_cast<std::size_t>(i)] = it->second;
+  }
+  return comp;
+}
+
+int component_count(const std::vector<int>& comp) {
+  int count = 0;
+  for (int c : comp) count = std::max(count, c + 1);
+  return count;
+}
+
+double robust_edge_weight(const EdgeList& edges) {
+  std::vector<double> weights;
+  weights.reserve(edges.weight.size());
+  for (double w : edges.weight) {
+    if (std::isfinite(w) && w > 0.0) weights.push_back(w);
+  }
+  if (weights.empty()) return 1.0;
+  const std::size_t mid = weights.size() / 2;
+  std::nth_element(weights.begin(), weights.begin() + static_cast<std::ptrdiff_t>(mid), weights.end());
+  return std::max(1e-12, weights[mid]);
+}
+
+double squared_distance(MatrixView x, int a, int b) {
+  double out = 0.0;
+  for (std::size_t j = 0; j < x.cols; ++j) {
+    const double d = static_cast<double>(x.value_float(static_cast<std::size_t>(a), j)) -
+                     static_cast<double>(x.value_float(static_cast<std::size_t>(b), j));
+    out += d * d;
+  }
+  return out;
+}
+
+double squared_centroid_distance(const std::vector<double>& centroids, int dims, int a, int b) {
+  double out = 0.0;
+  const std::size_t ao = static_cast<std::size_t>(a) * dims;
+  const std::size_t bo = static_cast<std::size_t>(b) * dims;
+  for (int j = 0; j < dims; ++j) {
+    const double d = centroids[ao + static_cast<std::size_t>(j)] - centroids[bo + static_cast<std::size_t>(j)];
+    out += d * d;
+  }
+  return out;
+}
+
+void bridge_embedding_components(EdgeList& edges, MatrixView embedding) {
+  if (edges.n < 2) return;
+  if (embedding.rows != static_cast<std::size_t>(edges.n)) throw std::invalid_argument("Embedding row count does not match graph vertices.");
+  if (embedding.cols < 1) throw std::invalid_argument("Embedding clustering requires at least one column.");
+
+  const std::vector<int> comp = components_from_edges(edges);
+  const int n_comp = component_count(comp);
+  if (n_comp <= 1) return;
+
+  const int dims = static_cast<int>(embedding.cols);
+  std::vector<int> counts(static_cast<std::size_t>(n_comp), 0);
+  std::vector<double> centroids(static_cast<std::size_t>(n_comp) * dims, 0.0);
+  for (int i = 0; i < edges.n; ++i) {
+    const int c = comp[static_cast<std::size_t>(i)];
+    ++counts[static_cast<std::size_t>(c)];
+    const std::size_t off = static_cast<std::size_t>(c) * dims;
+    for (int j = 0; j < dims; ++j) centroids[off + static_cast<std::size_t>(j)] += embedding(static_cast<std::size_t>(i), static_cast<std::size_t>(j));
+  }
+  for (int c = 0; c < n_comp; ++c) {
+    const double denom = static_cast<double>(std::max(1, counts[static_cast<std::size_t>(c)]));
+    const std::size_t off = static_cast<std::size_t>(c) * dims;
+    for (int j = 0; j < dims; ++j) centroids[off + static_cast<std::size_t>(j)] /= denom;
+  }
+
+  std::vector<int> representative(static_cast<std::size_t>(n_comp), -1);
+  std::vector<double> rep_dist(static_cast<std::size_t>(n_comp), std::numeric_limits<double>::infinity());
+  for (int i = 0; i < edges.n; ++i) {
+    const int c = comp[static_cast<std::size_t>(i)];
+    double dist = 0.0;
+    const std::size_t off = static_cast<std::size_t>(c) * dims;
+    for (int j = 0; j < dims; ++j) {
+      const double d = embedding(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) - centroids[off + static_cast<std::size_t>(j)];
+      dist += d * d;
+    }
+    if (dist < rep_dist[static_cast<std::size_t>(c)] || (dist == rep_dist[static_cast<std::size_t>(c)] && i < representative[static_cast<std::size_t>(c)])) {
+      rep_dist[static_cast<std::size_t>(c)] = dist;
+      representative[static_cast<std::size_t>(c)] = i;
+    }
+  }
+
+  const double weight = robust_edge_weight(edges);
+  std::vector<double> best_dist(static_cast<std::size_t>(n_comp), std::numeric_limits<double>::infinity());
+  std::vector<int> parent(static_cast<std::size_t>(n_comp), -1);
+  std::vector<char> in_tree(static_cast<std::size_t>(n_comp), 0);
+  best_dist[0] = 0.0;
+  for (int iter = 0; iter < n_comp; ++iter) {
+    int u = -1;
+    double best = std::numeric_limits<double>::infinity();
+    for (int c = 0; c < n_comp; ++c) {
+      if (!in_tree[static_cast<std::size_t>(c)] && best_dist[static_cast<std::size_t>(c)] < best) {
+        best = best_dist[static_cast<std::size_t>(c)];
+        u = c;
+      }
+    }
+    if (u < 0) break;
+    in_tree[static_cast<std::size_t>(u)] = 1;
+    if (parent[static_cast<std::size_t>(u)] >= 0) {
+      const int a = representative[static_cast<std::size_t>(u)];
+      const int b = representative[static_cast<std::size_t>(parent[static_cast<std::size_t>(u)])];
+      if (a >= 0 && b >= 0 && a != b) {
+        edges.from.push_back(std::min(a, b));
+        edges.to.push_back(std::max(a, b));
+        edges.weight.push_back(weight);
+      }
+    }
+    for (int v = 0; v < n_comp; ++v) {
+      if (in_tree[static_cast<std::size_t>(v)] || v == u) continue;
+      double dist = squared_centroid_distance(centroids, dims, u, v);
+      const int ru = representative[static_cast<std::size_t>(u)];
+      const int rv = representative[static_cast<std::size_t>(v)];
+      if (ru >= 0 && rv >= 0) dist = std::min(dist, squared_distance(embedding, ru, rv));
+      if (dist < best_dist[static_cast<std::size_t>(v)] ||
+          (dist == best_dist[static_cast<std::size_t>(v)] && u < parent[static_cast<std::size_t>(v)])) {
+        best_dist[static_cast<std::size_t>(v)] = dist;
+        parent[static_cast<std::size_t>(v)] = u;
+      }
+    }
+  }
+}
+
 struct CsrGraph {
   int n = 0;
   std::vector<int> ptr;
@@ -360,6 +533,12 @@ std::vector<int> compact(std::vector<int> x) {
   return x;
 }
 
+int dense_membership_count(const std::vector<int>& membership) {
+  int count = 0;
+  for (int c : membership) count = std::max(count, c + 1);
+  return count;
+}
+
 std::vector<double> community_degree(const CsrGraph& g, const std::vector<int>& membership) {
   int max_comm = 0;
   for (int c : membership) max_comm = std::max(max_comm, c);
@@ -391,14 +570,11 @@ std::vector<int> louvain_local_moving(const CsrGraph& g, int max_iter, double re
   if (g.total_weight <= 0.0) return membership;
   const double two_m = 2.0 * g.total_weight;
   max_iter = std::max(1, max_iter);
-  n_threads = std::max(1, n_threads);
+  (void)n_threads;
+  (void)seed;
+  std::vector<double> cdeg = community_degree(g, membership);
   for (int iter = 0; iter < max_iter; ++iter) {
-    const std::vector<double> cdeg = community_degree(g, membership);
-    std::vector<int> proposed = membership;
     int changed = 0;
-#ifdef _OPENMP
-#pragma omp parallel for num_threads(n_threads) schedule(dynamic, 256) reduction(+:changed)
-#endif
     for (int u = 0; u < g.n; ++u) {
       std::unordered_map<int, double> neigh;
       neigh.reserve(static_cast<std::size_t>(g.ptr[static_cast<std::size_t>(u + 1)] - g.ptr[static_cast<std::size_t>(u)] + 1));
@@ -407,28 +583,81 @@ std::vector<int> louvain_local_moving(const CsrGraph& g, int max_iter, double re
         neigh[membership[static_cast<std::size_t>(g.to[static_cast<std::size_t>(p)])]] += g.weight[static_cast<std::size_t>(p)];
       }
       const double k_i = g.degree[static_cast<std::size_t>(u)];
-      const double old_weight = neigh.count(old) ? neigh[old] : 0.0;
-      const double stay = old_weight - resolution * k_i * std::max(0.0, cdeg[static_cast<std::size_t>(old)] - k_i) / two_m;
+      cdeg[static_cast<std::size_t>(old)] -= k_i;
       int best = old;
-      double best_delta = 0.0;
+      double best_gain = 0.0;
       for (const auto& kv : neigh) {
-        double cand_deg = cdeg[static_cast<std::size_t>(kv.first)];
-        if (kv.first == old) cand_deg -= k_i;
-        const double gain = kv.second - resolution * k_i * cand_deg / two_m;
-        const double delta = gain - stay;
-        if (delta > best_delta + 1e-12 || (std::abs(delta - best_delta) <= 1e-12 && kv.first < best && delta > 0.0)) {
-          best_delta = delta;
+        if (kv.first < 0 || kv.first >= static_cast<int>(cdeg.size())) continue;
+        const double gain = kv.second - resolution * k_i * cdeg[static_cast<std::size_t>(kv.first)] / two_m;
+        if (gain > best_gain + 1e-12 || (std::abs(gain - best_gain) <= 1e-12 && kv.first < best && gain > 0.0)) {
+          best_gain = gain;
           best = kv.first;
         }
       }
-      proposed[static_cast<std::size_t>(u)] = best;
-      if (best != old) ++changed;
+      cdeg[static_cast<std::size_t>(best)] += k_i;
+      if (best != old) {
+        membership[static_cast<std::size_t>(u)] = best;
+        ++changed;
+      }
     }
-    membership = compact(std::move(proposed));
+    membership = compact(std::move(membership));
+    cdeg = community_degree(g, membership);
     if (changed == 0) break;
-    if ((iter + seed) % 4 == 3) membership = compact(std::move(membership));
   }
   return compact(std::move(membership));
+}
+
+CsrGraph coarsen_graph(const CsrGraph& g, const std::vector<int>& membership, int n_communities) {
+  std::unordered_map<std::uint64_t, double> weights;
+  weights.reserve(static_cast<std::size_t>(g.ptr.back() / 2 + 1));
+  for (int u = 0; u < g.n; ++u) {
+    const int cu = membership[static_cast<std::size_t>(u)];
+    for (int p = g.ptr[static_cast<std::size_t>(u)]; p < g.ptr[static_cast<std::size_t>(u + 1)]; ++p) {
+      const int v = g.to[static_cast<std::size_t>(p)];
+      if (v <= u) continue;
+      const int cv = membership[static_cast<std::size_t>(v)];
+      if (cu == cv) continue;
+      weights[edge_key(cu, cv)] += g.weight[static_cast<std::size_t>(p)];
+    }
+  }
+
+  EdgeList edges;
+  edges.n = n_communities;
+  edges.from.reserve(weights.size());
+  edges.to.reserve(weights.size());
+  edges.weight.reserve(weights.size());
+  for (const auto& kv : weights) {
+    if (kv.second <= 0.0 || !std::isfinite(kv.second)) continue;
+    edges.from.push_back(edge_from(kv.first));
+    edges.to.push_back(edge_to(kv.first));
+    edges.weight.push_back(kv.second);
+  }
+  return csr_from_edges(edges);
+}
+
+std::vector<int> louvain_multilevel(const CsrGraph& g, int max_iter, double resolution, int n_threads, int seed) {
+  std::vector<int> original_to_current(static_cast<std::size_t>(g.n));
+  std::iota(original_to_current.begin(), original_to_current.end(), 0);
+  if (g.total_weight <= 0.0) return original_to_current;
+
+  CsrGraph current = g;
+  const int max_levels = std::max(1, std::min(50, max_iter));
+  for (int level = 0; level < max_levels; ++level) {
+    std::vector<int> level_membership =
+      louvain_local_moving(current, max_iter, resolution, n_threads, seed + level * 104729);
+    level_membership = compact(std::move(level_membership));
+    const int n_communities = dense_membership_count(level_membership);
+    if (n_communities >= current.n) break;
+
+    for (int& c : original_to_current) c = level_membership[static_cast<std::size_t>(c)];
+    original_to_current = compact(std::move(original_to_current));
+    if (n_communities <= 1) break;
+
+    CsrGraph next = coarsen_graph(current, level_membership, n_communities);
+    if (next.n >= current.n || next.total_weight <= 0.0) break;
+    current = std::move(next);
+  }
+  return compact(std::move(original_to_current));
 }
 
 std::vector<int> split_disconnected(const CsrGraph& g, const std::vector<int>& membership) {
@@ -545,9 +774,9 @@ GraphClusterResult run_cpu_cluster_once(const CsrGraph& g, const EdgeList& edge_
     const int run_seed = static_cast<int>(opts.seed + static_cast<std::uint64_t>(run) * 104729ULL);
     std::vector<int> membership;
     if (opts.method == GraphClusterMethod::Louvain) {
-      membership = louvain_local_moving(g, opts.n_iterations, opts.resolution, opts.n_threads, run_seed);
+      membership = louvain_multilevel(g, opts.n_iterations, opts.resolution, opts.n_threads, run_seed);
     } else if (opts.method == GraphClusterMethod::Leiden) {
-      membership = split_disconnected(g, louvain_local_moving(g, std::max(2, opts.n_iterations), opts.resolution, opts.n_threads, run_seed));
+      membership = split_disconnected(g, louvain_multilevel(g, std::max(2, opts.n_iterations), opts.resolution, opts.n_threads, run_seed));
     } else {
       membership = random_walk_cluster(g, opts.random_walk_steps, opts.n_iterations, opts.n_threads);
     }
@@ -583,58 +812,100 @@ GraphClusterResult search_target_clusters(GraphClusterOptions options, RunAtReso
   }
 
   double delta = std::isfinite(options.target_delta) && options.target_delta > 0.0 ? options.target_delta : 0.2;
-  double res = options.target_resolution_init - delta;
-  int t = 0;
   const int max_steps = std::max(1, options.target_max_steps);
   GraphClusterResult best;
   bool have_best = false;
   int steps = 0;
 
+  auto effective_gap = [&](const GraphClusterResult& candidate) {
+    if (candidate.membership.empty() || options.target_clusters <= 0) return std::numeric_limits<double>::infinity();
+    std::unordered_map<int, int> counts;
+    counts.reserve(candidate.membership.size());
+    for (int c : candidate.membership) ++counts[c];
+    const double n = static_cast<double>(candidate.membership.size());
+    double entropy = 0.0;
+    for (const auto& kv : counts) {
+      const double p = static_cast<double>(kv.second) / n;
+      if (p > 0.0) entropy -= p * std::log(p);
+    }
+    return std::abs(std::exp(entropy) - static_cast<double>(options.target_clusters));
+  };
+
   auto keep_best = [&](const GraphClusterResult& candidate) {
+    const double candidate_eff_gap = effective_gap(candidate);
+    const double best_eff_gap = have_best ? effective_gap(best) : std::numeric_limits<double>::infinity();
     if (!have_best ||
         candidate.target_gap < best.target_gap ||
-        (candidate.target_gap == best.target_gap && candidate.modularity > best.modularity)) {
+        (candidate.target_gap == best.target_gap && candidate_eff_gap < best_eff_gap - 1e-9) ||
+        (candidate.target_gap == best.target_gap && std::abs(candidate_eff_gap - best_eff_gap) <= 1e-9 &&
+         candidate.modularity > best.modularity)) {
       best = candidate;
       have_best = true;
     }
   };
 
-  while (options.target_clusters > t && steps < max_steps) {
-    res += delta;
-    const double safe_res = std::max(res, 1e-12);
+  auto run_candidate = [&](double resolution) {
+    const double safe_res = std::max(resolution, 1e-12);
     GraphClusterResult out = run_at_resolution(safe_res, elapsed_start);
     out.target_clusters = options.target_clusters;
     out.target_gap = std::abs(out.n_communities - options.target_clusters);
     out.target_exact = out.target_gap == 0;
     out.selected_resolution = safe_res;
     keep_best(out);
-    if (out.target_exact) return out;
-    t = out.n_communities;
     ++steps;
-  }
+    return out;
+  };
 
-  if (t != options.target_clusters) {
-    res -= delta;
-    t = 0;
-  }
+  double scan_res = options.target_resolution_init - delta;
+  double low_res = std::numeric_limits<double>::quiet_NaN();
+  double high_res = std::numeric_limits<double>::quiet_NaN();
+  bool have_low = false;
+  bool have_high = false;
 
-  while (t != options.target_clusters && steps < max_steps) {
-    delta *= 0.5;
-    if (t > options.target_clusters) {
-      res -= delta;
-    } else {
-      res += delta;
+  while (steps < max_steps) {
+    scan_res += delta;
+    GraphClusterResult out = run_candidate(scan_res);
+    if (out.n_communities <= options.target_clusters) {
+      low_res = out.selected_resolution;
+      have_low = true;
     }
-    const double safe_res = std::max(res, 1e-12);
-    GraphClusterResult out = run_at_resolution(safe_res, elapsed_start);
-    out.target_clusters = options.target_clusters;
-    out.target_gap = std::abs(out.n_communities - options.target_clusters);
-    out.target_exact = out.target_gap == 0;
-    out.selected_resolution = safe_res;
-    keep_best(out);
-    if (out.target_exact) return out;
-    t = out.n_communities;
-    ++steps;
+    if (out.n_communities > options.target_clusters) {
+      high_res = out.selected_resolution;
+      have_high = true;
+      break;
+    }
+    if (out.n_communities == options.target_clusters) {
+      if (steps >= max_steps) break;
+      scan_res += delta;
+      GraphClusterResult probe = run_candidate(scan_res);
+      if (probe.n_communities <= options.target_clusters) {
+        low_res = probe.selected_resolution;
+        have_low = true;
+      } else {
+        high_res = probe.selected_resolution;
+        have_high = true;
+        break;
+      }
+    }
+  }
+
+  if (!have_low) {
+    low_res = 1e-12;
+    have_low = true;
+  }
+  if (!have_high) {
+    high_res = std::max(low_res + delta, delta);
+  }
+
+  while (steps < max_steps && high_res > low_res) {
+    const double mid = 0.5 * (low_res + high_res);
+    if (mid <= low_res || mid >= high_res) break;
+    GraphClusterResult out = run_candidate(mid);
+    if (out.n_communities <= options.target_clusters) {
+      low_res = out.selected_resolution;
+    } else {
+      high_res = out.selected_resolution;
+    }
   }
 
   if (have_best && best.target_exact) return best;
@@ -783,6 +1054,17 @@ GraphClusterResult run_cugraph_cluster(const EdgeList& edge_list, const GraphClu
 NeighborGraph KODAMAKNNGraph_CPU(MatrixView x, const GraphClusterOptions& options) {
   GraphClusterOptions opts = options;
   opts.backend = Backend::CPU;
+  if (detail::should_use_spatial_grid_knn(static_cast<int>(x.rows), static_cast<int>(x.cols), opts.metric)) {
+    const std::vector<float> data = copy_float32(x);
+    return detail::spatial_grid_self_knn(
+      data.data(),
+      static_cast<int>(x.rows),
+      static_cast<int>(x.cols),
+      opts.k,
+      opts.n_threads,
+      true
+    );
+  }
   return build_hnsw_graph(x, opts);
 }
 
@@ -793,6 +1075,12 @@ NeighborGraph KODAMAKNNGraph_CUDA(MatrixView x, const GraphClusterOptions& optio
   const int d = static_cast<int>(x.cols);
   const int k = std::max(1, std::min(options.k, n - 1));
   std::vector<float> data = copy_float32(x);
+  if (detail::should_use_spatial_grid_knn(n, d, options.metric)) {
+    if (k <= 256) {
+      return detail::spatial_grid_self_knn_cuda(data, n, d, k, options.gpu_device, true);
+    }
+    return detail::spatial_grid_self_knn(data.data(), n, d, k, options.n_threads, true);
+  }
   const faiss::MetricType faiss_metric = options.metric == DistanceMetric::Euclidean ? faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
   if (options.metric == DistanceMetric::Cosine) normalize_rows(data, x.rows, x.cols);
   faiss::gpu::StandardGpuResources resources;
@@ -864,10 +1152,42 @@ GraphClusterResult KODAMAGraphCluster(const NeighborGraph& graph, int samples, c
   return options.backend == Backend::CUDA ? KODAMAGraphCluster_CUDA(graph, samples, options) : KODAMAGraphCluster_CPU(graph, samples, options);
 }
 
+GraphClusterResult KODAMAEmbeddingGraphCluster(MatrixView embedding, const NeighborGraph& graph, const GraphClusterOptions& options) {
+  Timer timer;
+  if (embedding.rows > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument("Embedding has too many rows for graph clustering.");
+  }
+  const int samples = static_cast<int>(embedding.rows);
+  if (samples < 2) throw std::invalid_argument("KODAMAEmbeddingCluster requires at least two rows.");
+  GraphClusterOptions opts = options;
+  EdgeList edges = edge_list_from_graph(graph, samples, opts);
+  if (opts.target_clusters > 0) bridge_embedding_components(edges, embedding);
+  GraphClusterResult out;
+  if (opts.backend == Backend::CUDA) {
+    if (opts.target_clusters > samples) throw std::invalid_argument("target_clusters cannot exceed number of graph vertices.");
+#ifdef KODAMA_ENABLE_CUGRAPH
+    auto run_at = [&](double resolution, double start) {
+      GraphClusterOptions run_opts = opts;
+      run_opts.resolution = resolution;
+      return run_cugraph_cluster(edges, run_opts, start + timer.seconds());
+    };
+    out = search_target_clusters(opts, run_at, timer.seconds());
+#else
+    throw std::runtime_error("KODAMAEmbeddingCluster with CUDA clustering requires a CUDA build with RAPIDS libcugraph.");
+#endif
+  } else {
+    opts.backend = Backend::CPU;
+    out = run_cpu_cluster(edges, opts, timer.seconds());
+  }
+  out.runtime_seconds = timer.seconds();
+  return out;
+}
+
 GraphClusterResult KODAMAEmbeddingCluster(MatrixView embedding, const GraphClusterOptions& options) {
   Timer timer;
-  NeighborGraph graph = KODAMAKNNGraph(embedding, options);
-  GraphClusterResult out = KODAMAGraphCluster(graph, static_cast<int>(embedding.rows), options);
+  GraphClusterOptions graph_options = options;
+  NeighborGraph graph = KODAMAKNNGraph(embedding, graph_options);
+  GraphClusterResult out = KODAMAEmbeddingGraphCluster(embedding, graph, options);
   out.runtime_seconds = timer.seconds();
   return out;
 }

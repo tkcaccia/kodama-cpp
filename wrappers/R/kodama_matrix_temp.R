@@ -79,6 +79,8 @@
 })
 
 .kodama_as_numeric_matrix <- function(x) {
+  # Temporary sourceCpp ABI: R passes a NumericMatrix; C++ immediately downcasts
+  # to float32 before running KODAMA analysis.
   if (inherits(x, "float32") || inherits(x, "float")) {
     if (!requireNamespace("float", quietly = TRUE)) {
       stop("The float package is required to convert a float matrix.")
@@ -121,17 +123,6 @@
   method <- "unknown"
   used_backend <- backend
   scores <- NULL
-
-  if (requireNamespace("fastEmbedR", quietly = TRUE)) {
-    pca_fun <- tryCatch(getFromNamespace("fastpls_rsvd_pca_scores", "fastEmbedR"), error = function(e) NULL)
-    if (!is.null(pca_fun)) {
-      centered <- sweep(data, 2L, colMeans(data), check.margin = FALSE)
-      pca <- pca_fun(centered, rank = n.components, seed = as.integer(seed), backend = backend)
-      scores <- as.matrix(pca$scores[, seq_len(n.components), drop = FALSE])
-      method <- paste0("fastEmbedR_", pca$method %||% "rsvd")
-      used_backend <- pca$backend %||% backend
-    }
-  }
 
   if (is.null(scores) && requireNamespace("irlba", quietly = TRUE)) {
     pca <- irlba::prcomp_irlba(data, n = n.components, center = TRUE, scale. = FALSE)
@@ -194,101 +185,6 @@
     if (is.list(init) && !is.null(init[[method]])) return(init[[method]])
   }
   NULL
-}
-
-.kodama_umap_knn_fastembedr_init <- function(knn,
-                                             init,
-                                             backend = c("cuda", "cpu"),
-                                             seed = 4L,
-                                             n.threads = 4L,
-                                             graph.mode = "fuzzy",
-                                             n.epochs = NULL) {
-  if (!requireNamespace("fastEmbedR", quietly = TRUE)) {
-    stop("fastEmbedR is required for initialized KODAMA UMAP.")
-  }
-  backend <- match.arg(backend)
-  if (backend != "cuda") stop("Initialized fast KODAMA UMAP currently requires backend='cuda'.")
-  ns <- asNamespace("fastEmbedR")
-  idx <- as.matrix(knn$indices)
-  dst <- as.matrix(knn$distances)
-  storage.mode(idx) <- "integer"
-  storage.mode(dst) <- "double"
-  init <- as.matrix(init)
-  storage.mode(init) <- "double"
-  if (nrow(init) != nrow(idx) || ncol(init) != 2L) {
-    stop("UMAP init must have one row per sample and 2 columns.")
-  }
-
-  cfg <- get("fast_knn_umap_config", envir = ns)(n = nrow(idx), k = ncol(idx), backend = backend)
-  auto_policy <- tryCatch(
-    get("umap_auto_parameters_cpp", envir = ns)(dst, as.integer(ncol(idx)), as.character(cfg$backend)),
-    error = function(e) list(error = conditionMessage(e))
-  )
-  if (is.null(auto_policy$error)) {
-    cfg$n_epochs <- as.integer(auto_policy$n_epochs)
-    cfg$min_dist <- as.numeric(auto_policy$min_dist)
-    cfg$negative_sample_rate <- as.integer(auto_policy$negative_sample_rate)
-    cfg$learning_rate <- as.numeric(auto_policy$learning_rate)
-    cfg$spectral_n_iter <- as.integer(auto_policy$spectral_n_iter)
-    cfg$init_scale <- as.numeric(auto_policy$init_scale)
-    cfg$auto_parameter_backend <- "cpp_knn_distance_profile"
-    cfg$auto_parameter_rule <- as.character(auto_policy$rule)
-  } else {
-    cfg$auto_parameter_backend <- "r_size_rule_fallback"
-    cfg$auto_parameter_error <- auto_policy$error
-  }
-  if (!is.null(n.threads)) cfg$n_threads <- as.integer(max(1L, min(4L, n.threads)))
-  if (!is.null(n.epochs)) cfg$n_epochs <- as.integer(n.epochs)
-  cfg$input_had_self <- FALSE
-  cfg$knn_col_start <- 0L
-  cfg$knn_n_neighbors <- as.integer(ncol(idx))
-  cfg$knn_materialized <- TRUE
-  cfg$knn_backend <- "supplied"
-  cfg$graph_mode <- graph.mode
-  cfg$sgd_loop <- "csr_float32_contiguous_inplace"
-  cfg <- get("apply_umap_connectivity_spectral_rule", envir = ns)(
-    cfg,
-    idx,
-    col_start = 0L,
-    n_neighbors = ncol(idx)
-  )
-
-  graph <- get("umap_build_csr_graph", envir = ns)(
-    idx,
-    dst,
-    0L,
-    as.integer(ncol(idx)),
-    as.integer(ncol(idx)),
-    as.integer(cfg$n_threads),
-    graph_mode = graph.mode
-  )
-  cfg$graph_prep_backend <- "cpu_fuzzy_csr"
-  cfg$graph_storage <- "cpu_csr_uploaded_to_cuda"
-  cfg$graph_nnz <- as.integer(graph$nnz)
-  cfg$graph_max_weight <- as.numeric(graph$max_weight)
-  cfg$graph_cuda_like_width <- graph$cuda_like_width
-  cfg$graph_builder <- graph$graph_builder
-  cfg$init_backend <- "kodama_original_data_pca"
-  cfg$gpu_umap_path <- "cuda_fuzzy_graph_atomic_supplied_init"
-  cfg$backend <- "cuda"
-
-  layout <- get("umap_cuda_optimize_csr_cpp", envir = ns)(
-    graph$offsets,
-    graph$neighbors,
-    graph$weights,
-    graph$epochs_per_sample,
-    init,
-    as.integer(cfg$n_epochs),
-    as.integer(cfg$negative_sample_rate),
-    cfg$learning_rate,
-    cfg$min_dist,
-    cfg$repulsion_strength,
-    as.integer(seed),
-    0L
-  )
-  layout <- get("finalize_embedding_layout", envir = ns)(layout, "UMAP", return_float32 = FALSE)
-  attr(layout, "fastEmbedR_config") <- cfg
-  layout
 }
 
 KODAMA.matrix.cpp <- local({
@@ -435,11 +331,65 @@ KODAMA.umap.cuda.cpp <- function(knn,
                                  min.dist = 0.01,
                                  spectral.n.iter = 20L,
                                  seed = 1234L) {
+  KODAMA.umap.knn.cpp(
+    knn,
+    n.neighbors = n.neighbors,
+    backend = "cuda",
+    seed = seed,
+    n.threads = 1L,
+    n.epochs = n.epochs,
+    min.dist = min.dist,
+    spectral.n.iter = spectral.n.iter,
+    init = init
+  )
+}
+
+KODAMA.umap.cpp <- function(data,
+                            n.neighbors = 30L,
+                            backend = c("cuda", "cpu"),
+                            seed = 4L,
+                            n.threads = 4L,
+                            metric = "euclidean",
+                            ...) {
+  backend <- match.arg(backend)
+  data <- .kodama_as_numeric_matrix(data)
+  graph <- KODAMA.knn.graph.cpp(
+    data,
+    k = as.integer(n.neighbors),
+    metric = metric,
+    backend = backend,
+    n.cores = as.integer(n.threads),
+    exclude.self = TRUE
+  )
+  KODAMA.umap.knn.cpp(graph, n.neighbors = n.neighbors, backend = backend,
+                      seed = seed, n.threads = n.threads, ...)
+}
+
+KODAMA.umap.knn.cpp <- function(knn,
+                                n.neighbors = NULL,
+                                backend = c("cuda", "cpu"),
+                                seed = 4L,
+                                n.threads = 4L,
+                                use.visual.init = TRUE,
+                                n.epochs = 200L,
+                                min.dist = 0.01,
+                                learning.rate = 1.0,
+                                repulsion.strength = 1.0,
+                                negative.sample.rate = 5L,
+                                spectral.n.iter = 20L,
+                                init = NULL,
+                                ...) {
+  backend <- match.arg(backend)
+  .kodama_cpp_temp_load(backend)
   source <- knn
-  if (is.null(init)) init <- .kodama_visual_init(source, "umap", backend = "cuda", seed = seed)
+  if (is.null(init) && isTRUE(use.visual.init)) {
+    init <- .kodama_visual_init(source, "umap", backend = backend, seed = seed)
+  }
   knn <- .kodama_extract_knn(source)
-  knn <- .kodama_strip_self_knn(knn, as.integer(n.neighbors))
-  kodama_umap_cuda_temp(
+  if (is.null(n.neighbors)) n.neighbors <- ncol(knn$indices)
+  width <- min(as.integer(round(n.neighbors) * 3L), ncol(knn$indices))
+  knn <- .kodama_prepare_visual_knn(knn, width, replace.inf = TRUE)
+  kodama_umap_temp(
     indices = knn$indices,
     distances = knn$distances,
     init = if (is.null(init)) NULL else {
@@ -447,91 +397,17 @@ KODAMA.umap.cuda.cpp <- function(knn,
       storage.mode(init) <- "double"
       init
     },
-    n_neighbors = as.integer(n.neighbors),
+    n_neighbors = as.integer(width),
     n_epochs = as.integer(n.epochs),
+    learning_rate = as.numeric(learning.rate),
     min_dist = as.numeric(min.dist),
+    repulsion_strength = as.numeric(repulsion.strength),
+    negative_sample_rate = as.integer(negative.sample.rate),
     spectral_n_iter = as.integer(spectral.n.iter),
-    seed = as.integer(seed)
-  )
-}
-
-KODAMA.umap.fastEmbedR <- function(data,
-                                   n.neighbors = 30L,
-                                   backend = c("cuda", "cpu"),
-                                   seed = 4L,
-                                   n.threads = 4L,
-                                   graph.mode = "fuzzy",
-                                   ...) {
-  if (!requireNamespace("fastEmbedR", quietly = TRUE)) {
-    stop("fastEmbedR is required for KODAMA.umap.fastEmbedR().")
-  }
-  backend <- match.arg(backend)
-  data <- .kodama_as_numeric_matrix(data)
-  out <- fastEmbedR::umap(
-    data,
-    n_neighbors = as.integer(n.neighbors),
-    backend = backend,
-    graph_mode = graph.mode,
     n_threads = as.integer(n.threads),
     seed = as.integer(seed),
-    ...
+    backend = backend
   )
-  if (is.list(out) && !is.null(out$layout)) return(as.matrix(out$layout))
-  as.matrix(out)
-}
-
-KODAMA.umap.knn.fastEmbedR <- function(knn,
-                                       n.neighbors = NULL,
-                                       backend = c("cuda", "cpu"),
-                                       seed = 4L,
-                                       n.threads = 4L,
-                                       graph.mode = "fuzzy",
-                                       use.visual.init = TRUE,
-                                       ...) {
-  if (!requireNamespace("fastEmbedR", quietly = TRUE)) {
-    stop("fastEmbedR is required for KODAMA.umap.knn.fastEmbedR().")
-  }
-  backend <- match.arg(backend)
-  source <- knn
-  init <- if (isTRUE(use.visual.init)) .kodama_visual_init(source, "umap", backend = backend, seed = seed) else NULL
-  if (!is.null(init) && backend == "cuda") {
-    if (is.null(n.neighbors)) n.neighbors <- 30L
-    knn_for_width <- .kodama_extract_knn(source)
-    width <- min(as.integer(round(n.neighbors) * 3L), ncol(knn_for_width$indices))
-    knn_for_width <- .kodama_prepare_visual_knn(knn_for_width, width, replace.inf = TRUE)
-    return(tryCatch(
-      .kodama_umap_knn_fastembedr_init(
-        knn_for_width,
-        init = init,
-        backend = backend,
-        seed = seed,
-        n.threads = n.threads,
-        graph.mode = graph.mode
-      ),
-      error = function(e) {
-        warning("Fast initialized UMAP path failed; falling back to direct CUDA UMAP: ", conditionMessage(e))
-        KODAMA.umap.cuda.cpp(source, init = init, n.neighbors = width, seed = seed)
-      }
-    ))
-  }
-  knn <- .kodama_extract_knn(source)
-  if (is.null(n.neighbors)) n.neighbors <- ncol(knn$indices)
-  # KODAMA.visualization uses 3 * n_neighbors from the precomputed,
-  # KODAMA-reordered dissimilarity graph and replaces Inf by the largest
-  # finite distance before calling UMAP.
-  width <- min(as.integer(round(n.neighbors) * 3L), ncol(knn$indices))
-  knn <- .kodama_prepare_visual_knn(knn, width, replace.inf = TRUE)
-  out <- fastEmbedR::umap_knn(
-    knn$indices,
-    knn$distances,
-    backend = backend,
-    graph_mode = graph.mode,
-    n_threads = as.integer(n.threads),
-    seed = as.integer(seed),
-    ...
-  )
-  if (is.list(out) && !is.null(out$layout)) return(as.matrix(out$layout))
-  as.matrix(out)
 }
 
 KODAMA.opentsne.cuda.cpp <- function(knn,
@@ -540,111 +416,92 @@ KODAMA.opentsne.cuda.cpp <- function(knn,
                                      perplexity = 15,
                                      n.iter = 500L,
                                      seed = 4L) {
-  source <- knn
-  if (is.null(init)) init <- .kodama_visual_init(source, "opentsne", backend = "cuda", seed = seed)
-  knn <- .kodama_extract_knn(source)
-  if (is.null(n.neighbors)) n.neighbors <- ceiling(perplexity)
-  knn <- .kodama_strip_self_knn(knn, as.integer(n.neighbors))
-  if (is.null(init)) {
-    had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
-    old_seed <- if (had_seed) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
-    on.exit({
-      if (had_seed) {
-        assign(".Random.seed", old_seed, envir = .GlobalEnv)
-      } else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
-        rm(".Random.seed", envir = .GlobalEnv)
-      }
-    }, add = TRUE)
-    set.seed(as.integer(seed))
-    init <- matrix(stats::rnorm(nrow(knn$indices) * 2L, sd = 1e-4),
-                   nrow = nrow(knn$indices), ncol = 2L)
-    init <- sweep(init, 2L, colMeans(init), check.margin = FALSE)
-  }
-  kodama_opentsne_cuda_temp(
-    indices = knn$indices,
-    distances = knn$distances,
-    init = if (is.null(init)) NULL else {
-      init <- as.matrix(init)
-      storage.mode(init) <- "double"
-      init
-    },
-    n_neighbors = as.integer(n.neighbors),
-    perplexity = as.numeric(perplexity),
-    n_iter = as.integer(n.iter),
-    early_exaggeration_iter = 250L,
-    early_exaggeration = 12,
-    exaggeration = 1,
-    learning_rate = 0,
-    learning_rate_auto = TRUE,
-    initial_momentum = 0.8,
-    final_momentum = 0.8,
-    min_gain = 0.01,
-    max_step_norm = 5,
-    seed = as.integer(seed)
+  KODAMA.opentsne.knn.cpp(
+    knn,
+    perplexity = perplexity,
+    n.neighbors = n.neighbors,
+    backend = "cuda",
+    seed = seed,
+    n.threads = 1L,
+    Y.init = init,
+    n.iter = n.iter
   )
 }
 
-KODAMA.opentsne.fastEmbedR <- function(data,
-                                       perplexity = 15,
-                                       backend = c("cuda", "cpu"),
-                                       seed = 4L,
-                                       n.threads = 4L,
-                                       ...) {
-  if (!requireNamespace("fastEmbedR", quietly = TRUE)) {
-    stop("fastEmbedR is required for KODAMA.opentsne.fastEmbedR().")
-  }
+KODAMA.opentsne.cpp <- function(data,
+                                perplexity = 15,
+                                backend = c("cuda", "cpu"),
+                                seed = 4L,
+                                n.threads = 4L,
+                                metric = "euclidean",
+                                ...) {
   backend <- match.arg(backend)
   data <- .kodama_as_numeric_matrix(data)
-  out <- fastEmbedR::opentsne(
+  graph <- KODAMA.knn.graph.cpp(
     data,
-    perplexity = as.numeric(perplexity),
+    k = as.integer(ceiling(perplexity) * 3L),
+    metric = metric,
     backend = backend,
-    n_threads = as.integer(n.threads),
-    seed = as.integer(seed),
-    ...
+    n.cores = as.integer(n.threads),
+    exclude.self = TRUE
   )
-  if (is.list(out) && !is.null(out$layout)) return(as.matrix(out$layout))
-  if (is.list(out) && !is.null(out$Y)) return(as.matrix(out$Y))
-  as.matrix(out)
+  KODAMA.opentsne.knn.cpp(graph, perplexity = perplexity, backend = backend,
+                          seed = seed, n.threads = n.threads, ...)
 }
 
-KODAMA.opentsne.knn.fastEmbedR <- function(knn,
-                                           perplexity = 15,
-                                           n.neighbors = NULL,
-                                           backend = c("cuda", "cpu"),
-                                           seed = 4L,
-                                           n.threads = 4L,
-                                           Y.init = NULL,
-                                           use.visual.init = TRUE,
-                                           ...) {
-  if (!requireNamespace("fastEmbedR", quietly = TRUE)) {
-    stop("fastEmbedR is required for KODAMA.opentsne.knn.fastEmbedR().")
-  }
+KODAMA.opentsne.knn.cpp <- function(knn,
+                                    perplexity = 15,
+                                    n.neighbors = NULL,
+                                    backend = c("cuda", "cpu"),
+                                    seed = 4L,
+                                    n.threads = 4L,
+                                    Y.init = NULL,
+                                    use.visual.init = TRUE,
+                                    n.iter = 500L,
+                                    early.exaggeration.iter = 250L,
+                                    early.exaggeration = 12,
+                                    exaggeration = 1,
+                                    learning.rate = 0,
+                                    learning.rate.auto = TRUE,
+                                    initial.momentum = 0.8,
+                                    final.momentum = 0.8,
+                                    min.gain = 0.01,
+                                    max.step.norm = 5,
+                                    theta = 0.5,
+                                    ...) {
   backend <- match.arg(backend)
+  .kodama_cpp_temp_load(backend)
   source <- knn
   if (is.null(Y.init) && isTRUE(use.visual.init)) Y.init <- .kodama_visual_init(source, "opentsne", backend = backend, seed = seed)
   knn <- .kodama_extract_knn(source)
   if (is.null(n.neighbors)) n.neighbors <- ceiling(perplexity)
-  # KODAMA.visualization uses 3 * perplexity neighbours for t-SNE from the
-  # precomputed KODAMA dissimilarity graph. fastEmbedR requires finite KNN
-  # distances, so the original UMAP-style Inf replacement is applied at this
-  # adapter boundary while preserving KODAMA's row order.
   width <- min(as.integer(round(perplexity) * 3L), ncol(knn$indices))
   knn <- .kodama_prepare_visual_knn(knn, width, replace.inf = TRUE)
-  out <- fastEmbedR::opentsne_knn(
-    knn$indices,
-    knn$distances,
+  kodama_opentsne_temp(
+    indices = knn$indices,
+    distances = knn$distances,
+    init = if (is.null(Y.init)) NULL else {
+      Y.init <- as.matrix(Y.init)
+      storage.mode(Y.init) <- "double"
+      Y.init
+    },
     n_neighbors = width,
     perplexity = as.numeric(perplexity),
-    Y_init = Y.init,
-    backend = backend,
+    theta = as.numeric(theta),
+    early_exaggeration_iter = as.integer(early.exaggeration.iter),
+    n_iter = as.integer(n.iter),
+    early_exaggeration = as.numeric(early.exaggeration),
+    exaggeration = as.numeric(exaggeration),
+    learning_rate = as.numeric(learning.rate),
+    learning_rate_auto = isTRUE(learning.rate.auto),
+    initial_momentum = as.numeric(initial.momentum),
+    final_momentum = as.numeric(final.momentum),
+    min_gain = as.numeric(min.gain),
+    max_step_norm = as.numeric(max.step.norm),
     n_threads = as.integer(n.threads),
     seed = as.integer(seed),
-    ...
+    backend = backend
   )
-  if (is.list(out) && !is.null(out$layout)) return(as.matrix(out$layout))
-  if (is.list(out) && !is.null(out$Y)) return(as.matrix(out$Y))
-  as.matrix(out)
 }
 
 .kodama_prepare_visual_knn <- function(knn, width, replace.inf = FALSE) {

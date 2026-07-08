@@ -1,0 +1,26 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12", "numpy"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "kodama-python"
+version = "0.1.0"
+description = "Python wrapper for the standalone kodama-cpp C++/CUDA library"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Stefano Cacciatore" }
+]
+dependencies = [
+  "numpy"
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+benchmark = ["pandas"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/kodama"]

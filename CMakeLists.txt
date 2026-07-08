@@ -48,29 +48,34 @@ target_include_directories(kodama_cpp PRIVATE ${FAISS_INCLUDE_DIR})
 target_link_libraries(kodama_cpp PRIVATE ${FAISS_LIBRARY})
 target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_FAISS=1)
 
-find_path(OPENMP_OMP_INCLUDE_DIR
-  NAMES omp.h
-  HINTS
-    /opt/homebrew/opt/libomp/include
-    /usr/local/opt/libomp/include
-    $ENV{CONDA_PREFIX}/include
-)
-find_library(OPENMP_OMP_LIBRARY
-  NAMES omp gomp iomp5
-  HINTS
-    /opt/homebrew/opt/libomp/lib
-    /usr/local/opt/libomp/lib
-    $ENV{CONDA_PREFIX}/lib
-)
-if(OPENMP_OMP_INCLUDE_DIR)
-  target_include_directories(kodama_cpp PRIVATE ${OPENMP_OMP_INCLUDE_DIR})
-endif()
-if(OPENMP_OMP_LIBRARY)
-  target_link_libraries(kodama_cpp PRIVATE ${OPENMP_OMP_LIBRARY})
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(kodama_cpp PRIVATE OpenMP::OpenMP_CXX)
 else()
-  find_package(OpenMP QUIET)
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(kodama_cpp PRIVATE OpenMP::OpenMP_CXX)
+  find_path(OPENMP_OMP_INCLUDE_DIR
+    NAMES omp.h
+    HINTS
+      /opt/homebrew/opt/libomp/include
+      /usr/local/opt/libomp/include
+      $ENV{CONDA_PREFIX}/include
+  )
+  find_library(OPENMP_OMP_LIBRARY
+    NAMES omp gomp iomp5
+    HINTS
+      /opt/homebrew/opt/libomp/lib
+      /usr/local/opt/libomp/lib
+      $ENV{CONDA_PREFIX}/lib
+  )
+  if(OPENMP_OMP_INCLUDE_DIR)
+    target_include_directories(kodama_cpp PRIVATE ${OPENMP_OMP_INCLUDE_DIR})
+  endif()
+  if(OPENMP_OMP_LIBRARY)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang")
+      target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Xpreprocessor> $<$<COMPILE_LANGUAGE:CXX>:-fopenmp>)
+    else()
+      target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fopenmp>)
+    endif()
+    target_link_libraries(kodama_cpp PRIVATE ${OPENMP_OMP_LIBRARY})
   endif()
 endif()
 
@@ -181,6 +186,7 @@ if(KODAMA_ENABLE_CUDA)
   else()
     message(STATUS "RAPIDS cuGraph not found: CUDA graph clustering will report unavailable")
   endif()
+
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1 KODAMA_ENABLE_CUVS=1)
   target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR} ${CUVS_INCLUDE_DIR} ${ARMADILLO_INCLUDE_DIR})
   target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-I${ARMADILLO_INCLUDE_DIR}>)
@@ -202,6 +208,7 @@ if(KODAMA_ENABLE_CUDA)
 endif()
 
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 install(TARGETS kodama_cpp
   EXPORT kodama-cppTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -211,6 +218,21 @@ install(TARGETS kodama_cpp
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT kodama-cppTargets
   NAMESPACE kodama::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/kodama-cpp
+)
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/kodama-cppConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/kodama-cppConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/kodama-cppConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/kodama-cpp
+)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/kodama-cppConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/kodama-cppConfigVersion.cmake"
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/kodama-cpp
 )
 

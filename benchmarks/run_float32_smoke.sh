@@ -58,10 +58,10 @@ with open(y_path, "wb") as f:
     f.write(struct.pack("<" + "i" * len(y), *y))
 PY
 
-cv_methods="KNNCV_CPU,PLSDACV_CPU,PLSLDACV_CPU,PLSCKNNCV_CPU"
+cv_methods="KNNCV_CPU,PLSDACV_CPU,PLSLDACV_CPU"
 core_methods="core_pls_lda_cpu,core_knn_cpu"
 if [[ "$ENABLE_CUDA" == "ON" ]]; then
-  cv_methods="KNNCV_CPU,KNNCV_CUDA,PLSDACV_CPU,PLSLDACV_CPU,PLSCKNNCV_CPU,PLSDACV_CUDA,PLSLDACV_CUDA,PLSCKNNCV_CUDA"
+  cv_methods="KNNCV_CPU,KNNCV_CUDA,PLSDACV_CPU,PLSLDACV_CPU,PLSDACV_CUDA,PLSLDACV_CUDA"
   core_methods="core_pls_lda_cpu,core_knn_cpu,core_pls_lda_cuda,core_knn_cuda"
 fi
 

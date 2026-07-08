@@ -221,11 +221,6 @@ int env_int(const char* name, int fallback) {
   return value == nullptr || std::string(value).empty() ? fallback : std::stoi(value);
 }
 
-double env_double(const char* name, double fallback) {
-  const char* value = std::getenv(name);
-  return value == nullptr || std::string(value).empty() ? fallback : std::stod(value);
-}
-
 bool env_bool(const char* name, bool fallback) {
   const char* value = std::getenv(name);
   if (value == nullptr || std::string(value).empty()) return fallback;
@@ -234,9 +229,6 @@ bool env_bool(const char* name, bool fallback) {
 }
 
 void apply_core_objective_env(kodama::CoreOptions& options) {
-  options.target_classes = env_int("KODAMA_CORE_TARGET_CLASSES", options.target_classes);
-  options.class_count_penalty = env_double("KODAMA_CORE_CLASS_COUNT_PENALTY", options.class_count_penalty);
-  options.imbalance_penalty = env_double("KODAMA_CORE_IMBALANCE_PENALTY", options.imbalance_penalty);
   options.auto_class_coarsening = env_bool("KODAMA_CORE_AUTO_COARSEN", options.auto_class_coarsening);
 }
 

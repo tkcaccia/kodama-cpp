@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include "spatial_grid_knn.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +13,7 @@
 #include <random>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <faiss/Clustering.h>
@@ -63,7 +65,7 @@ std::vector<float> copy_float32(MatrixView x, const std::vector<int>& rows = std
   for (std::size_t i = 0; i < n; ++i) {
     const std::size_t src = rows.empty() ? i : static_cast<std::size_t>(rows[i]);
     for (std::size_t j = 0; j < x.cols; ++j) {
-      out[i * x.cols + j] = static_cast<float>(x(src, j));
+      out[i * x.cols + j] = x.value_float(src, j);
     }
   }
   return out;
@@ -239,6 +241,37 @@ NeighborGraph faiss_gpu_flat_graph(
 }
 #endif
 
+NeighborGraph self_knn_graph(
+  const std::vector<float>& data,
+  int n,
+  int dim,
+  int neighbors,
+  DistanceMetric metric,
+  int n_threads,
+  bool use_gpu,
+  int gpu_device,
+  bool include_self
+) {
+  if (detail::should_use_spatial_grid_knn(n, dim, metric)) {
+#if defined(KODAMA_ENABLE_CUDA)
+    if (use_gpu && neighbors <= 256) {
+      return detail::spatial_grid_self_knn_cuda(data, n, dim, neighbors, gpu_device, false, include_self);
+    }
+#else
+    (void)use_gpu;
+    (void)gpu_device;
+#endif
+    return detail::spatial_grid_self_knn(data.data(), n, dim, neighbors, n_threads, false, include_self);
+  }
+#if defined(KODAMA_ENABLE_CUDA)
+  if (use_gpu) return faiss_gpu_flat_graph(data, data, n, n, dim, neighbors, metric, gpu_device);
+#else
+  (void)use_gpu;
+  (void)gpu_device;
+#endif
+  return hnsw_graph(data, data, n, n, dim, neighbors, metric, n_threads);
+}
+
 std::vector<int> kmeans_labels(
   const std::vector<float>& x,
   int n,
@@ -399,12 +432,17 @@ std::vector<int> spatial_graph_components(
     return out;
   }
   const int k = std::max(2, std::min(n, 32));
-  const NeighborGraph graph =
-#if defined(KODAMA_ENABLE_CUDA)
-    use_gpu ?
-    faiss_gpu_flat_graph(spatial, spatial, n, n, dims, k, DistanceMetric::Euclidean, gpu_device) :
-#endif
-    hnsw_graph(spatial, spatial, n, n, dims, k, DistanceMetric::Euclidean, n_threads);
+  const NeighborGraph graph = self_knn_graph(
+    spatial,
+    n,
+    dims,
+    k,
+    DistanceMetric::Euclidean,
+    n_threads,
+    use_gpu,
+    gpu_device,
+    true
+  );
   struct Edge {
     float distance;
     int a;
@@ -454,7 +492,17 @@ std::vector<float> spatial_jitter_from_graph(
   int n_threads
 ) {
   const int k = std::max(1, std::min(neighbors, n));
-  NeighborGraph graph = hnsw_graph(spatial, spatial, n, n, dims, k, DistanceMetric::Euclidean, n_threads);
+  NeighborGraph graph = self_knn_graph(
+    spatial,
+    n,
+    dims,
+    k,
+    DistanceMetric::Euclidean,
+    n_threads,
+    false,
+    0,
+    true
+  );
   const int far_col = std::min(19, graph.neighbors - 1);
   std::vector<double> sums(static_cast<std::size_t>(dims), 0.0);
   for (int i = 0; i < n; ++i) {
@@ -533,6 +581,315 @@ NeighborGraph trim_self_neighbors(const NeighborGraph& graph, int samples, int n
     }
   }
   return trimmed;
+}
+
+NeighborGraph normalize_external_graph(const NeighborGraph& graph, int samples, int max_neighbors) {
+  if (samples < 2) throw std::invalid_argument("NeighborGraph samples must be at least 2.");
+  if (graph.neighbors <= 0) throw std::invalid_argument("NeighborGraph.neighbors must be positive.");
+  const std::size_t expected = static_cast<std::size_t>(samples) * static_cast<std::size_t>(graph.neighbors);
+  if (graph.indices.size() != expected || graph.distances.size() != expected) {
+    throw std::invalid_argument("NeighborGraph indices/distances size must equal samples * neighbors.");
+  }
+  int min_index = std::numeric_limits<int>::max();
+  int max_index = std::numeric_limits<int>::min();
+  for (int id : graph.indices) {
+    if (id < 0) continue;
+    min_index = std::min(min_index, id);
+    max_index = std::max(max_index, id);
+  }
+  const bool one_based = min_index >= 1 && max_index <= samples;
+  const int neighbors = std::max(1, std::min(max_neighbors > 0 ? max_neighbors : graph.neighbors, graph.neighbors));
+  NeighborGraph out;
+  out.neighbors = neighbors;
+  out.indices.assign(static_cast<std::size_t>(samples) * static_cast<std::size_t>(neighbors), -1);
+  out.distances.assign(static_cast<std::size_t>(samples) * static_cast<std::size_t>(neighbors), std::numeric_limits<float>::infinity());
+  for (int i = 0; i < samples; ++i) {
+    int out_col = 0;
+    for (int j = 0; j < graph.neighbors && out_col < neighbors; ++j) {
+      const std::size_t src = static_cast<std::size_t>(i) * static_cast<std::size_t>(graph.neighbors) + static_cast<std::size_t>(j);
+      int id = graph.indices[src];
+      if (one_based && id > 0) --id;
+      if (id < 0 || id >= samples || id == i) continue;
+      const float d = graph.distances[src];
+      if (!std::isfinite(d)) continue;
+      const std::size_t dst = static_cast<std::size_t>(i) * static_cast<std::size_t>(neighbors) + static_cast<std::size_t>(out_col);
+      out.indices[dst] = id;
+      out.distances[dst] = std::max(0.0f, d);
+      ++out_col;
+    }
+  }
+  return out;
+}
+
+NeighborGraph subset_graph_to_rows(const NeighborGraph& graph, const std::vector<int>& rows, int samples) {
+  std::vector<int> global_to_local(static_cast<std::size_t>(samples), -1);
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    global_to_local[static_cast<std::size_t>(rows[i])] = static_cast<int>(i);
+  }
+  NeighborGraph out;
+  out.neighbors = graph.neighbors;
+  out.indices.assign(rows.size() * static_cast<std::size_t>(graph.neighbors), -1);
+  out.distances.assign(rows.size() * static_cast<std::size_t>(graph.neighbors), std::numeric_limits<float>::infinity());
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    const int row = rows[i];
+    int out_col = 0;
+    for (int j = 0; j < graph.neighbors && out_col < graph.neighbors; ++j) {
+      const std::size_t src = static_cast<std::size_t>(row) * static_cast<std::size_t>(graph.neighbors) + static_cast<std::size_t>(j);
+      const int global_nb = graph.indices[src];
+      if (global_nb < 0 || global_nb >= samples) continue;
+      const int local_nb = global_to_local[static_cast<std::size_t>(global_nb)];
+      if (local_nb < 0 || local_nb == static_cast<int>(i)) continue;
+      const std::size_t dst = i * static_cast<std::size_t>(graph.neighbors) + static_cast<std::size_t>(out_col);
+      // CoreKNNGraph_CPU accepts public-style graphs and normalizes 1-based
+      // indices at its boundary. Emit the local subset graph in that form so
+      // index-base auto detection cannot misclassify a zero-based subset when
+      // local index 0 is absent from the neighbor list.
+      out.indices[dst] = local_nb + 1;
+      out.distances[dst] = graph.distances[src];
+      ++out_col;
+    }
+  }
+  return out;
+}
+
+struct SparseGraphOperator {
+  int samples = 0;
+  std::vector<int> indptr;
+  std::vector<int> indices;
+  std::vector<float> weights;
+};
+
+std::vector<float> graph_local_scales(const NeighborGraph& graph, int samples) {
+  std::vector<float> scales(static_cast<std::size_t>(samples), 1.0f);
+  std::vector<float> row_dist;
+  row_dist.reserve(static_cast<std::size_t>(graph.neighbors));
+  for (int i = 0; i < samples; ++i) {
+    row_dist.clear();
+    const std::size_t base = static_cast<std::size_t>(i) * static_cast<std::size_t>(graph.neighbors);
+    for (int j = 0; j < graph.neighbors; ++j) {
+      const int id = graph.indices[base + static_cast<std::size_t>(j)];
+      const float d = graph.distances[base + static_cast<std::size_t>(j)];
+      if (id < 0 || !std::isfinite(d)) continue;
+      row_dist.push_back(std::max(0.0f, d));
+    }
+    if (row_dist.empty()) continue;
+    const std::size_t mid = row_dist.size() / 2;
+    std::nth_element(row_dist.begin(), row_dist.begin() + static_cast<std::ptrdiff_t>(mid), row_dist.end());
+    float scale = row_dist[mid];
+    if (scale <= 1.0e-6f) {
+      double mean = 0.0;
+      for (float d : row_dist) mean += static_cast<double>(d);
+      scale = static_cast<float>(mean / static_cast<double>(row_dist.size()));
+    }
+    scales[static_cast<std::size_t>(i)] = std::max(scale, 1.0e-6f);
+  }
+  return scales;
+}
+
+SparseGraphOperator make_sparse_graph_operator(
+  const NeighborGraph& graph,
+  int samples,
+  bool symmetrize,
+  bool self_tuning,
+  bool symmetric_normalize
+) {
+  NeighborGraph g = normalize_external_graph(graph, samples, graph.neighbors);
+  const std::vector<float> scales = self_tuning ? graph_local_scales(g, samples) : std::vector<float>();
+  std::vector<std::unordered_map<int, float>> rows(static_cast<std::size_t>(samples));
+  for (auto& row : rows) row.reserve(static_cast<std::size_t>(std::max(1, g.neighbors)));
+
+  auto compute_weight = [&](int i, int j, float d) {
+    d = std::max(0.0f, d);
+    if (self_tuning) {
+      const double denom =
+        std::max(1.0e-12, static_cast<double>(scales[static_cast<std::size_t>(i)]) *
+                          static_cast<double>(scales[static_cast<std::size_t>(j)]));
+      return static_cast<float>(std::exp(-(static_cast<double>(d) * static_cast<double>(d)) / denom));
+    }
+    return 1.0f / (1.0f + d);
+  };
+  auto add_edge = [&](int from, int to, float w) {
+    if (from < 0 || from >= samples || to < 0 || to >= samples || from == to || !std::isfinite(w) || w <= 0.0f) return;
+    auto& row = rows[static_cast<std::size_t>(from)];
+    auto it = row.find(to);
+    if (it == row.end()) {
+      row.emplace(to, w);
+    } else {
+      it->second = std::max(it->second, w);
+    }
+  };
+
+  for (int i = 0; i < samples; ++i) {
+    const std::size_t base = static_cast<std::size_t>(i) * static_cast<std::size_t>(g.neighbors);
+    for (int j = 0; j < g.neighbors; ++j) {
+      const std::size_t offset = base + static_cast<std::size_t>(j);
+      const int nb = g.indices[offset];
+      if (nb < 0 || nb >= samples) continue;
+      const float d = g.distances[offset];
+      if (!std::isfinite(d)) continue;
+      const float w = compute_weight(i, nb, d);
+      add_edge(i, nb, w);
+      if (symmetrize) add_edge(nb, i, w);
+    }
+  }
+
+  std::vector<double> degree(static_cast<std::size_t>(samples), 0.0);
+  for (int i = 0; i < samples; ++i) {
+    for (const auto& kv : rows[static_cast<std::size_t>(i)]) degree[static_cast<std::size_t>(i)] += static_cast<double>(kv.second);
+  }
+
+  SparseGraphOperator op;
+  op.samples = samples;
+  op.indptr.assign(static_cast<std::size_t>(samples) + 1, 0);
+  std::size_t nnz = 0;
+  for (int i = 0; i < samples; ++i) {
+    op.indptr[static_cast<std::size_t>(i)] = static_cast<int>(nnz);
+    nnz += rows[static_cast<std::size_t>(i)].size();
+  }
+  op.indptr[static_cast<std::size_t>(samples)] = static_cast<int>(nnz);
+  op.indices.reserve(nnz);
+  op.weights.reserve(nnz);
+  for (int i = 0; i < samples; ++i) {
+    std::vector<std::pair<int, float>> ordered(rows[static_cast<std::size_t>(i)].begin(), rows[static_cast<std::size_t>(i)].end());
+    std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    const double row_degree = std::max(degree[static_cast<std::size_t>(i)], 1.0e-12);
+    for (const auto& kv : ordered) {
+      const int nb = kv.first;
+      float w = kv.second;
+      if (symmetric_normalize) {
+        const double denom = std::sqrt(row_degree * std::max(degree[static_cast<std::size_t>(nb)], 1.0e-12));
+        w = static_cast<float>(static_cast<double>(w) / denom);
+      } else {
+        w = static_cast<float>(static_cast<double>(w) / row_degree);
+      }
+      op.indices.push_back(nb);
+      op.weights.push_back(w);
+    }
+  }
+  return op;
+}
+
+void standardize_feature_columns(std::vector<float>& x, int n, int p) {
+  for (int c = 0; c < p; ++c) {
+    double mean = 0.0;
+    for (int i = 0; i < n; ++i) mean += static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)]);
+    mean /= static_cast<double>(std::max(1, n));
+    double ss = 0.0;
+    for (int i = 0; i < n; ++i) {
+      float& v = x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)];
+      v = static_cast<float>(static_cast<double>(v) - mean);
+      ss += static_cast<double>(v) * static_cast<double>(v);
+    }
+    const double scale = ss > 0.0 ? std::sqrt(ss / static_cast<double>(std::max(1, n - 1))) : 1.0;
+    const float inv = static_cast<float>(1.0 / std::max(scale, 1.0e-6));
+    for (int i = 0; i < n; ++i) x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)] *= inv;
+  }
+}
+
+void center_feature_columns(std::vector<float>& x, int n, int p) {
+  for (int c = 0; c < p; ++c) {
+    double mean = 0.0;
+    for (int i = 0; i < n; ++i) mean += static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)]);
+    mean /= static_cast<double>(std::max(1, n));
+    for (int i = 0; i < n; ++i) {
+      x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)] =
+        static_cast<float>(static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)]) - mean);
+    }
+  }
+}
+
+void orthonormalize_feature_columns(std::vector<float>& x, int n, int p) {
+  center_feature_columns(x, n, p);
+  for (int c = 0; c < p; ++c) {
+    for (int prev = 0; prev < c; ++prev) {
+      double dot = 0.0;
+      for (int i = 0; i < n; ++i) {
+        dot += static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)]) *
+               static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(prev)]);
+      }
+      for (int i = 0; i < n; ++i) {
+        x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)] =
+          static_cast<float>(
+            static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)]) -
+            dot * static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(prev)])
+          );
+      }
+    }
+    double norm2 = 0.0;
+    for (int i = 0; i < n; ++i) {
+      const double v = static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)]);
+      norm2 += v * v;
+    }
+    if (norm2 <= 1.0e-20) {
+      for (int i = 0; i < n; ++i) x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)] = 0.0f;
+      if (n > 0) x[static_cast<std::size_t>(c % n) * p + static_cast<std::size_t>(c)] = 1.0f;
+      center_feature_columns(x, n, p);
+      norm2 = 0.0;
+      for (int i = 0; i < n; ++i) {
+        const double v = static_cast<double>(x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)]);
+        norm2 += v * v;
+      }
+    }
+    const float inv = static_cast<float>(1.0 / std::sqrt(std::max(norm2, 1.0e-20)));
+    for (int i = 0; i < n; ++i) x[static_cast<std::size_t>(i) * p + static_cast<std::size_t>(c)] *= inv;
+  }
+}
+
+void apply_sparse_graph_operator(
+  const SparseGraphOperator& op,
+  const std::vector<float>& current,
+  std::vector<float>& next,
+  int components,
+  int n_threads
+) {
+  std::fill(next.begin(), next.end(), 0.0f);
+  OmpThreadScope threads(n_threads);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (int i = 0; i < op.samples; ++i) {
+    const std::size_t row_base = static_cast<std::size_t>(i) * static_cast<std::size_t>(components);
+    for (int ptr = op.indptr[static_cast<std::size_t>(i)]; ptr < op.indptr[static_cast<std::size_t>(i + 1)]; ++ptr) {
+      const int nb = op.indices[static_cast<std::size_t>(ptr)];
+      const float w = op.weights[static_cast<std::size_t>(ptr)];
+      const std::size_t nb_base = static_cast<std::size_t>(nb) * static_cast<std::size_t>(components);
+      for (int c = 0; c < components; ++c) {
+        next[row_base + static_cast<std::size_t>(c)] += w * current[nb_base + static_cast<std::size_t>(c)];
+      }
+    }
+  }
+}
+
+std::vector<float> graph_laplacian_operator_features(
+  const NeighborGraph& graph,
+  int samples,
+  int components,
+  int iterations,
+  std::uint64_t seed,
+  int n_threads
+) {
+  const SparseGraphOperator op = make_sparse_graph_operator(
+    graph,
+    samples,
+    true,
+    true,
+    true
+  );
+  components = std::max(1, std::min(components, samples));
+  iterations = std::max(8, iterations);
+  std::vector<float> current(static_cast<std::size_t>(samples) * components, 0.0f);
+  std::vector<float> next(current.size(), 0.0f);
+  std::mt19937_64 rng(seed);
+  std::normal_distribution<float> normal(0.0f, 1.0f);
+  for (float& v : current) v = normal(rng);
+  orthonormalize_feature_columns(current, samples, components);
+  for (int iter = 0; iter < iterations; ++iter) {
+    apply_sparse_graph_operator(op, current, next, components, n_threads);
+    orthonormalize_feature_columns(next, samples, components);
+    current.swap(next);
+  }
+  standardize_feature_columns(current, samples, components);
+  return current;
 }
 
 NeighborGraph merge_feature_spatial_graphs(
@@ -644,12 +1001,15 @@ GpuWorkerPlan resolve_gpu_worker_plan(
   const double graph_bytes = static_cast<double>(samples) * static_cast<double>(graph_neighbors) *
     static_cast<double>(sizeof(int) + sizeof(float));
   const double component_bytes = static_cast<double>(landmarks) *
-    static_cast<double>(std::max(1, options.components)) * sizeof(double);
+    static_cast<double>(std::max(1, options.components)) * sizeof(float);
   double worker_bytes = 512.0 * 1024.0 * 1024.0;
   worker_bytes += 1.5 * x_bytes;
   worker_bytes += 6.0 * landmark_bytes;
   worker_bytes += 0.25 * graph_bytes;
-  if (options.classifier == CoreClassifier::PLS_LDA) {
+  if (options.classifier != CoreClassifier::KNN) {
+    const double feature_component_ratio =
+      static_cast<double>(features) / static_cast<double>(std::max(1, options.components));
+    worker_bytes += 4.0 * feature_component_ratio * landmark_bytes;
     worker_bytes += 10.0 * component_bytes;
   } else {
     worker_bytes += static_cast<double>(landmarks) * static_cast<double>(std::max(1, options.knn.k)) *
@@ -661,7 +1021,7 @@ GpuWorkerPlan resolve_gpu_worker_plan(
   if (plan.sm_count >= 132) sm_cap = 6;
   else if (plan.sm_count >= 96) sm_cap = 5;
   else if (plan.sm_count >= 72) sm_cap = 4;
-  else if (plan.sm_count >= 48) sm_cap = 3;
+  else if (plan.sm_count >= 32) sm_cap = 4;
 
   int memory_cap = 1;
   if (free_bytes > 0 && worker_bytes > 0.0) {
@@ -684,6 +1044,41 @@ GpuWorkerPlan resolve_gpu_worker_plan(
   plan.workers = std::max(1, std::min(options.n_threads, options.runs));
   return plan;
 }
+#endif
+
+#ifdef KODAMA_ENABLE_CUDA
+class CudaMScheduler {
+ public:
+  CudaMScheduler(int lanes, int device) :
+    lanes_(std::max(1, lanes)),
+    device_(device) {}
+
+  int lanes() const { return lanes_; }
+
+  template <typename Runner>
+  void run(int runs, Runner&& runner) const {
+    std::atomic<int> next_run{1};
+    std::vector<std::future<void>> futures;
+    futures.reserve(static_cast<std::size_t>(lanes_));
+    for (int lane = 0; lane < lanes_; ++lane) {
+      futures.emplace_back(std::async(std::launch::async, [&, lane]() {
+        cudaSetDevice(device_);
+        cudaFree(nullptr);
+        IterationScratch scratch;
+        while (true) {
+          const int run_id = next_run.fetch_add(1);
+          if (run_id > runs) break;
+          runner(run_id, lane, scratch);
+        }
+      }));
+    }
+    for (auto& future : futures) future.get();
+  }
+
+ private:
+  int lanes_ = 1;
+  int device_ = 0;
+};
 #endif
 
 void apply_kodama_dissimilarity(NeighborGraph& graph, const std::vector<int>& res, int runs, int samples, int n_threads) {
@@ -739,6 +1134,7 @@ IterationResult run_iteration(
   const std::vector<float>& spatial,
   const std::vector<float>& spatial_jitter,
   const NeighborGraph& global_graph,
+  bool global_graph_is_input,
   const std::vector<int>& constrain,
   bool constrain_is_identity,
   const std::vector<int>& fixed,
@@ -749,7 +1145,11 @@ IterationResult run_iteration(
 ) {
   const int n = static_cast<int>(full.rows);
   const int p = static_cast<int>(full.cols);
-  const int landmarks = std::max(2, std::min(options.landmarks, n - 1));
+  int landmarks = options.landmarks;
+  if (n <= landmarks) {
+    landmarks = static_cast<int>(std::ceil(static_cast<double>(n) * 0.75));
+  }
+  landmarks = std::max(2, std::min(landmarks, n - 1));
   const int splitting = options.splitting > 0 ? options.splitting : (n < 40000 ? 100 : 300);
   const bool spatial_flag = !spatial.empty() && options.spatial_cols > 0;
   std::mt19937_64 rng(options.seed + static_cast<std::uint64_t>(run_id));
@@ -861,8 +1261,6 @@ IterationResult run_iteration(
       scratch.tmp_labels[i] = starting_labels[static_cast<std::size_t>(landpoints[i])];
     }
     scratch.xw = run_constrain_is_identity ? scratch.tmp_labels : constrained_majority(scratch.tmp_labels, scratch.x_constrain);
-  } else if (landmarks < 200) {
-    scratch.xw = scratch.x_constrain;
   } else {
     const int init_k = std::max(2, std::min(splitting, static_cast<int>(landpoints.size())));
     scratch.init = kmeans_labels(
@@ -884,6 +1282,10 @@ IterationResult run_iteration(
   core.cycles = options.cycles;
   core.seed = options.seed + static_cast<std::uint64_t>(run_id);
   core.classifier = options.classifier;
+  core.evolutionary_search = starting_labels.empty();
+  core.guarded_diversity = true;
+  core.auto_class_coarsening = options.classifier == CoreClassifier::PLS_LDA;
+  core.many_to_one_absorption = true;
   core.knn = options.knn;
   core.knn.backend = options.backend == Backend::CUDA ? Backend::CUDA : Backend::CPU;
   core.knn.metric = options.metric;
@@ -903,15 +1305,30 @@ IterationResult run_iteration(
   core.pls.n_threads = options.backend == Backend::CUDA ?
     options.n_threads : std::max(1, options.pls.n_threads);
 
+  auto run_knn_core = [&](const std::vector<int>& labels, const CoreOptions& phase) {
+    return options.backend == Backend::CUDA ?
+      CoreKNN_CUDA(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase) :
+      CoreKNN_CPU(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+  };
+  auto run_pls_core = [&](const std::vector<int>& labels, const CoreOptions& phase) {
+    if (options.backend != Backend::CUDA) {
+      return CorePLSLDA_CPU(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+    }
+    return CorePLSLDA_CUDA(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+  };
+
   CoreResult core_result;
   if (options.classifier == CoreClassifier::KNN) {
-    core_result = options.backend == Backend::CUDA ?
-      CoreKNN_CUDA(x_view, scratch.xw, scratch.x_constrain, scratch.x_fixed, core) :
-      CoreKNN_CPU(x_view, scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+    if (global_graph_is_input) {
+      const NeighborGraph local_graph = subset_graph_to_rows(global_graph, landpoints, n);
+      core_result = CoreKNNGraph_CPU(local_graph, static_cast<int>(landpoints.size()), scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+    } else {
+      core_result = run_knn_core(scratch.xw, core);
+    }
+  } else if (options.classifier == CoreClassifier::PLS_LDA) {
+    core_result = run_pls_core(scratch.xw, core);
   } else {
-    core_result = options.backend == Backend::CUDA ?
-      CorePLSLDA_CUDA(x_view, scratch.xw, scratch.x_constrain, scratch.x_fixed, core) :
-      CorePLSLDA_CPU(x_view, scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+    throw std::invalid_argument("Unsupported KODAMA.matrix classifier.");
   }
 
   IterationResult out;
@@ -942,7 +1359,7 @@ IterationResult run_iteration(
     } else {
       copy_float32_rows_into(full_float, full.cols, tpoints, scratch.x_test);
       MatrixView test_view{scratch.x_test.data(), tpoints.size(), full.cols};
-      std::vector<int> projected = options.backend == Backend::CUDA ?
+      const std::vector<int> projected = options.backend == Backend::CUDA ?
         PLSLDAPredict_CUDA(x_view, core_result.clbest, test_view, core.pls) :
         PLSLDAPredict_CPU(x_view, core_result.clbest, test_view, core.pls);
       for (std::size_t i = 0; i < tpoints.size(); ++i) {
@@ -963,7 +1380,8 @@ KODAMAMatrixResult run_kodama_matrix(
   const std::vector<int>& starting_labels,
   const std::vector<int>& constrain_in,
   const std::vector<int>& fixed_in,
-  KODAMAMatrixOptions options
+  KODAMAMatrixOptions options,
+  const NeighborGraph* input_graph = nullptr
 ) {
   detail::validate_inputs(x, std::vector<int>(x.rows, 1), std::vector<int>());
   if (!starting_labels.empty() && starting_labels.size() != x.rows) throw std::invalid_argument("starting_labels size must match number of rows.");
@@ -1040,6 +1458,8 @@ KODAMAMatrixResult run_kodama_matrix(
   result.cycles = options.cycles;
   result.n_threads = options.n_threads;
   result.gpu_auto_workers = worker_plan.automatic;
+  result.gpu_scheduler_enabled = options.backend == Backend::CUDA;
+  result.gpu_scheduler_lanes = options.backend == Backend::CUDA ? worker_plan.workers : 0;
   result.gpu_sm_count = worker_plan.sm_count;
   result.gpu_free_memory_mb = worker_plan.free_memory_mb;
   result.gpu_total_memory_mb = worker_plan.total_memory_mb;
@@ -1050,66 +1470,54 @@ KODAMAMatrixResult run_kodama_matrix(
   result.v.assign(static_cast<std::size_t>(options.runs) * options.cycles, std::numeric_limits<double>::quiet_NaN());
   result.res.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
   result.res_constrain.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
-  if (options.progress) {
-    std::cerr << "[kodama] building global KNN graph for " << x.rows
-              << " samples and " << neighbors << " neighbors" << std::endl;
-  }
   detail::Timer graph_timer;
-  const NeighborGraph global_graph =
-#if defined(KODAMA_ENABLE_CUDA)
-    options.backend == Backend::CUDA ?
-    faiss_gpu_flat_graph(
-      full_float,
-      full_float,
-      static_cast<int>(x.rows),
-      static_cast<int>(x.rows),
-      static_cast<int>(x.cols),
-      neighbors + 1,
-      options.metric,
-      options.knn.gpu_device
-    ) :
-#endif
-    hnsw_graph(
-      full_float,
-      full_float,
-      static_cast<int>(x.rows),
-      static_cast<int>(x.rows),
-      static_cast<int>(x.cols),
-      neighbors + 1,
-      options.metric,
-      options.n_threads
+  NeighborGraph global_graph;
+  const bool graph_is_input = input_graph != nullptr;
+  if (graph_is_input) {
+    if (options.progress) {
+      std::cerr << "[kodama] using caller-supplied KNN graph with "
+                << input_graph->neighbors << " neighbors" << std::endl;
+    }
+    const int retained = std::max(
+      input_graph->neighbors,
+      std::max(neighbors, std::max(1, options.knn.k))
     );
+    global_graph = normalize_external_graph(*input_graph, static_cast<int>(x.rows), retained);
+  } else {
+    if (options.progress) {
+      std::cerr << "[kodama] building global KNN graph for " << x.rows
+                << " samples and " << neighbors << " neighbors" << std::endl;
+    }
+    global_graph = self_knn_graph(
+      full_float,
+      static_cast<int>(x.rows),
+      static_cast<int>(x.cols),
+      neighbors + 1,
+      options.metric,
+      options.n_threads,
+      options.backend == Backend::CUDA,
+      options.knn.gpu_device,
+      true
+    );
+  }
   result.graph_seconds = graph_timer.seconds();
 
-  result.knn = trim_self_neighbors(global_graph, static_cast<int>(x.rows), neighbors);
+  result.knn = trim_self_neighbors(global_graph, static_cast<int>(x.rows), std::min(neighbors, global_graph.neighbors));
   if (!options.spatial.empty() && options.spatial_graph_mix) {
     if (options.progress) {
       std::cerr << "[kodama] building spatial KNN graph for final KODAMA graph" << std::endl;
     }
     detail::Timer spatial_graph_timer;
-    const NeighborGraph spatial_global_graph =
-#if defined(KODAMA_ENABLE_CUDA)
-      options.backend == Backend::CUDA ?
-      faiss_gpu_flat_graph(
-        options.spatial,
-        options.spatial,
-        static_cast<int>(x.rows),
-        static_cast<int>(x.rows),
-        options.spatial_cols,
-        neighbors + 1,
-        DistanceMetric::Euclidean,
-        options.knn.gpu_device
-      ) :
-#endif
-      hnsw_graph(
-        options.spatial,
-        options.spatial,
-        static_cast<int>(x.rows),
-        static_cast<int>(x.rows),
-        options.spatial_cols,
-        neighbors + 1,
-        DistanceMetric::Euclidean,
-        options.n_threads
+    const NeighborGraph spatial_global_graph = self_knn_graph(
+      options.spatial,
+      static_cast<int>(x.rows),
+      options.spatial_cols,
+      neighbors + 1,
+      DistanceMetric::Euclidean,
+      options.n_threads,
+      options.backend == Backend::CUDA,
+      options.knn.gpu_device,
+      true
     );
     NeighborGraph spatial_trimmed = trim_self_neighbors(spatial_global_graph, static_cast<int>(x.rows), neighbors);
     result.knn = merge_feature_spatial_graphs(result.knn, spatial_trimmed, static_cast<int>(x.rows), neighbors);
@@ -1119,43 +1527,63 @@ KODAMAMatrixResult run_kodama_matrix(
 
   detail::Timer optimization_timer;
   const int workers = std::max(1, std::min(options.n_threads, options.runs));
-  std::atomic<int> next_run{1};
   std::vector<IterationResult> iterations(static_cast<std::size_t>(options.runs));
-  std::vector<std::future<void>> futures;
-  futures.reserve(static_cast<std::size_t>(workers));
-  for (int worker = 0; worker < workers; ++worker) {
-    futures.emplace_back(std::async(std::launch::async, [&]() {
-      IterationScratch scratch;
-      while (true) {
-        const int run_id = next_run.fetch_add(1);
-        if (run_id > options.runs) break;
-        if (options.progress) {
-          std::cerr << "[kodama] launch M " << run_id << "/" << options.runs << std::endl;
+
+  auto execute_run = [&](int run_id, IterationScratch& scratch) {
+    if (options.progress) {
+      std::cerr << "[kodama] launch M " << run_id << "/" << options.runs << std::endl;
+    }
+    IterationResult iter = run_iteration(
+      x,
+      full_float,
+      options.spatial,
+      spatial_jitter,
+      global_graph,
+      graph_is_input,
+      constrain,
+      constrain_is_identity,
+      fixed,
+      starting_labels,
+      options,
+      run_id,
+      scratch
+    );
+    if (options.progress) {
+      std::cerr << "[kodama] complete M " << run_id << "/" << options.runs
+                << " acc=" << iter.accbest
+                << " elapsed=" << timer.seconds() << "s" << std::endl;
+    }
+    iterations[static_cast<std::size_t>(run_id - 1)] = std::move(iter);
+  };
+
+#ifdef KODAMA_ENABLE_CUDA
+  if (options.backend == Backend::CUDA) {
+    CudaMScheduler scheduler(workers, options.knn.gpu_device);
+    if (options.progress) {
+      std::cerr << "[kodama] CUDA M scheduler using " << scheduler.lanes()
+                << " independent lanes" << std::endl;
+    }
+    scheduler.run(options.runs, [&](int run_id, int, IterationScratch& scratch) {
+      execute_run(run_id, scratch);
+    });
+  } else
+#endif
+  {
+    std::atomic<int> next_run{1};
+    std::vector<std::future<void>> futures;
+    futures.reserve(static_cast<std::size_t>(workers));
+    for (int worker = 0; worker < workers; ++worker) {
+      futures.emplace_back(std::async(std::launch::async, [&]() {
+        IterationScratch scratch;
+        while (true) {
+          const int run_id = next_run.fetch_add(1);
+          if (run_id > options.runs) break;
+          execute_run(run_id, scratch);
         }
-        IterationResult iter = run_iteration(
-          x,
-          full_float,
-          options.spatial,
-          spatial_jitter,
-          global_graph,
-          constrain,
-          constrain_is_identity,
-          fixed,
-          starting_labels,
-          options,
-          run_id,
-          scratch
-        );
-        if (options.progress) {
-          std::cerr << "[kodama] complete M " << run_id << "/" << options.runs
-                    << " acc=" << iter.accbest
-                    << " elapsed=" << timer.seconds() << "s" << std::endl;
-        }
-        iterations[static_cast<std::size_t>(run_id - 1)] = std::move(iter);
-      }
-    }));
+      }));
+    }
+    for (auto& future : futures) future.get();
   }
-  for (auto& future : futures) future.get();
   result.optimization_wall_seconds = optimization_timer.seconds();
 
   for (int run_id = 1; run_id <= options.runs; ++run_id) {
@@ -1243,6 +1671,141 @@ KODAMAMatrixResult KODAMAMatrix(
 ) {
   if (options.backend == Backend::CUDA) return KODAMAMatrix_CUDA(x, starting_labels, constrain, fixed, options);
   return KODAMAMatrix_CPU(x, starting_labels, constrain, fixed, options);
+}
+
+std::vector<float> KODAMAGraphFeatures_CPU(
+  const NeighborGraph& graph,
+  int samples,
+  const KODAMAMatrixOptions& options
+) {
+  const int components = std::max(
+    1,
+    options.graph_feature_components > 0 ? options.graph_feature_components : std::max(1, options.components)
+  );
+  return graph_laplacian_operator_features(
+    graph,
+    samples,
+    components,
+    std::max(8, options.graph_feature_steps),
+    options.seed,
+    options.n_threads
+  );
+}
+
+KODAMAMatrixResult KODAMAMatrixFromGraph_CPU(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+  KODAMAMatrixOptions cpu_options = options;
+  cpu_options.backend = Backend::CPU;
+  detail::Timer feature_timer;
+  std::vector<float> features = KODAMAGraphFeatures_CPU(graph, samples, cpu_options);
+  const double graph_feature_seconds = feature_timer.seconds();
+  const int components = static_cast<int>(features.size() / static_cast<std::size_t>(samples));
+  MatrixView view{features.data(), static_cast<std::size_t>(samples), static_cast<std::size_t>(components)};
+  KODAMAMatrixResult result = run_kodama_matrix(view, starting_labels, constrain, fixed, cpu_options, &graph);
+  result.graph_feature_seconds = graph_feature_seconds;
+  return result;
+}
+
+KODAMAMatrixResult KODAMAMatrixFromGraphData_CPU(
+  MatrixView x,
+  const NeighborGraph& graph,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+  if (x.rows < 2) throw std::invalid_argument("KODAMAMatrixFromGraphData requires at least two rows.");
+  KODAMAMatrixOptions cpu_options = options;
+  cpu_options.backend = Backend::CPU;
+  KODAMAMatrixResult result = run_kodama_matrix(x, starting_labels, constrain, fixed, cpu_options, &graph);
+  result.graph_feature_seconds = 0.0;
+  return result;
+}
+
+KODAMAMatrixResult KODAMAMatrixFromGraphData_CUDA(
+  MatrixView x,
+  const NeighborGraph& graph,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+#if defined(KODAMA_ENABLE_CUDA)
+  if (x.rows < 2) throw std::invalid_argument("KODAMAMatrixFromGraphData requires at least two rows.");
+  KODAMAMatrixOptions cuda_options = options;
+  cuda_options.backend = Backend::CUDA;
+  KODAMAMatrixResult result = run_kodama_matrix(x, starting_labels, constrain, fixed, cuda_options, &graph);
+  result.graph_feature_seconds = 0.0;
+  return result;
+#else
+  (void)x;
+  (void)graph;
+  (void)starting_labels;
+  (void)constrain;
+  (void)fixed;
+  (void)options;
+  throw std::runtime_error("KODAMAMatrixFromGraphData_CUDA requires a CUDA build.");
+#endif
+}
+
+KODAMAMatrixResult KODAMAMatrixFromGraphData(
+  MatrixView x,
+  const NeighborGraph& graph,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+  if (options.backend == Backend::CUDA) return KODAMAMatrixFromGraphData_CUDA(x, graph, starting_labels, constrain, fixed, options);
+  return KODAMAMatrixFromGraphData_CPU(x, graph, starting_labels, constrain, fixed, options);
+}
+
+KODAMAMatrixResult KODAMAMatrixFromGraph_CUDA(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+#if defined(KODAMA_ENABLE_CUDA)
+  KODAMAMatrixOptions cuda_options = options;
+  cuda_options.backend = Backend::CUDA;
+  detail::Timer feature_timer;
+  std::vector<float> features = KODAMAGraphFeatures_CPU(graph, samples, cuda_options);
+  const double graph_feature_seconds = feature_timer.seconds();
+  const int components = static_cast<int>(features.size() / static_cast<std::size_t>(samples));
+  MatrixView view{features.data(), static_cast<std::size_t>(samples), static_cast<std::size_t>(components)};
+  KODAMAMatrixResult result = run_kodama_matrix(view, starting_labels, constrain, fixed, cuda_options, &graph);
+  result.graph_feature_seconds = graph_feature_seconds;
+  return result;
+#else
+  (void)graph;
+  (void)samples;
+  (void)starting_labels;
+  (void)constrain;
+  (void)fixed;
+  (void)options;
+  throw std::runtime_error("KODAMAMatrixFromGraph_CUDA requires a CUDA build.");
+#endif
+}
+
+KODAMAMatrixResult KODAMAMatrixFromGraph(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+  if (options.backend == Backend::CUDA) return KODAMAMatrixFromGraph_CUDA(graph, samples, starting_labels, constrain, fixed, options);
+  return KODAMAMatrixFromGraph_CPU(graph, samples, starting_labels, constrain, fixed, options);
 }
 
 }  // namespace kodama

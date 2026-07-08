@@ -196,12 +196,6 @@ bool method_enabled(const std::string& name) {
   return false;
 }
 
-bool method_enabled_by_default(const std::string& name, bool default_enabled) {
-  const char* filter = std::getenv("KODAMA_BENCH_METHODS");
-  if (filter == nullptr || std::string(filter).empty()) return default_enabled;
-  return method_enabled(name);
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -291,13 +285,6 @@ int main(int argc, char** argv) {
       return kodama::PLSLDACV_CPU(view, y, constrain, opt);
     }));
   }
-  if (method_enabled_by_default("PLSCKNNCV_CPU", false)) {
-    record(run_pls(dataset, "PLSCKNNCV_CPU", "cpu", [&] {
-      kodama::PLSOptions opt = pls;
-      opt.backend = kodama::Backend::CPU;
-      return kodama::PLSCKNNCV_CPU(view, y, constrain, opt);
-    }));
-  }
   if (method_enabled("PLSDACV_CUDA")) {
     record(run_pls(dataset, "PLSDACV_CUDA", "cuda", [&] {
       kodama::PLSOptions opt = pls;
@@ -312,14 +299,6 @@ int main(int argc, char** argv) {
       opt.backend = kodama::Backend::CUDA;
       opt.gpu_device = 0;
       return kodama::PLSLDACV_CUDA(view, y, constrain, opt);
-    }));
-  }
-  if (method_enabled_by_default("PLSCKNNCV_CUDA", false)) {
-    record(run_pls(dataset, "PLSCKNNCV_CUDA", "cuda", [&] {
-      kodama::PLSOptions opt = pls;
-      opt.backend = kodama::Backend::CUDA;
-      opt.gpu_device = 0;
-      return kodama::PLSCKNNCV_CUDA(view, y, constrain, opt);
     }));
   }
   return 0;

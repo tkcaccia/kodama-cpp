@@ -1,0 +1,24 @@
+Package: kodamaR
+Title: R Wrapper for the Kodama-Cpp Library
+Version: 0.1.0
+Authors@R: c(
+    person("Stefano", "Cacciatore", role = c("aut", "cre"),
+           email = "tkcaccia@gmail.com")
+  )
+Author: Stefano Cacciatore [aut, cre]
+Maintainer: Stefano Cacciatore <tkcaccia@gmail.com>
+Description: Thin R bindings for the standalone kodama-cpp C++/CUDA library.
+    The package exposes KODAMA matrix optimization with KNN and PLS-LDA
+    classifiers while keeping all numerical kernels in kodama-cpp.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+LinkingTo: Rcpp
+Imports:
+    Rcpp
+Suggests:
+    irlba,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+SystemRequirements: kodama-cpp, FAISS, optional CUDA/cuVS/cuGraph runtime
+Config/roxygen2/version: 8.0.0

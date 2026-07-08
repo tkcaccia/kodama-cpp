@@ -33,6 +33,12 @@ if (is.null(obj) || is.null(obj$data) || is.null(obj$labels)) {
 }
 
 x <- obj$data
+if (inherits(x, "float32") || inherits(x, "float")) {
+  if (!requireNamespace("float", quietly = TRUE)) {
+    stop("The float package is required to export float-backed RData files.", call. = FALSE)
+  }
+  x <- float::dbl(x)
+}
 if (!is.matrix(x)) x <- as.matrix(x)
 storage.mode(x) <- "double"
 

@@ -49,6 +49,10 @@ enum class GraphClusterMethod {
   RandomWalking
 };
 
+enum class GraphFeatureMode {
+  LaplacianSelfTuning
+};
+
 enum class MatrixValueType {
   Float64,
   Float32
@@ -67,6 +71,14 @@ struct MatrixView {
 
   MatrixView(const float* data_ptr, std::size_t n_rows, std::size_t n_cols)
       : data(data_ptr), rows(n_rows), cols(n_cols), value_type(MatrixValueType::Float32) {}
+
+  float value_float(std::size_t i, std::size_t j) const {
+    const std::size_t offset = i * cols + j;
+    if (value_type == MatrixValueType::Float32) {
+      return static_cast<const float*>(data)[offset];
+    }
+    return static_cast<float>(static_cast<const double*>(data)[offset]);
+  }
 
   double operator()(std::size_t i, std::size_t j) const {
     const std::size_t offset = i * cols + j;
@@ -113,6 +125,44 @@ struct PLSOptions {
   Backend backend = Backend::CPU;
   int gpu_device = 0;
   int n_threads = 1;
+};
+
+struct CorePLSLDAOptions {
+  FoldOptions cv;
+  int max_components = 10;
+  int fixed_components = 0;
+  bool center = true;
+  bool scale = true;
+  Backend backend = Backend::CPU;
+  int gpu_device = 0;
+  int n_threads = 1;
+
+  CorePLSLDAOptions() = default;
+
+  CorePLSLDAOptions& operator=(const PLSOptions& options) {
+    cv = options.cv;
+    max_components = options.max_components;
+    fixed_components = options.fixed_components;
+    center = options.center;
+    scale = options.scale;
+    backend = options.backend;
+    gpu_device = options.gpu_device;
+    n_threads = options.n_threads;
+    return *this;
+  }
+
+  operator PLSOptions() const {
+    PLSOptions out;
+    out.cv = cv;
+    out.max_components = max_components;
+    out.fixed_components = fixed_components;
+    out.center = center;
+    out.scale = scale;
+    out.backend = backend;
+    out.gpu_device = gpu_device;
+    out.n_threads = n_threads;
+    return out;
+  }
 };
 
 struct FoldResult {
@@ -195,11 +245,12 @@ struct CoreOptions {
   CoreClassifier classifier = CoreClassifier::PLS_LDA;
   bool shake = false;
   std::uint64_t seed = 1;
-  int target_classes = 0;
-  double class_count_penalty = 0.0;
-  double imbalance_penalty = 0.0;
   bool auto_class_coarsening = false;
-  PLSOptions pls;
+  bool many_to_one_absorption = false;
+  bool evolutionary_search = false;
+  bool guarded_diversity = false;
+  bool adaptive_proposal_size = true;
+  CorePLSLDAOptions pls;
   KNNOptions knn;
 };
 
@@ -270,7 +321,7 @@ struct KODAMAMatrixOptions {
   int graph_neighbors = 100;
   int n_threads = 1;
   int spatial_cols = 0;
-  double spatial_resolution = 0.3;
+  double spatial_resolution = 0.4;
   bool spatial_graph_mix = false;
   int spatial_constraint_mode = 0;
   std::uint64_t seed = 1234;
@@ -279,9 +330,12 @@ struct KODAMAMatrixOptions {
   CoreClassifier classifier = CoreClassifier::KNN;
   bool progress = false;
   bool apply_kodama_dissimilarity = true;
+  GraphFeatureMode graph_feature_mode = GraphFeatureMode::LaplacianSelfTuning;
+  int graph_feature_components = 0;
+  int graph_feature_steps = 3;
   std::vector<float> spatial;
   KNNOptions knn;
-  PLSOptions pls;
+  CorePLSLDAOptions pls;
 };
 
 struct KODAMAMatrixResult {
@@ -296,12 +350,15 @@ struct KODAMAMatrixResult {
   int cycles = 0;
   int n_threads = 1;
   bool gpu_auto_workers = false;
+  bool gpu_scheduler_enabled = false;
+  int gpu_scheduler_lanes = 0;
   int gpu_sm_count = 0;
   double gpu_free_memory_mb = 0.0;
   double gpu_total_memory_mb = 0.0;
   double gpu_worker_memory_estimate_mb = 0.0;
   double runtime_seconds = 0.0;
   double input_copy_seconds = 0.0;
+  double graph_feature_seconds = 0.0;
   double spatial_precompute_seconds = 0.0;
   double graph_seconds = 0.0;
   double spatial_graph_seconds = 0.0;
@@ -320,6 +377,7 @@ struct UMAPOptions {
   double min_dist = 0.01;
   double repulsion_strength = 1.0;
   int spectral_n_iter = 20;
+  int n_threads = 1;
   int seed = 1234;
   int gpu_device = 0;
   std::vector<float> init;
@@ -329,6 +387,7 @@ struct OpenTSNEOptions {
   int n_components = 2;
   int n_neighbors = 0;
   double perplexity = 15.0;
+  double theta = 0.5;
   int early_exaggeration_iter = 250;
   int n_iter = 500;
   double early_exaggeration = 12.0;
@@ -339,6 +398,7 @@ struct OpenTSNEOptions {
   double final_momentum = 0.8;
   double min_gain = 0.01;
   double max_step_norm = 5.0;
+  int n_threads = 1;
   int seed = 4;
   int gpu_device = 0;
   std::vector<float> init;
@@ -513,6 +573,15 @@ CoreResult CoreKNN_CUDA(
   const CoreOptions& options = CoreOptions()
 );
 
+CoreResult CoreKNNGraph_CPU(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& clbest,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const CoreOptions& options = CoreOptions()
+);
+
 CoreResult Core(
   MatrixView x,
   const std::vector<int>& clbest,
@@ -545,12 +614,82 @@ KODAMAMatrixResult KODAMAMatrix(
   const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
 );
 
+std::vector<float> KODAMAGraphFeatures_CPU(
+  const NeighborGraph& graph,
+  int samples,
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrixFromGraph_CPU(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrixFromGraphData_CPU(
+  MatrixView x,
+  const NeighborGraph& graph,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrixFromGraphData_CUDA(
+  MatrixView x,
+  const NeighborGraph& graph,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrixFromGraphData(
+  MatrixView x,
+  const NeighborGraph& graph,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrixFromGraph_CUDA(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrixFromGraph(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
 EmbeddingResult KODAMAUMAP_CUDA(
   const NeighborGraph& graph,
   const UMAPOptions& options = UMAPOptions()
 );
 
+EmbeddingResult KODAMAUMAP_CPU(
+  const NeighborGraph& graph,
+  const UMAPOptions& options = UMAPOptions()
+);
+
 EmbeddingResult KODAMAOpenTSNE_CUDA(
+  const NeighborGraph& graph,
+  const OpenTSNEOptions& options = OpenTSNEOptions()
+);
+
+EmbeddingResult KODAMAOpenTSNE_CPU(
   const NeighborGraph& graph,
   const OpenTSNEOptions& options = OpenTSNEOptions()
 );
@@ -588,6 +727,12 @@ GraphClusterResult KODAMAGraphCluster(
   const GraphClusterOptions& options = GraphClusterOptions()
 );
 
+GraphClusterResult KODAMAEmbeddingGraphCluster(
+  MatrixView embedding,
+  const NeighborGraph& graph,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
 GraphClusterResult KODAMAEmbeddingCluster(
   MatrixView embedding,
   const GraphClusterOptions& options = GraphClusterOptions()
@@ -600,5 +745,6 @@ const char* to_string(PLSMode mode);
 const char* to_string(CoreClassifier classifier);
 const char* to_string(GraphWeightType weight_type);
 const char* to_string(GraphClusterMethod method);
+const char* to_string(GraphFeatureMode mode);
 
 }  // namespace kodama

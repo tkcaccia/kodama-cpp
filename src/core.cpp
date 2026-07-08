@@ -157,7 +157,7 @@ std::vector<float> make_faiss_matrix(
       for (std::size_t r = 0; r < rows.size(); ++r) {
         const int row = rows[r];
         for (std::size_t j = 0; j < x.cols; ++j) {
-          out[r * x.cols + j] = static_cast<float>(x(static_cast<std::size_t>(row), j));
+          out[r * x.cols + j] = x.value_float(static_cast<std::size_t>(row), j);
         }
       }
     }
@@ -168,13 +168,13 @@ std::vector<float> make_faiss_matrix(
     long double ss = 0.0;
     const int row = rows[r];
     for (std::size_t j = 0; j < x.cols; ++j) {
-      const double v = x(static_cast<std::size_t>(row), j);
+      const float v = x.value_float(static_cast<std::size_t>(row), j);
       ss += static_cast<long double>(v) * static_cast<long double>(v);
     }
     const double n = std::sqrt(static_cast<double>(ss));
     const double scale = metric == DistanceMetric::Cosine && n > 0.0 && std::isfinite(n) ? 1.0 / n : 1.0;
     for (std::size_t j = 0; j < x.cols; ++j) {
-      out[r * x.cols + j] = static_cast<float>(x(static_cast<std::size_t>(row), j) * scale);
+      out[r * x.cols + j] = static_cast<float>(static_cast<double>(x.value_float(static_cast<std::size_t>(row), j)) * scale);
     }
   }
   return out;
@@ -189,7 +189,7 @@ std::vector<float> make_faiss_matrix(MatrixView x, DistanceMetric metric) {
     } else {
       for (std::size_t r = 0; r < x.rows; ++r) {
         for (std::size_t j = 0; j < x.cols; ++j) {
-          out[r * x.cols + j] = static_cast<float>(x(r, j));
+          out[r * x.cols + j] = x.value_float(r, j);
         }
       }
     }
@@ -199,13 +199,13 @@ std::vector<float> make_faiss_matrix(MatrixView x, DistanceMetric metric) {
   for (std::size_t r = 0; r < x.rows; ++r) {
     long double ss = 0.0;
     for (std::size_t j = 0; j < x.cols; ++j) {
-      const double v = x(r, j);
+      const float v = x.value_float(r, j);
       ss += static_cast<long double>(v) * static_cast<long double>(v);
     }
     const double n = std::sqrt(static_cast<double>(ss));
     const double scale = metric == DistanceMetric::Cosine && n > 0.0 && std::isfinite(n) ? 1.0 / n : 1.0;
     for (std::size_t j = 0; j < x.cols; ++j) {
-      out[r * x.cols + j] = static_cast<float>(x(r, j) * scale);
+      out[r * x.cols + j] = static_cast<float>(static_cast<double>(x.value_float(r, j)) * scale);
     }
   }
   return out;
@@ -269,9 +269,25 @@ struct KNNPredictionScratch {
   std::vector<int> label_values;
   std::vector<int> label_codes;
   std::vector<int> vote_counts;
+  std::vector<int> fallback_counts;
   std::vector<double> vote_scores;
   std::vector<int> touched;
+  bool label_map_initialized = false;
 };
+
+void initialize_knn_label_map(KNNPredictionScratch& scratch, const std::vector<int>& labels) {
+  scratch.label_to_code.clear();
+  scratch.label_values.clear();
+  scratch.label_values.reserve(labels.size());
+  scratch.label_to_code.reserve(labels.size());
+  for (int label : labels) {
+    if (scratch.label_to_code.find(label) != scratch.label_to_code.end()) continue;
+    const int code = static_cast<int>(scratch.label_values.size());
+    scratch.label_to_code.emplace(label, code);
+    scratch.label_values.push_back(label);
+  }
+  scratch.label_map_initialized = true;
+}
 
 KNNParametersUsed resolve_core_knn_parameters(const KNNOptions& options) {
   KNNParametersUsed used;
@@ -380,6 +396,107 @@ PrecomputedKNN precompute_knn_cv_cpu(
   return precomputed;
 }
 
+NeighborGraph normalize_graph_indices(const NeighborGraph& graph, int samples) {
+  if (samples < 2) throw std::invalid_argument("NeighborGraph samples must be at least 2.");
+  if (graph.neighbors <= 0) throw std::invalid_argument("NeighborGraph.neighbors must be positive.");
+  const std::size_t expected = static_cast<std::size_t>(samples) * static_cast<std::size_t>(graph.neighbors);
+  if (graph.indices.size() != expected || graph.distances.size() != expected) {
+    throw std::invalid_argument("NeighborGraph indices/distances size must equal samples * neighbors.");
+  }
+
+  int min_index = std::numeric_limits<int>::max();
+  int max_index = std::numeric_limits<int>::min();
+  for (int value : graph.indices) {
+    if (value < 0) continue;
+    min_index = std::min(min_index, value);
+    max_index = std::max(max_index, value);
+  }
+  const bool one_based = min_index >= 1 && max_index <= samples;
+
+  NeighborGraph out;
+  out.neighbors = graph.neighbors;
+  out.indices.resize(graph.indices.size(), -1);
+  out.distances.resize(graph.distances.size(), std::numeric_limits<float>::infinity());
+  for (std::size_t i = 0; i < graph.indices.size(); ++i) {
+    int id = graph.indices[i];
+    if (one_based && id > 0) --id;
+    if (id < 0 || id >= samples) {
+      out.indices[i] = -1;
+      out.distances[i] = std::numeric_limits<float>::infinity();
+      continue;
+    }
+    out.indices[i] = id;
+    const float d = graph.distances[i];
+    out.distances[i] = std::isfinite(d) && d >= 0.0f ? d : std::numeric_limits<float>::infinity();
+  }
+  return out;
+}
+
+PrecomputedKNN precompute_knn_cv_graph(
+  const NeighborGraph& input_graph,
+  int samples,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const KNNOptions& options
+) {
+  if (options.k < 1) throw std::invalid_argument("KNNOptions::k must be positive.");
+  if (labels.size() != static_cast<std::size_t>(samples)) {
+    throw std::invalid_argument("labels size must match NeighborGraph samples.");
+  }
+  if (!constrain.empty() && constrain.size() != labels.size()) {
+    throw std::invalid_argument("constrain size must be zero or match NeighborGraph samples.");
+  }
+
+  detail::Timer timer;
+  const NeighborGraph graph = normalize_graph_indices(input_graph, samples);
+  PrecomputedKNN precomputed;
+  precomputed.parameters = resolve_core_knn_parameters(options);
+  precomputed.parameters.index_type = KNNIndexType::FaissHNSWFlat;
+  precomputed.folds = detail::make_folds(labels, constrain, options.cv);
+  const std::vector<int> fold_ids = detail::sorted_unique_folds(precomputed.folds);
+  const int k = std::max(1, std::min(options.k, graph.neighbors));
+
+  for (int fold : fold_ids) {
+    const std::vector<int> validation = detail::indices_where_fold(precomputed.folds, fold, true);
+    if (validation.empty()) continue;
+    PrecomputedKNNFold fold_data;
+    fold_data.fold = fold;
+    fold_data.validation = validation;
+    fold_data.k = k;
+    fold_data.neighbor_rows.assign(validation.size() * static_cast<std::size_t>(k), -1);
+    fold_data.scores.assign(validation.size() * static_cast<std::size_t>(k), -std::numeric_limits<float>::infinity());
+
+    for (std::size_t qi = 0; qi < validation.size(); ++qi) {
+      const int row = validation[qi];
+      int out_col = 0;
+      const std::size_t in_base = static_cast<std::size_t>(row) * static_cast<std::size_t>(graph.neighbors);
+      const std::size_t out_base = qi * static_cast<std::size_t>(k);
+      for (int j = 0; j < graph.neighbors && out_col < k; ++j) {
+        const std::size_t in_offset = in_base + static_cast<std::size_t>(j);
+        const int nb = graph.indices[in_offset];
+        if (nb < 0 || nb >= samples || nb == row) continue;
+        if (precomputed.folds[static_cast<std::size_t>(nb)] == fold) continue;
+        const float distance = graph.distances[in_offset];
+        if (!std::isfinite(distance)) continue;
+        const std::size_t out_offset = out_base + static_cast<std::size_t>(out_col);
+        fold_data.neighbor_rows[out_offset] = nb;
+        const float d = std::max(0.0f, distance);
+        if (precomputed.parameters.metric == DistanceMetric::Euclidean) {
+          fold_data.scores[out_offset] = -(d * d);
+        } else {
+          fold_data.scores[out_offset] = 1.0f - d;
+        }
+        ++out_col;
+      }
+    }
+    precomputed.fold_data.push_back(std::move(fold_data));
+  }
+
+  precomputed.parameters.k = k;
+  (void)timer;
+  return precomputed;
+}
+
 #if defined(KODAMA_ENABLE_CUDA)
 PrecomputedKNN precompute_knn_cv_cuda(
   MatrixView x,
@@ -461,27 +578,48 @@ CVPrediction predict_precomputed_knn(
 ) {
   CVPrediction out;
   out.predicted.assign(labels.size(), 0);
-  scratch.label_to_code.clear();
-  scratch.label_to_code.reserve(labels.size());
-  scratch.label_values.clear();
-  scratch.label_values.reserve(labels.size());
+  if (!scratch.label_map_initialized) {
+    initialize_knn_label_map(scratch, labels);
+  }
   scratch.label_codes.resize(labels.size());
-  for (std::size_t i = 0; i < labels.size(); ++i) {
-    const int label = labels[i];
-    auto it = scratch.label_to_code.find(label);
-    if (it == scratch.label_to_code.end()) {
-      const int code = static_cast<int>(scratch.label_values.size());
-      it = scratch.label_to_code.emplace(label, code).first;
-      scratch.label_values.push_back(label);
+  for (;;) {
+    bool rebuilt = false;
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+      const int label = labels[i];
+      auto it = scratch.label_to_code.find(label);
+      if (it == scratch.label_to_code.end()) {
+        initialize_knn_label_map(scratch, labels);
+        rebuilt = true;
+        break;
+      }
+      scratch.label_codes[i] = it->second;
     }
-    scratch.label_codes[i] = it->second;
+    if (!rebuilt) break;
   }
 
   if (scratch.vote_counts.size() < scratch.label_values.size()) {
     scratch.vote_counts.resize(scratch.label_values.size(), 0);
   }
+  if (scratch.fallback_counts.size() < scratch.label_values.size()) {
+    scratch.fallback_counts.resize(scratch.label_values.size(), 0);
+  }
   if (scratch.vote_scores.size() < scratch.label_values.size()) {
     scratch.vote_scores.resize(scratch.label_values.size(), 0.0);
+  }
+  std::fill(scratch.fallback_counts.begin(), scratch.fallback_counts.end(), 0);
+  for (int code : scratch.label_codes) {
+    scratch.fallback_counts[static_cast<std::size_t>(code)]++;
+  }
+  int fallback_label = scratch.label_values.empty() ? 0 : scratch.label_values.front();
+  int fallback_count = -1;
+  for (std::size_t code = 0; code < scratch.label_values.size(); ++code) {
+    const int label = scratch.label_values[code];
+    const int count = scratch.fallback_counts[code];
+    if (count > fallback_count || (count == fallback_count && label < fallback_label)) {
+      fallback_label = label;
+      fallback_count = count;
+    }
+    scratch.fallback_counts[code] = 0;
   }
   scratch.touched.reserve(static_cast<std::size_t>(precomputed.parameters.k));
   for (const PrecomputedKNNFold& fold : precomputed.fold_data) {
@@ -505,6 +643,10 @@ CVPrediction predict_precomputed_knn(
       int best_label = 0;
       int best_count = -1;
       double best_score = -std::numeric_limits<double>::infinity();
+      if (scratch.touched.empty()) {
+        out.predicted[static_cast<std::size_t>(fold.validation[qi])] = fallback_label;
+        continue;
+      }
       for (int code : scratch.touched) {
         const std::size_t idx = static_cast<std::size_t>(code);
         const int label = scratch.label_values[idx];
@@ -526,12 +668,12 @@ CVPrediction predict_precomputed_knn(
 
 double core_objective_score(
   const std::vector<int>& labels,
+  const std::vector<int>& predictions,
   double accuracy,
   const CoreOptions& options
 ) {
-  if (!options.auto_class_coarsening &&
-      (options.target_classes <= 0 || options.class_count_penalty == 0.0) &&
-      options.imbalance_penalty == 0.0) {
+  if (!options.guarded_diversity &&
+      !options.auto_class_coarsening) {
     return accuracy;
   }
 
@@ -544,21 +686,14 @@ double core_objective_score(
 
   const double n = static_cast<double>(labels.size());
   double score = accuracy;
-  if (options.target_classes > 0 && options.class_count_penalty != 0.0) {
-    const double observed = static_cast<double>(n_classes);
-    const double target = static_cast<double>(options.target_classes);
-    score -= options.class_count_penalty * std::abs(std::log(observed / target));
-  }
-
-  if (options.imbalance_penalty != 0.0) {
-    double entropy = 0.0;
+  if (options.guarded_diversity) {
+    double same_label_probability = 0.0;
     for (const auto& kv : counts) {
       const double p = static_cast<double>(kv.second) / n;
-      if (p > 0.0) entropy -= p * std::log(p);
+      same_label_probability += p * p;
     }
-    const double max_entropy = n_classes > 1 ? std::log(static_cast<double>(n_classes)) : 0.0;
-    const double entropy_loss = max_entropy > 0.0 ? 1.0 - entropy / max_entropy : 1.0;
-    score -= options.imbalance_penalty * entropy_loss;
+    const double different_label_probability = std::max(0.0, 1.0 - same_label_probability);
+    score *= std::sqrt(different_label_probability);
   }
 
   if (options.auto_class_coarsening && n_classes > 1) {
@@ -567,9 +702,15 @@ double core_objective_score(
       const double p = static_cast<double>(kv.second) / n;
       if (p > 0.0) entropy -= p * std::log(p);
     }
+    const double max_sample_entropy = n > 1.0 ? std::log(n) : 0.0;
+    const double label_code_cost = max_sample_entropy > 0.0
+      ? std::clamp(entropy / max_sample_entropy, 0.0, 1.0)
+      : 0.0;
     const double keff = std::exp(entropy);
     const double fragmentation = std::max(0.0, std::log(static_cast<double>(n_classes) / std::max(1.0, keff)));
-    score -= (1.0 - accuracy) * fragmentation / (1.0 + fragmentation);
+    const double fragmentation_cost = fragmentation / (1.0 + fragmentation);
+    const double parsimony_cost = std::max(label_code_cost, fragmentation_cost);
+    score -= (1.0 - accuracy) * parsimony_cost;
   }
 
   return score;
@@ -694,6 +835,168 @@ bool propose_auto_class_coarsening(
   return changed;
 }
 
+bool propose_many_to_one_absorption(
+  std::vector<int>& labels,
+  const std::vector<int>& previous_predictions,
+  const std::vector<int>& fixed_flags,
+  std::mt19937_64& rng
+) {
+  if (labels.size() != previous_predictions.size()) return false;
+  if (!fixed_flags.empty() && fixed_flags.size() != labels.size()) {
+    throw std::invalid_argument("fixed size must be zero or match number of rows.");
+  }
+
+  std::map<int, int> class_sizes;
+  std::map<int, int> movable_sizes;
+  std::map<int, std::map<int, int>> transitions;
+  for (std::size_t i = 0; i < labels.size(); ++i) {
+    const int source = labels[i];
+    class_sizes[source]++;
+    transitions[source][previous_predictions[i]]++;
+    if (fixed_flags.empty() || fixed_flags[i] != 1) movable_sizes[source]++;
+  }
+
+  const int n_classes = static_cast<int>(class_sizes.size());
+  if (n_classes <= 2) return false;
+  const double n = static_cast<double>(labels.size());
+
+  struct SourceMove {
+    int source = 0;
+    double surplus = 0.0;
+  };
+  struct TargetMove {
+    int target = 0;
+    double weight = 0.0;
+    std::vector<SourceMove> sources;
+  };
+
+  std::map<int, TargetMove> by_target;
+  for (const auto& kv : class_sizes) {
+    const int source = kv.first;
+    const int source_size = kv.second;
+    if (movable_sizes[source] <= 0) continue;
+
+    const auto& row = transitions[source];
+    const int stay = row.count(source) ? row.at(source) : 0;
+    int best_target = source;
+    int best_count = 0;
+    int best_target_size = source_size;
+    double best_surplus = 0.0;
+    for (const auto& dst : row) {
+      if (dst.first == source) continue;
+      const auto dst_size_it = class_sizes.find(dst.first);
+      if (dst_size_it == class_sizes.end()) continue;
+      const double expected = static_cast<double>(source_size) *
+        static_cast<double>(dst_size_it->second) / std::max(1.0, n);
+      const double surplus = static_cast<double>(dst.second) - expected;
+      if (surplus > best_surplus ||
+          (surplus == best_surplus && dst.second > best_count) ||
+          (surplus == best_surplus && dst.second == best_count && dst_size_it->second > best_target_size) ||
+          (surplus == best_surplus && dst.second == best_count && dst_size_it->second == best_target_size && dst.first < best_target)) {
+        best_target = dst.first;
+        best_target_size = dst_size_it->second;
+        best_count = dst.second;
+        best_surplus = surplus;
+      }
+    }
+    if (best_target == source || best_surplus <= 0.0 || best_count <= stay) continue;
+
+    TargetMove& move = by_target[best_target];
+    move.target = best_target;
+    move.weight += best_surplus;
+    move.sources.push_back(SourceMove{source, best_surplus});
+  }
+  if (by_target.empty()) return false;
+
+  std::vector<TargetMove> multi_source_moves;
+  std::vector<TargetMove> fallback_moves;
+  for (auto& kv : by_target) {
+    std::sort(kv.second.sources.begin(), kv.second.sources.end(), [](const SourceMove& a, const SourceMove& b) {
+      if (a.surplus != b.surplus) return a.surplus > b.surplus;
+      return a.source < b.source;
+    });
+    if (kv.second.sources.size() > 1) {
+      multi_source_moves.push_back(std::move(kv.second));
+    } else {
+      fallback_moves.push_back(std::move(kv.second));
+    }
+  }
+  std::vector<TargetMove>& moves = multi_source_moves.empty() ? fallback_moves : multi_source_moves;
+  if (moves.empty()) return false;
+
+  std::vector<double> weights;
+  weights.reserve(moves.size());
+  for (const TargetMove& move : moves) weights.push_back(std::max(move.weight, std::numeric_limits<double>::min()));
+  std::discrete_distribution<int> target_dist(weights.begin(), weights.end());
+  const TargetMove& selected = moves[static_cast<std::size_t>(target_dist(rng))];
+
+  std::unordered_map<int, int> remap;
+  remap.reserve(selected.sources.size());
+  for (const SourceMove& source : selected.sources) {
+    if (source.source != selected.target) remap[source.source] = selected.target;
+  }
+  if (remap.empty()) return false;
+
+  std::vector<int> proposed = labels;
+  bool changed = false;
+  for (std::size_t i = 0; i < proposed.size(); ++i) {
+    if (!fixed_flags.empty() && fixed_flags[i] == 1) continue;
+    const auto it = remap.find(proposed[i]);
+    if (it == remap.end()) continue;
+    proposed[i] = it->second;
+    changed = true;
+  }
+  if (!changed) return false;
+  std::unordered_map<int, int> proposed_counts;
+  proposed_counts.reserve(proposed.size());
+  for (int label : proposed) proposed_counts[label]++;
+  const int after_classes = static_cast<int>(proposed_counts.size());
+  if (after_classes <= 1 || after_classes >= n_classes) return false;
+
+  labels.swap(proposed);
+  return true;
+}
+
+int sample_proposal_group_count(
+  int group_count,
+  int cycle,
+  int cycles,
+  bool adaptive,
+  std::mt19937_64& rng
+) {
+  if (group_count <= 1) return std::max(0, group_count);
+  if (!adaptive || cycles <= 1) {
+    std::uniform_int_distribution<int> n_dist(1, group_count);
+    return n_dist(rng);
+  }
+
+  const double progress = std::clamp(
+    static_cast<double>(cycle + 1) / static_cast<double>(cycles + 1),
+    0.0,
+    1.0
+  );
+  const double smooth = progress * progress * (3.0 - 2.0 * progress);
+  const double temperature = std::clamp(1.0 - smooth, 0.0, 1.0);
+  const int max_count = std::max(
+    1,
+    1 + static_cast<int>(std::floor(static_cast<double>(group_count - 1) * temperature))
+  );
+  std::uniform_int_distribution<int> n_dist(1, max_count);
+  return n_dist(rng);
+}
+
+void apply_group_relabel(
+  std::vector<int>& labels,
+  const std::vector<int>& eligible,
+  int replacement
+) {
+  for (int idx : eligible) {
+    int& label = labels[static_cast<std::size_t>(idx)];
+    if (label == replacement) continue;
+    label = replacement;
+  }
+}
+
 template <class Predictor>
 CoreResult maximize_core(
   MatrixView x,
@@ -746,9 +1049,14 @@ CoreResult maximize_core(
   result.accbest = options.shake ? 0.0 : detail::accuracy(result.clbest, result.cvpredbest);
   result.scorebest = options.shake
     ? -std::numeric_limits<double>::infinity()
-    : core_objective_score(result.clbest, result.accbest, options);
+    : core_objective_score(result.clbest, result.cvpredbest, result.accbest, options);
   result.runtime_seconds += best_cv.runtime_seconds;
   result.peak_memory_mb = std::max(result.peak_memory_mb, best_cv.peak_memory_mb);
+
+  std::vector<int> current_cl = result.clbest;
+  std::vector<int> current_cvpred = result.cvpredbest;
+  double current_acc = result.accbest;
+  double current_score = result.scorebest;
 
   std::vector<int> sampled_groups;
   std::vector<int> eligible;
@@ -760,12 +1068,18 @@ CoreResult maximize_core(
   candidate_counts.reserve(x.rows);
 
   for (int cycle = 0; cycle < options.cycles && !result.success; ++cycle) {
-    std::vector<int> cl = result.clbest;
+    std::vector<int> cl = options.evolutionary_search ? current_cl : result.clbest;
     std::vector<int> cl_dirty = cl;
+    const std::vector<int>& proposal_predictions = options.evolutionary_search ? current_cvpred : result.cvpredbest;
 
     if (!groups.empty()) {
-      std::uniform_int_distribution<int> n_dist(1, static_cast<int>(groups.size()));
-      const int n_to_sample = n_dist(rng);
+      const int n_to_sample = sample_proposal_group_count(
+        static_cast<int>(groups.size()),
+        cycle,
+        options.cycles,
+        options.adaptive_proposal_size,
+        rng
+      );
       sampled_groups = groups;
       std::shuffle(sampled_groups.begin(), sampled_groups.end(), rng);
       sampled_groups.resize(static_cast<std::size_t>(n_to_sample));
@@ -780,7 +1094,9 @@ CoreResult maximize_core(
 
         candidate_labels.clear();
         candidate_counts.clear();
-        for (int idx : eligible) candidate_labels.push_back(result.cvpredbest[static_cast<std::size_t>(idx)]);
+        for (int idx : eligible) {
+          candidate_labels.push_back(proposal_predictions[static_cast<std::size_t>(idx)]);
+        }
         std::sort(candidate_labels.begin(), candidate_labels.end());
         for (std::size_t i = 0; i < candidate_labels.size();) {
           std::size_t j = i + 1;
@@ -793,35 +1109,72 @@ CoreResult maximize_core(
 
         std::discrete_distribution<int> label_dist(candidate_counts.begin(), candidate_counts.end());
         const int replacement = candidate_labels[static_cast<std::size_t>(label_dist(rng))];
-        for (int idx : eligible) cl[static_cast<std::size_t>(idx)] = replacement;
+        apply_group_relabel(cl, eligible, replacement);
       }
     }
 
-    propose_auto_class_coarsening(cl, result.cvpredbest, fixed_flags, options, rng);
+    propose_auto_class_coarsening(cl, proposal_predictions, fixed_flags, options, rng);
+    if (options.many_to_one_absorption) {
+      propose_many_to_one_absorption(cl, proposal_predictions, fixed_flags, rng);
+    }
 
     CVPrediction cv = predictor(cl);
     const double acc = detail::accuracy(cl, cv.predicted);
-    const double score = core_objective_score(cl, acc, options);
+    const double score = core_objective_score(cl, cv.predicted, acc, options);
     result.runtime_seconds += cv.runtime_seconds;
     result.peak_memory_mb = std::max(result.peak_memory_mb, cv.peak_memory_mb);
 
     if (score > result.scorebest) {
-      result.cvpredbest = std::move(cv.predicted);
-      result.clbest = std::move(cl);
-      result.clbest_dirty = std::move(cl_dirty);
+      result.cvpredbest = cv.predicted;
+      result.clbest = cl;
+      result.clbest_dirty = cl_dirty;
       result.accbest = acc;
       result.scorebest = score;
+    }
+
+    if (options.evolutionary_search) {
+      const double cooling = 1.0 - static_cast<double>(cycle + 1) /
+        static_cast<double>(std::max(1, options.cycles));
+      const double temperature = std::max(1.0e-9, 0.10 * std::max(0.0, 1.0 - current_acc) * cooling);
+      bool accept_current = score >= current_score;
+      if (!accept_current && temperature > 1.0e-9) {
+        std::uniform_real_distribution<double> accept_dist(0.0, 1.0);
+        accept_current = accept_dist(rng) < std::exp((score - current_score) / temperature);
+      }
+      if (accept_current) {
+        current_cl = cl;
+        current_cvpred = cv.predicted;
+        current_acc = acc;
+        current_score = score;
+      }
     }
 
     result.vect_acc[static_cast<std::size_t>(cycle)] = result.accbest;
     result.vect_score[static_cast<std::size_t>(cycle)] = result.scorebest;
     result.cycles_completed = cycle + 1;
-    if (acc == 1.0) result.success = true;
+    if (acc == 1.0 && (!options.guarded_diversity || score >= result.scorebest)) result.success = true;
   }
 
   result.runtime_seconds += timer.seconds();
   result.peak_memory_mb = std::max(result.peak_memory_mb, detail::peak_memory_mb());
   return result;
+}
+
+}  // namespace
+
+namespace {
+
+PLSOptions to_plslda_cv_options(const CorePLSLDAOptions& options, Backend backend) {
+  PLSOptions out;
+  out.cv = options.cv;
+  out.max_components = options.max_components;
+  out.fixed_components = options.fixed_components;
+  out.center = options.center;
+  out.scale = options.scale;
+  out.backend = backend;
+  out.gpu_device = options.gpu_device;
+  out.n_threads = options.n_threads;
+  return out;
 }
 
 }  // namespace
@@ -836,8 +1189,9 @@ CoreResult CorePLSLDA_CPU(
   CoreOptions pls_options = options;
   pls_options.classifier = CoreClassifier::PLS_LDA;
   pls_options.pls.backend = Backend::CPU;
+  const PLSOptions cv_options = to_plslda_cv_options(pls_options.pls, Backend::CPU);
   return maximize_core(x, initial_clbest, constrain, fixed, pls_options, [&](const std::vector<int>& labels) {
-    PLSCVResult cv = PLSLDACV_CPU(x, labels, constrain, pls_options.pls);
+    PLSCVResult cv = PLSLDACV_CPU(x, labels, constrain, cv_options);
     return CVPrediction{cv.predicted_labels, cv.runtime_seconds, cv.peak_memory_mb};
   });
 }
@@ -855,7 +1209,40 @@ CoreResult CoreKNN_CPU(
   detail::validate_inputs(x, initial_clbest, constrain);
   const PrecomputedKNN precomputed = precompute_knn_cv_cpu(x, initial_clbest, constrain, knn_options.knn);
   KNNPredictionScratch scratch;
+  initialize_knn_label_map(scratch, initial_clbest);
   return maximize_core(x, initial_clbest, constrain, fixed, knn_options, [&](const std::vector<int>& labels) {
+    return predict_precomputed_knn(precomputed, labels, scratch);
+  });
+}
+
+CoreResult CoreKNNGraph_CPU(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& initial_clbest,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const CoreOptions& options
+) {
+  if (samples < 2) throw std::invalid_argument("CoreKNNGraph requires at least two samples.");
+  if (initial_clbest.size() != static_cast<std::size_t>(samples)) {
+    throw std::invalid_argument("initial labels size must match NeighborGraph samples.");
+  }
+  if (!constrain.empty() && constrain.size() != initial_clbest.size()) {
+    throw std::invalid_argument("constrain size must be zero or match NeighborGraph samples.");
+  }
+  if (!fixed.empty() && fixed.size() != initial_clbest.size()) {
+    throw std::invalid_argument("fixed size must be zero or match NeighborGraph samples.");
+  }
+
+  CoreOptions knn_options = options;
+  knn_options.classifier = CoreClassifier::KNN;
+  knn_options.knn.backend = Backend::CPU;
+  const PrecomputedKNN precomputed = precompute_knn_cv_graph(graph, samples, initial_clbest, constrain, knn_options.knn);
+  KNNPredictionScratch scratch;
+  initialize_knn_label_map(scratch, initial_clbest);
+  std::vector<float> dummy(static_cast<std::size_t>(samples), 0.0f);
+  MatrixView dummy_view{dummy.data(), static_cast<std::size_t>(samples), static_cast<std::size_t>(1)};
+  return maximize_core(dummy_view, initial_clbest, constrain, fixed, knn_options, [&](const std::vector<int>& labels) {
     return predict_precomputed_knn(precomputed, labels, scratch);
   });
 }
@@ -871,8 +1258,9 @@ CoreResult CorePLSLDA_CUDA(
   CoreOptions pls_options = options;
   pls_options.classifier = CoreClassifier::PLS_LDA;
   pls_options.pls.backend = Backend::CUDA;
+  const PLSOptions cv_options = to_plslda_cv_options(pls_options.pls, Backend::CUDA);
   return maximize_core(x, initial_clbest, constrain, fixed, pls_options, [&](const std::vector<int>& labels) {
-    PLSCVResult cv = PLSLDACV_CUDA(x, labels, constrain, pls_options.pls);
+    PLSCVResult cv = PLSLDACV_CUDA(x, labels, constrain, cv_options);
     return CVPrediction{cv.predicted_labels, cv.runtime_seconds, cv.peak_memory_mb};
   });
 #else
@@ -899,6 +1287,7 @@ CoreResult CoreKNN_CUDA(
   detail::validate_inputs(x, initial_clbest, constrain);
   const PrecomputedKNN precomputed = precompute_knn_cv_cuda(x, initial_clbest, constrain, knn_options.knn);
   KNNPredictionScratch scratch;
+  initialize_knn_label_map(scratch, initial_clbest);
   return maximize_core(x, initial_clbest, constrain, fixed, knn_options, [&](const std::vector<int>& labels) {
     return predict_precomputed_knn(precomputed, labels, scratch);
   });

@@ -1,0 +1,217 @@
+# kodama-r
+
+Thin R wrapper for the standalone `kodama-cpp` C++/CUDA library.
+
+`kodama-r` does not reimplement the KODAMA mathematics in R. It converts R
+matrices and vectors to the C++ ABI, calls the compiled `kodama-cpp` library,
+and returns R-friendly lists, matrices, and S3 objects. The numerical kernels
+remain in `kodama-cpp`, so the same core can be reused by R and Python wrappers.
+
+## What Is Linked
+
+At install time the package compiles only the small Rcpp bridge in `src/`.
+The bridge links against a previously built `libkodama_cpp` library:
+
+```text
+R session -> kodamaR R functions -> Rcpp bridge -> libkodama_cpp -> FAISS/CUDA runtime
+```
+
+The wrapper exports:
+
+- `KNNCV()` and `PLSLDACV()` for cross-validated classifier kernels.
+- `CoreKNN()` and `CorePLSLDA()` for label-optimization kernels.
+- `KODAMA.matrix()` for complete KODAMA matrix construction.
+- `KODAMA.visualization()` for UMAP/openTSNE embeddings from KODAMA graphs.
+- `KODAMA.graph()`, `KODAMA.makeSNNGraph()`, `makeSNNGraph()`, and
+  `KODAMA.clustering()` for graph construction and Louvain/Leiden/random-walk
+  clustering.
+
+## Prerequisites
+
+Install the C++ dependencies required by `kodama-cpp` before installing the R
+wrapper:
+
+- CMake and a C++17 compiler.
+- R, `Rcpp`, and `testthat`.
+- FAISS for CPU nearest-neighbor search.
+- Optional CUDA/cuVS/cuGraph runtime when installing a CUDA-enabled
+  `kodama-cpp` build.
+
+On macOS with Homebrew, the CPU development environment is typically:
+
+```sh
+brew install cmake faiss libomp
+Rscript -e 'install.packages(c("Rcpp", "testthat"), repos = "https://cloud.r-project.org")'
+```
+
+On Linux/CUDA machines, use the same conda or micromamba environment used to
+build and run FAISS/CUDA. The important rule is that `R CMD INSTALL` and later
+R sessions must see the same shared libraries used by `kodama-cpp`.
+
+## Build `kodama-cpp`
+
+From a checkout where `kodama-cpp` and `kodama-r` are siblings:
+
+```sh
+cmake -S ../kodama-cpp -B ../kodama-cpp/build -DKODAMA_ENABLE_CUDA=OFF
+cmake --build ../kodama-cpp/build -j
+```
+
+From this monorepo-style development checkout:
+
+```sh
+cmake -S ../.. -B ../../build -DKODAMA_ENABLE_CUDA=OFF
+cmake --build ../../build -j
+```
+
+For a CUDA build, use a separate build directory:
+
+```sh
+cmake -S ../kodama-cpp -B ../kodama-cpp/build-cuda -DKODAMA_ENABLE_CUDA=ON
+cmake --build ../kodama-cpp/build-cuda -j
+```
+
+## Install The R Wrapper
+
+The wrapper needs two paths:
+
+- `KODAMA_CPP_ROOT`: directory containing `include/kodama/kodama.hpp`.
+- `KODAMA_CPP_BUILD_DIR`: directory containing `libkodama_cpp.a`,
+  `libkodama_cpp.so`, or `libkodama_cpp.dylib`.
+
+CPU install from a sibling checkout:
+
+```sh
+cd kodama-r
+KODAMA_CPP_ROOT="$(cd ../kodama-cpp && pwd)" \
+KODAMA_CPP_BUILD_DIR="$(cd ../kodama-cpp/build && pwd)" \
+R CMD INSTALL .
+```
+
+CPU install from this development checkout:
+
+```sh
+cd split-repos/kodama-r
+KODAMA_CPP_ROOT="$(cd ../.. && pwd)" \
+KODAMA_CPP_BUILD_DIR="$(cd ../../build && pwd)" \
+R CMD INSTALL .
+```
+
+CUDA install uses the CUDA-enabled build directory and the runtime library
+environment. On a Linux machine with a conda/micromamba FAISS/CUDA environment:
+
+```sh
+export ENV_DIR=/path/to/faiss-cuda-env
+export CONDA_PREFIX="$ENV_DIR"
+export LD_LIBRARY_PATH="$ENV_DIR/lib:$ENV_DIR/targets/x86_64-linux/lib:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+
+cd kodama-r
+KODAMA_CPP_ROOT="$(cd ../kodama-cpp && pwd)" \
+KODAMA_CPP_BUILD_DIR="$(cd ../kodama-cpp/build-cuda && pwd)" \
+R CMD INSTALL .
+```
+
+If extra CUDA libraries are needed by your local static link, provide them
+through `KODAMA_R_CUDA_LIBS`:
+
+```sh
+export KODAMA_R_CUDA_LIBS="-lcudart -lcublas -lcusolver -lcusparse"
+```
+
+The package `configure` script writes `src/Makevars` during installation. It
+uses only library directories that exist on the current machine, which keeps
+local checks quiet while still allowing CUDA/conda paths on GPU hosts.
+
+## Verify The Installation
+
+Start R and check the linked runtime:
+
+```r
+library(kodamaR)
+KODAMA.diagnostics()
+```
+
+Run a small CPU smoke test:
+
+```r
+set.seed(1)
+x <- matrix(rnorm(120 * 8), 120, 8)
+lab <- rep(1:3, length.out = nrow(x))
+
+cv <- KNNCV(x, lab, folds = 3, k = 5, backend = "cpu")
+cv$accuracy
+
+kk <- KODAMA.matrix(
+  x,
+  classifier = "knn",
+  backend = "cpu",
+  M = 2,
+  Tcycle = 2,
+  landmarks = 80,
+  progress = FALSE
+)
+
+KODAMA.timing(kk)
+head(kk$best_labels)
+```
+
+For CUDA verification, switch `backend = "cuda"` after confirming that the R
+session can load the same CUDA/FAISS libraries used by the C++ build.
+
+## Run `R CMD Check`
+
+Build a source tarball first, then check the tarball. This matches CRAN-style
+source-package validation more closely than checking the raw source directory:
+
+```sh
+cd split-repos
+KODAMA_CPP_ROOT="$(cd .. && pwd)" \
+KODAMA_CPP_BUILD_DIR="$(cd ../build && pwd)" \
+R CMD build kodama-r
+
+KODAMA_CPP_ROOT="$(cd .. && pwd)" \
+KODAMA_CPP_BUILD_DIR="$(cd ../build && pwd)" \
+R CMD check --as-cran kodamaR_0.1.0.tar.gz
+```
+
+The check compiles the Rcpp bridge, links to `libkodama_cpp`, loads the package,
+runs the testthat suite, and builds the manual.
+
+## Recommended Workflow
+
+```r
+library(kodamaR)
+
+kk <- KODAMA.matrix(
+  x,
+  classifier = "knn",
+  backend = "cuda",
+  M = 100,
+  Tcycle = 20,
+  knn.k = 30
+)
+
+KODAMA.timing(kk)
+labels <- kk$best_labels
+um <- KODAMA.visualization(kk, "UMAP", k = 30, backend = "cuda")
+clu <- KODAMA.clustering(um, method = "leiden", n.clusters = length(unique(truth)))
+```
+
+`KODAMA.matrix()` returns a `kodama_matrix` object. The raw C++ fields are still
+available (`res`, `acc`, `knn`, `timing`), and convenience fields include
+`best_labels`, `best_run`, `class_counts`, and `parameters`.
+
+## Troubleshooting
+
+If installation cannot find the C++ headers, set `KODAMA_CPP_ROOT` explicitly.
+
+If installation cannot find `libkodama_cpp`, build `kodama-cpp` first and set
+`KODAMA_CPP_BUILD_DIR` to the CMake build directory.
+
+If loading fails with missing FAISS, OpenMP, BLAS, or CUDA symbols, start R from
+the same shell where `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `CONDA_PREFIX`, and
+related runtime variables are set.
+
+If the CUDA backend is unavailable, confirm that `kodama-cpp` was configured
+with `-DKODAMA_ENABLE_CUDA=ON` and that the R wrapper was installed against that
+CUDA build directory.

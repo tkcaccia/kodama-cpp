@@ -80,6 +80,13 @@ const char* to_string(GraphClusterMethod method) {
   return "unknown";
 }
 
+const char* to_string(GraphFeatureMode mode) {
+  switch (mode) {
+    case GraphFeatureMode::LaplacianSelfTuning: return "laplacian_self_tuning";
+  }
+  return "unknown";
+}
+
 }  // namespace kodama
 
 namespace kodama::detail {

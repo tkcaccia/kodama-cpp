@@ -133,13 +133,13 @@ std::vector<float> make_faiss_matrix(
     long double ss = 0.0;
     const int row = rows[r];
     for (std::size_t j = 0; j < x.cols; ++j) {
-      const double v = x(static_cast<std::size_t>(row), j);
+      const float v = x.value_float(static_cast<std::size_t>(row), j);
       ss += static_cast<long double>(v) * static_cast<long double>(v);
     }
     const double n = std::sqrt(static_cast<double>(ss));
     const double scale = metric == DistanceMetric::Cosine && n > 0.0 && std::isfinite(n) ? 1.0 / n : 1.0;
     for (std::size_t j = 0; j < x.cols; ++j) {
-      out[r * x.cols + j] = static_cast<float>(x(static_cast<std::size_t>(row), j) * scale);
+      out[r * x.cols + j] = static_cast<float>(static_cast<double>(x.value_float(static_cast<std::size_t>(row), j)) * scale);
     }
   }
   return out;
