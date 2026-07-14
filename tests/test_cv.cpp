@@ -197,6 +197,10 @@ int main() {
   cuda_knn.ivf_nprobe = 4;
   kodama::KNNCVResult cuda_kres = kodama::KNNCV_CUDA(view, d.y, d.constrain, cuda_knn);
   require(cuda_kres.parameters.backend == kodama::Backend::CUDA, "CUDA KNNCV did not report CUDA backend.");
+  require(cuda_kres.parameters.index_type == kodama::KNNIndexType::CudaIVFFlat, "CUDA KNNCV did not report native IVF-Flat search.");
+  require(cuda_kres.parameters.ivf_nlist == 8, "CUDA KNNCV did not report the requested IVF list count.");
+  require(cuda_kres.parameters.ivf_nprobe == 4, "CUDA KNNCV did not report the requested IVF probe count.");
+  require(cuda_kres.parameters.ivf_pilot_recall > 0.0, "CUDA KNNCV did not report pilot recall.");
   require(cuda_kres.predicted_labels.size() == d.y.size(), "CUDA KNNCV prediction size mismatch.");
   require(cuda_kres.fold_assignments.size() == d.y.size(), "CUDA KNNCV fold size mismatch.");
   check_constrained_folds(d.constrain, cuda_kres.fold_assignments);
@@ -207,6 +211,12 @@ int main() {
   require(float_cuda_kres.fold_assignments.size() == d.y.size(), "Float32 CUDA KNNCV fold size mismatch.");
   check_constrained_folds(d.constrain, float_cuda_kres.fold_assignments);
   require(float_cuda_kres.global_accuracy > 0.95, "Float32 CUDA KNNCV accuracy unexpectedly low.");
+
+  kodama::KNNOptions exact_cuda_knn = cuda_knn;
+  exact_cuda_knn.index_type = kodama::KNNIndexType::CudaExact;
+  kodama::KNNCVResult exact_cuda_kres = kodama::KNNCV_CUDA(fview, d.y, d.constrain, exact_cuda_knn);
+  require(exact_cuda_kres.parameters.index_type == kodama::KNNIndexType::CudaExact, "CUDA KNNCV did not report native exact search.");
+  require(exact_cuda_kres.global_accuracy > 0.95, "Exact CUDA KNNCV accuracy unexpectedly low.");
 #endif
 
   kodama::PLSOptions pls;
@@ -480,6 +490,25 @@ int main() {
   require(cuda_core_kres.clbest.size() == noisy.size(), "Float32 CUDA Core KNN clbest size mismatch.");
   require(cuda_core_kres.cycles_completed >= 1, "Float32 CUDA Core KNN did not run any cycles.");
   require(cuda_core_kres.accbest >= initial_knn_acc, "Float32 CUDA Core KNN decreased best CV accuracy.");
+
+  kodama::KODAMAMatrixOptions cuda_km_options = km_options;
+  cuda_km_options.backend = kodama::Backend::CUDA;
+  cuda_km_options.runs = 1;
+  cuda_km_options.cycles = 1;
+  cuda_km_options.n_threads = 1;
+  cuda_km_options.knn.backend = kodama::Backend::CUDA;
+  cuda_km_options.knn.index_type = kodama::KNNIndexType::CudaExact;
+  kodama::KODAMAMatrixResult cuda_km_res = kodama::KODAMAMatrix_CUDA(
+    fview,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    cuda_km_options
+  );
+  require(cuda_km_res.backend == kodama::Backend::CUDA, "CUDA KODAMAMatrix did not report CUDA backend.");
+  require(cuda_km_res.samples == d.n, "CUDA KODAMAMatrix sample count mismatch.");
+  require(cuda_km_res.res.size() == static_cast<std::size_t>(d.n), "CUDA KODAMAMatrix result size mismatch.");
+  require(cuda_km_res.knn.indices.size() == static_cast<std::size_t>(d.n * cuda_km_res.knn.neighbors), "CUDA KODAMAMatrix graph size mismatch.");
 #endif
 
 #if defined(KODAMA_ENABLE_METAL)

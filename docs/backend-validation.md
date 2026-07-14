@@ -33,6 +33,33 @@ created once. Each SIMPLS component encodes `Xw` and `X'Xw` into one command
 buffer. This removes one synchronization per component without changing the
 SIMPLS equations; parity tests remained unchanged.
 
+### Package-owned CUDA exact/IVF KNN and k-means
+
+The CUDA path now builds from `src/native_cuda_backend.cu` using only CUDA
+Toolkit libraries. It contains float32 exact KNN, signed-hash IVF-Flat,
+GPU k-means, inverted-list construction, and deterministic exact-pilot recall
+tuning. FAISS, cuVS, RAFT, and RMM headers and runtime libraries are absent.
+
+A clean CUDA 13.2 build on an NVIDIA GeForce RTX 5060 Ti passed both CTest
+suites. `ldd` inspection of the test executable found no FAISS, cuVS, RAFT,
+RMM, or cuGraph soname. The fresh CMake cache contained no package option,
+target, header, or library entry for those dependencies; the CUDA Toolkit was
+located inside an environment whose directory name retains a legacy
+`faissgpu-cuvs` label.
+
+Spot checks using five-fold cosine KNNCV with `k=10` were:
+
+| Dataset | CUDA path | Accuracy | Seconds | nlist | maximum nprobe |
+| --- | --- | ---: | ---: | ---: | ---: |
+| MNIST70k | package-owned IVF-Flat | 0.973857 | 4.233 | 237 | 32 |
+| MetRef | package-owned IVF-Flat | 0.816724 | 0.195 | 27 | 20 |
+
+The recorded former FAISS/cuVS rows were 0.973029 in 4.753 s on MNIST70k and
+0.814433 in 0.297 s on MetRef. These are single-run implementation checks,
+not a replacement for the repeated benchmark protocol used by the manuscript.
+The accepted automatic rule begins at `2 * ceil(sqrt(nlist))` probes and then
+increases the budget if the exact pilot does not meet its recall target.
+
 ### Portable installed target
 
 The installed static Metal target exports framework names rather than local
@@ -78,7 +105,7 @@ by this implementation.
 
 ## Regression Suites
 
-- macOS CPU without FAISS/Metal/OpenMP: all tests passed.
-- macOS Metal without FAISS/OpenMP: Metal, C++, and float32 smoke suites passed.
-- Linux CUDA 13 on chiamaka: C++ and float32 binary smoke suites passed after
-  the CPU/Metal dependency changes.
+- macOS CPU without Metal/OpenMP: both C++ and float32 smoke suites passed.
+- macOS Metal without OpenMP: Metal, C++, and float32 smoke suites passed.
+- Linux CUDA 13 on chiamaka, without FAISS/cuVS/RAFT/RMM: both C++ and float32
+  binary smoke suites passed in a fresh build.

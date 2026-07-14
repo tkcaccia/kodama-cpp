@@ -1,5 +1,6 @@
 #include "common.hpp"
 #include "metal_backend.hpp"
+#include "native_cuda_backend.hpp"
 #include "native_knn.hpp"
 #include "spatial_grid_knn.hpp"
 
@@ -10,7 +11,6 @@
 #include <iostream>
 #include <limits>
 #include <map>
-#include <memory>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -22,11 +22,6 @@
 #include "kodama_matrix_cuda.hpp"
 
 #include <cuda_runtime.h>
-#include <faiss/Clustering.h>
-#include <faiss/IndexFlat.h>
-#include <faiss/MetricType.h>
-#include <faiss/gpu/GpuIndexFlat.h>
-#include <faiss/gpu/StandardGpuResources.h>
 #endif
 
 #ifdef _OPENMP
@@ -207,7 +202,7 @@ NeighborGraph hnsw_graph(
 }
 
 #ifdef KODAMA_ENABLE_CUDA
-NeighborGraph faiss_gpu_flat_graph(
+NeighborGraph native_cuda_flat_graph(
   const std::vector<float>& base,
   const std::vector<float>& query,
   int n_base,
@@ -215,35 +210,40 @@ NeighborGraph faiss_gpu_flat_graph(
   int dim,
   int neighbors,
   DistanceMetric metric,
-  int gpu_device
+  int gpu_device,
+  bool exclude_self
 ) {
   if (n_base < 1 || n_query < 1 || dim < 1) throw std::invalid_argument("CUDA graph input is empty.");
   neighbors = std::max(1, std::min(neighbors, n_base));
   std::vector<float> xb = base;
   std::vector<float> xq = query;
-  const faiss::MetricType faiss_metric = metric == DistanceMetric::Euclidean ? faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
   if (metric == DistanceMetric::Cosine) {
     normalize_rows_for_cosine(xb, static_cast<std::size_t>(n_base), static_cast<std::size_t>(dim));
     normalize_rows_for_cosine(xq, static_cast<std::size_t>(n_query), static_cast<std::size_t>(dim));
   }
 
-  faiss::gpu::StandardGpuResources resources;
-  faiss::gpu::GpuIndexFlatConfig config;
-  config.device = gpu_device;
-  faiss::gpu::GpuIndexFlat index(&resources, dim, faiss_metric, config);
-  index.add(n_base, xb.data());
-
+  std::vector<int> exclusions;
+  if (exclude_self) {
+    exclusions.resize(static_cast<std::size_t>(n_query));
+    std::iota(exclusions.begin(), exclusions.end(), 0);
+  }
+  const detail::NativeKNNResult search = detail::native_cuda_exact_knn_search(
+    xb,
+    n_base,
+    xq,
+    n_query,
+    dim,
+    neighbors,
+    metric,
+    gpu_device,
+    exclusions
+  );
   NeighborGraph graph;
-  graph.neighbors = neighbors;
-  graph.indices.assign(static_cast<std::size_t>(n_query) * neighbors, -1);
-  graph.distances.assign(static_cast<std::size_t>(n_query) * neighbors, std::numeric_limits<float>::infinity());
-  std::vector<faiss::idx_t> idx(static_cast<std::size_t>(n_query) * neighbors, -1);
-  index.search(n_query, xq.data(), neighbors, graph.distances.data(), idx.data());
-  for (std::size_t i = 0; i < idx.size(); ++i) graph.indices[i] = static_cast<int>(idx[i]);
-  if (metric == DistanceMetric::Cosine || metric == DistanceMetric::InnerProduct) {
-    for (float& d : graph.distances) d = 1.0f - d;
-  } else {
-    for (float& d : graph.distances) d = d > 0.0f ? std::sqrt(d) : 0.0f;
+  graph.neighbors = search.neighbors;
+  graph.indices = search.indices;
+  graph.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
+  for (std::size_t i = 0; i < search.distances.size(); ++i) {
+    graph.distances[i] = detail::native_knn_output_distance(search.distances[i], metric);
   }
   return graph;
 }
@@ -274,7 +274,9 @@ NeighborGraph self_knn_graph(
     return detail::spatial_grid_self_knn(data.data(), n, dim, neighbors, n_threads, false, include_self);
   }
 #if defined(KODAMA_ENABLE_CUDA)
-  if (backend == Backend::CUDA) return faiss_gpu_flat_graph(data, data, n, n, dim, neighbors, metric, gpu_device);
+  if (backend == Backend::CUDA) {
+    return native_cuda_flat_graph(data, data, n, n, dim, neighbors, metric, gpu_device, !include_self);
+  }
 #else
   (void)gpu_device;
 #endif
@@ -340,40 +342,15 @@ std::vector<int> kmeans_labels(
 
 #ifdef KODAMA_ENABLE_CUDA
   if (backend == Backend::CUDA) {
-    faiss::ClusteringParameters cp;
-    cp.niter = std::max(1, max_iter);
-    cp.nredo = 1;
-    cp.verbose = false;
-    cp.spherical = false;
-    cp.seed = static_cast<int>(rng() & 0x7fffffffULL);
-    cp.min_points_per_centroid = 1;
-    cp.max_points_per_centroid = std::max(
-      256,
-      static_cast<int>((static_cast<long long>(n) + k - 1) / k)
+    return detail::native_cuda_kmeans_labels(
+      x,
+      n,
+      p,
+      k,
+      std::max(1, max_iter),
+      rng(),
+      gpu_device
     );
-    thread_local std::unique_ptr<faiss::gpu::StandardGpuResources> resources;
-    thread_local int resources_device = -1;
-    if (!resources || resources_device != gpu_device) {
-      resources = std::make_unique<faiss::gpu::StandardGpuResources>();
-      resources_device = gpu_device;
-    }
-    faiss::gpu::GpuIndexFlatConfig config;
-    config.device = gpu_device;
-    faiss::gpu::GpuIndexFlatL2 train_index(resources.get(), p, config);
-    faiss::gpu::GpuIndexFlatL2 assign_index(resources.get(), p, config);
-    faiss::Clustering clustering(p, k, cp);
-    clustering.train(n, x.data(), train_index);
-    assign_index.add(k, clustering.centroids.data());
-    std::vector<float> distances(static_cast<std::size_t>(n), 0.0f);
-    std::vector<faiss::idx_t> idx(static_cast<std::size_t>(n), -1);
-    assign_index.search(n, x.data(), 1, distances.data(), idx.data());
-    std::vector<int> labels(static_cast<std::size_t>(n), 1);
-    for (int i = 0; i < n; ++i) {
-      const faiss::idx_t label = idx[static_cast<std::size_t>(i)];
-      if (label < 0 || label >= k) throw std::runtime_error("FAISS k-means returned an invalid cluster label.");
-      labels[static_cast<std::size_t>(i)] = static_cast<int>(label) + 1;
-    }
-    return labels;
   }
 #else
   (void)gpu_device;

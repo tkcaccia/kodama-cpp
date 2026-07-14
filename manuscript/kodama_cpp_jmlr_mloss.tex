@@ -16,7 +16,7 @@
 \editor{To be assigned}
 \maketitle
 \begin{abstract}
-KODAMA searches for latent structure by maximizing the cross-validated predictability of an evolving label vector. We present kodama-cpp, a standalone C++17 library with CPU, CUDA, and Apple Metal backends that moves this accuracy-maximization core out of the R package layer while preserving the methodological contract established by the original KODAMA literature. The library exposes typed KNN and PLS-LDA optimization paths, KNN and PLS-LDA cross-validation kernels, KODAMA matrix construction from either data matrices or supplied KNN graphs, graph construction, embedding helpers, and clustering utilities. Its implementation uses float32 numerical matrices and workspaces, a package-owned CPU HNSW search, optional FAISS/cuVS CUDA search, native Metal exact and IVF search, label-aware SIMPLS PLS-LDA, reusable fold buffers, and independent M-cycle execution. The result is a wrapper-independent numerical backend intended to support reproducible R and Python interfaces, with validation reported separately for the internal cross-validation objective, external label agreement, runtime, and visualization quality. We also document the current validation boundary: the graph-input interface is release-validated as an optional entry point, while performance and quality claims are restricted to measurements reported explicitly in the benchmark tables.
+KODAMA searches for latent structure by maximizing the cross-validated predictability of an evolving label vector. We present kodama-cpp, a standalone C++17 library with CPU, CUDA, and Apple Metal backends that moves this accuracy-maximization core out of the R package layer while preserving the methodological contract established by the original KODAMA literature. The library exposes typed KNN and PLS-LDA optimization paths, KNN and PLS-LDA cross-validation kernels, KODAMA matrix construction from either data matrices or supplied KNN graphs, graph construction, embedding helpers, and clustering utilities. Its implementation uses float32 numerical matrices and workspaces, a package-owned CPU HNSW search, package-owned CUDA exact/IVF search and k-means, native Metal exact and IVF search, label-aware SIMPLS PLS-LDA, reusable fold buffers, and independent M-cycle execution. The result is a wrapper-independent numerical backend intended to support reproducible R and Python interfaces, with validation reported separately for the internal cross-validation objective, external label agreement, runtime, and visualization quality. We also document the current validation boundary: the graph-input interface is release-validated as an optional entry point, while performance and quality claims are restricted to measurements reported explicitly in the benchmark tables.
 \end{abstract}
 \begin{keywords}
 KODAMA, unsupervised learning, cross-validation, CUDA, Metal, C++ library, nearest neighbors, PLS-LDA
@@ -128,7 +128,7 @@ A dense dissimilarity can be derived from the same agreement statistic by evalua
 \section{Implementation architecture}
 The core library exposes C++ functions rather than wrapper-specific entry points. A MatrixView accepts double or float inputs; internally, the analysis matrix is stored in float32 buffers to match GPU kernels and reduce memory traffic. The public API is grouped into cross-validation kernels, core label optimization, KODAMA matrix construction, graph/embedding utilities, and clustering routines.
 
-KNN kernels have strict backend-specific implementations. The dependency-free CPU path uses a package-owned float32 HNSW implementation adapted from the MIT-licensed FAISS organization. CUDA remains opt-in and links installed FAISS GPU and RAPIDS cuVS libraries; its label-aware SIMPLS adapter is native float32 code and does not depend on Armadillo. Apple Metal uses only system frameworks and provides exact and recall-tuned IVF-Flat search. All paths implement the same voting objective. In the KODAMA optimizer, neighbor work is organized so the search structure can be reused where the mathematics permits. This is the main difference from repeatedly launching wrapper-level nearest-neighbor searches.
+KNN kernels have strict backend-specific implementations. The dependency-free CPU path uses a package-owned float32 HNSW implementation adapted from the MIT-licensed FAISS organization. CUDA remains opt-in, but its exact search, recall-tuned IVF-Flat search, k-means, and label-aware SIMPLS/LDA are package-owned float32 code requiring only CUDA Toolkit libraries. Apple Metal uses only system frameworks and provides exact and recall-tuned IVF-Flat search. All paths implement the same voting objective. In the KODAMA optimizer, neighbor work is organized so the search structure can be reused where the mathematics permits. This is the main difference from repeatedly launching wrapper-level nearest-neighbor searches.
 
 PLS-LDA uses a SIMPLS strategy following the fastPLS implementation rather than a simplified SVD approximation. CPU, CUDA, and Metal paths operate on float32 matrices and compute class-label cross-products directly instead of constructing dense one-hot response matrices where possible. The requested component count is treated as the evaluated component count whenever mathematically feasible, rather than being replaced by an internal model-selection shortcut. The library exposes no PLS-cKNN classifier; KODAMA optimization is limited to KNN and PLS-LDA.
 
@@ -197,7 +197,7 @@ Validation boundary & Wrapper tests exercise both KNN and PLS-LDA graph-input ca
 \section{Relationship to public KODAMA literature}
 The contribution of kodama-cpp is not a new definition of KODAMA. It is a reorganization of the published method into a reusable numerical system. The 2014 PNAS paper is the methodological reference for accuracy maximization. The 2017 Bioinformatics paper is the software reference for the R package, including KNN and PLS-DA classifiers, repeated suboptimal runs, and construction of a dissimilarity matrix from the optimized label vectors. The R documentation is the public reference for defaults such as M = 100, Tcycle = 20, 75\% sample selection, and the output fields dissimilarity, accuracy, proximity, classification vectors, scores, entropy, and landmarks.
 
-The main differences are architectural and computational. The R package owns a complete R workflow and uses R-package dependencies for data handling, nearest neighbors, and visualization. kodama-cpp owns the numerical kernels and exposes them through C++ types so that R and Python wrappers can share one backend. This makes the comparison with the previous version a compatibility question: the objective and output contract should match, while implementation details such as float32 storage, FAISS/cuVS search, CUDA kernels, and wrapper-independent graph objects are new.
+The main differences are architectural and computational. The R package owns a complete R workflow and uses R-package dependencies for data handling, nearest neighbors, and visualization. kodama-cpp owns the numerical kernels and exposes them through C++ types so that R and Python wrappers can share one backend. This makes the comparison with the previous version a compatibility question: the objective and output contract should match, while implementation details such as float32 storage, package-owned CPU/CUDA/Metal search, CUDA kernels, and wrapper-independent graph objects are new.
 
 \begin{table}[h]
 \caption{Compatibility with the public KODAMA R interface and literature.}
@@ -246,7 +246,7 @@ The evaluation is intentionally separated into these layers because KODAMA has s
 
 The evaluation also separates optimization from validation. The label vector is chosen by internal cross-validation accuracy, but this score is not interpreted as external biological, chemical, or semantic truth. When reference labels are available, they are held outside the optimizer and reported after the fact. This distinction follows the broader cautionary literature on model selection, feature selection bias, and circular analysis.
 
-All timings in this section are wall-clock seconds from the benchmark drivers, and all accuracy values are computed on held-out cross-validation folds. CPU kernel measurements use the configured single-thread CPU path unless explicitly labeled otherwise; CUDA measurements use the same CUDA/FAISS runtime used by the test suite. Tables are intentionally separated by scope: kernel-level rows do not claim end-to-end speedups, and graph-input rows are treated as API validation unless paired with data-input KODAMA results under the same M, Tcycle, seed, and graph settings.
+All timings in this section are wall-clock seconds from the benchmark drivers, and all accuracy values are computed on held-out cross-validation folds. CPU kernel measurements use the configured single-thread CPU path unless explicitly labeled otherwise; CUDA measurements use the same CUDA Toolkit runtime used by the test suite. Tables are intentionally separated by scope: kernel-level rows do not claim end-to-end speedups, and graph-input rows are treated as API validation unless paired with data-input KODAMA results under the same M, Tcycle, seed, and graph settings.
 
 \subsection{Benchmark protocol and data coverage}
 \begin{table}[h]
@@ -255,10 +255,10 @@ All timings in this section are wall-clock seconds from the benchmark drivers, a
 \toprule
 Item & Value \\
 \midrule
-Date & 2026-07-06 UTC \\
+Date & 2026-07-14 UTC for native-CUDA validation; earlier broad benchmark snapshot dated 2026-07-06 UTC \\
 GPU & NVIDIA GeForce RTX 5060 Ti, 16 GB device memory, driver 595.71.05 \\
-Build validation & CUDA build succeeded; CTest passed 2/2 configured tests in 1.95 s \\
-Runtime & CUDA/FAISS/cuVS conda environment used by the benchmark and test suite; Armadillo is not required \\
+Build validation & Fresh CUDA 13.2 build succeeded; CTest passed 2/2 configured tests in 1.77 s \\
+Runtime & CUDA Toolkit only for native search/PLS paths; no FAISS, cuVS, RAFT, RMM, or Armadillo link \\
 Data format & RData lists exported to contiguous float32 row-major matrices \\
 CPU setting & Single-thread CPU kernels unless otherwise stated \\
 CV kernels & KNNCV and PLSLDACV measured independently from the full matrix pipeline \\
@@ -326,7 +326,7 @@ Wrapper parity & C++ core, R wrapper, Python wrapper & Ensures language bindings
 \end{table}
 
 \subsection{Dependency-free CPU and Apple Metal validation}
-The dependency-light backend experiment was run on macOS with FAISS, CUDA, and OpenMP disabled. The CPU build therefore measures the package-owned HNSW and float32 SIMPLS/LDA implementations, while the Metal build links only Apple system frameworks. Exact CPU/Metal equality of the reported classification metrics is the primary acceptance criterion; timings are secondary evidence.
+The dependency-light backend experiment was run on macOS with CUDA and OpenMP disabled. The CPU build therefore measures the package-owned HNSW and float32 SIMPLS/LDA implementations, while the Metal build links only Apple system frameworks. Exact CPU/Metal equality of the reported classification metrics is the primary acceptance criterion; timings are secondary evidence.
 
 Metal IVF-Flat remains an explicit option rather than an automatic replacement for exact search. On MNIST10k, exact and recall-tuned IVF KNNCV both produced accuracy 0.9490, while elapsed time changed from 2.054 to 1.662 s. A 0.99 pilot-recall target was rejected because accuracy decreased to 0.9482; the accepted automatic pilot target is 0.999. End-to-end KODAMA can still favor exact search when repeated IVF training costs more than the saved query time.
 
@@ -347,16 +347,30 @@ MetRef & KODAMA PLS-LDA, M=10 T=20 & 178.403 & 78.746 & 2.27x & CV 0.983206; ARI
 \end{table}
 
 \subsection{CUDA workstation validation}
-The benchmark run used copied float32 RData datasets spanning n = 873 to 5,220,347 samples and p = 11 to 16,384 variables. The CUDA machine first rebuilt the project and reran the CTest suite; both configured tests passed. The current table is deliberately kernel-focused: it validates implementation claims and identifies scaling regimes without conflating isolated kernel speed with full KODAMA.matrix runtime.
+The benchmark run used copied float32 RData datasets spanning n = 873 to 5,220,347 samples and p = 11 to 16,384 variables. The CUDA machine first rebuilt the project and reran the CTest suite; both configured tests passed. The broad kernel and core tables retain the earlier release-validation snapshot for continuity, whereas the native-CUDA table reports the dependency-distilled search implementation introduced afterward.
 
-The kernel-level experiment isolates KNNCV and PLSLDACV from the full KODAMA matrix pipeline. CUDA KNN matched CPU accuracy within about 0.001 on COIL20, MNIST, USPS, and mass41 while giving 3.8x to 99.4x speedups once the dataset was large enough to amortize GPU overhead. On the small MetRef KNN task, CPU remained faster because setup overhead dominated. CUDA PLSLDACV matched CPU exactly on MetRef and was 27.2x faster; on USPS it was 23.8x faster with a small positive accuracy difference.
+The current package-owned CUDA IVF-Flat path was checked on MNIST70k and MetRef with five-fold cosine KNNCV and k = 10. On MNIST70k it produced accuracy 0.973857 in 4.233 s with nlist = 237 and maximum nprobe = 32, compared with 0.973029 in 4.753 s for the recorded former FAISS/cuVS row. On MetRef it produced 0.816724 in 0.195 s, compared with 0.814433 in 0.297 s. These are implementation spot checks rather than repeated-run performance estimates.
 
 The KODAMA.matrix MetRef validation shows why cross-validated accuracy is reported together with label-quality diagnostics. The KNN optimizer reached very high CV accuracy, but the best label vectors collapsed to few classes and had low ARI. The PLS-LDA optimizer had lower CV accuracy but much stronger external-label agreement. We therefore report CV accuracy, number of active classes, ARI or another label-agreement statistic when available, and the downstream embedding compactness as complementary diagnostics.
 
-The wrapper validation also identified a packaging requirement: the conda libstdc++ runtime used by the CUDA/FAISS environment must be visible before R starts. The R wrapper installation notes describe the required environment variables, and the configure script links the conda libstdc++ runtime when CONDA\_PREFIX is set.
+The dependency-distilled CUDA build links CUDA Toolkit libraries but no FAISS, cuVS, RAFT, or RMM soname. Binary wrappers therefore need to locate the CUDA runtime selected at build time, but do not need to provision the removed search libraries.
 
 \begin{table}[h]
-\caption{CPU/CUDA cross-validation kernel measurements. Accuracy is reported as CPU/CUDA.}
+\caption{Dependency-distilled native CUDA KNN spot checks.}
+\small
+\begin{tabular}{lllllll}
+\toprule
+Dataset & Path & Accuracy & Seconds & nlist & max nprobe & Pilot recall \\
+\midrule
+MNIST70k & native IVF-Flat & 0.973857 & 4.233 & 237 & 32 & 0.994531 \\
+MetRef & native IVF-Flat & 0.816724 & 0.195 & 27 & 20 & 0.991406 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Earlier accelerator validation snapshot}
+\begin{table}[h]
+\caption{Earlier CPU/CUDA cross-validation kernel measurements retained for release-history continuity. Accuracy is reported as CPU/CUDA.}
 \small
 \resizebox{\linewidth}{!}{%
 \begin{tabular}{llllllll}
@@ -513,8 +527,8 @@ Benchmark B & PLS-LDA & 0.871 / 0.872 / 0.872 & 0.812 / 0.815 / 0.829 & 0.268 / 
 Feature claim & Where implemented & Test proving it & Benchmark proving benefit \\
 \midrule
 Float32 numerical paths & MatrixView float overload in include/kodama/kodama.hpp; DenseF PLS-LDA workspaces in src/plscv.cpp; CUDA and Metal device buffers remain float32. & tests/test\_cv.cpp and tests/test\_metal.cpp check float32 KNNCV/PLSLDACV outputs, backend metadata, requested components, and accuracy thresholds. & The benchmark suite loads contiguous float32 matrices and records CPU, CUDA, and Metal runtime and accuracy separately. \\
-Package-owned CPU HNSW & src/native\_knn.cpp implements float32 HNSW search used by KNNCV, CoreKNN, graph construction, and KODAMA.matrix without linking FAISS. & Dependency-free CPU CTest covers folds, prediction accuracy, graph construction, and KODAMA optimization; CMake configures with FAISS disabled. & On MetRef, native CPU KNNCV reproduced accuracy 0.827033; runtime evidence is reported independently from the optional FAISS/CUDA paths. \\
-CUDA nearest-neighbor search & KNNCV\_CUDA in src/knncv.cpp and precompute\_knn\_cv\_cuda in src/core.cpp use FAISS GPU IVF-Flat with recorded nlist/nprobe. & CUDA tests assert backend=CUDA, prediction and fold sizes, constrained folds, float32 dispatch, and accuracy for KNNCV/CoreKNN. & KNNCV rows report 3.8x to 99.4x speedups on larger datasets with accuracy changes within about 0.001. \\
+Package-owned CPU HNSW & src/native\_knn.cpp implements float32 HNSW search used by KNNCV, CoreKNN, graph construction, and KODAMA.matrix without linking FAISS. & Dependency-free CPU CTest covers folds, prediction accuracy, graph construction, and KODAMA optimization; no FAISS build option remains. & On MetRef, native CPU KNNCV reproduced accuracy 0.827033; runtime evidence is reported independently from accelerator paths. \\
+CUDA nearest-neighbor search & src/native\_cuda\_backend.cu implements package-owned float32 exact KNN, signed-hash IVF-Flat, GPU k-means, resident inverted lists, and exact-pilot recall tuning; KNNCV\_CUDA and CoreKNN call it directly. & CUDA tests explicitly exercise exact and IVF index types, tuning metadata, constrained folds, float32 CoreKNN, and end-to-end KODAMAMatrix\_CUDA initialization. A clean build and ldd audit exclude FAISS/cuVS/RAFT/RMM. & Native IVF spot checks produced 0.973857 in 4.233 s on MNIST70k and 0.816724 in 0.195 s on MetRef, both above the recorded former FAISS/cuVS accuracy rows. \\
 Label-aware SIMPLS PLS-LDA & src/plscv.cpp uses label/class inputs in CPU, CUDA, and Metal float32 SIMPLS paths; accelerator implementations avoid dense one-hot responses where possible. & CPU/CUDA/Metal tests check PLSLDACV sizes, constrained folds, selected component reporting, backend metadata, and accuracy thresholds. & CUDA PLSLDACV rows report 27.2x speedup on MetRef; Metal reproduced 50-component MetRef accuracy exactly with a 3.2x speedup over the dependency-free CPU build. \\
 \bottomrule
 \end{tabularx}
@@ -562,9 +576,9 @@ Reproducibility is supported through CMake builds, CPU, CUDA, and Metal tests, w
 \toprule
 Target & Command or check \\
 \midrule
-C++ CPU & Configure with CMake using KODAMA\_ENABLE\_CUDA=OFF, KODAMA\_ENABLE\_FAISS=OFF, and KODAMA\_ENABLE\_METAL=OFF; then build, test, and install the exported target. \\
-C++ Metal & On macOS, configure with KODAMA\_ENABLE\_METAL=ON while CUDA and FAISS are off; then build and run CTest. Apple system frameworks are linked automatically. \\
-C++ CUDA & Activate the environment containing CUDA, FAISS GPU, and cuVS; expose its library path; configure with KODAMA\_ENABLE\_CUDA=ON; then build and run CTest. Armadillo is not required. \\
+C++ CPU & Configure with CMake using KODAMA\_ENABLE\_CUDA=OFF and KODAMA\_ENABLE\_METAL=OFF; then build, test, and install the exported target. \\
+C++ Metal & On macOS, configure with KODAMA\_ENABLE\_METAL=ON while CUDA is off; then build and run CTest. Apple system frameworks are linked automatically. \\
+C++ CUDA & Activate an environment containing the CUDA toolkit; configure with KODAMA\_ENABLE\_CUDA=ON and KODAMA\_ENABLE\_CUGRAPH=OFF; then build and run CTest. FAISS, cuVS, RAFT, RMM, and Armadillo are not required. \\
 R wrapper & Set KODAMA\_CPP\_ROOT and KODAMA\_CPP\_BUILD\_DIR, then run R CMD INSTALL kodama-r. The wrapper links the installed or selected core build. \\
 Python wrapper & Pass KODAMA\_CPP\_ROOT and KODAMA\_CPP\_BUILD\_DIR as CMake config settings to pip when installing kodama-python. \\
 Runtime check & Run ctest for the core library; in R call KODAMA.diagnostics(); in Python import kodama and run the package validation tests. \\
@@ -582,7 +596,7 @@ Target & Validation result \\
 \midrule
 C++ core, local CPU & Dependency-free build passed 2/2 configured tests on macOS. \\
 C++ core, Apple Metal & Native Metal build passed 3/3 configured tests; a clean external CMake consumer linked the installed package and selected Metal. \\
-C++ core, CUDA & A fresh CUDA 13.2 build without Armadillo succeeded on chiamaka and ctest passed 2/2 configured tests; pre/post-cleanup MetRef PLS-DA and PLS-LDA accuracies were identical. \\
+C++ core, CUDA & A fresh CUDA 13.2 build without FAISS, cuVS, RAFT, RMM, or Armadillo succeeded on chiamaka and CTest passed 2/2. The linked-soname audit found none of the removed dependencies, and the CMake cache contained no corresponding package option, target, header, or library entry; only the CUDA Toolkit environment directory retained a legacy faissgpu-cuvs label. \\
 R wrapper, local CPU & R CMD build followed by R CMD check --as-cran --no-manual --no-vignettes passed on the source tarball with only the expected new-submission NOTE under LC\_ALL=C. \\
 Python wrapper, local CPU & Temporary virtual-environment install against the local CPU build passed pytest: 4/4 tests. \\
 \bottomrule
@@ -599,9 +613,9 @@ Component & Release note \\
 \midrule
 kodama-cpp & MIT license intended for the standalone core release. \\
 KODAMA, fastPLS, and fastEmbedR-derived code & Authored by the same group and relicensed under MIT in the standalone core. \\
-Native CPU HNSW & Package-owned source adapted from the MIT-licensed FAISS organization; no FAISS link dependency in the default CPU build. \\
+Native CPU HNSW & Package-owned source adapted from the MIT-licensed FAISS organization; no FAISS link dependency. \\
 Apple Metal & Uses only Foundation, Metal, and MetalPerformanceShaders system frameworks; FAISS and Faiss-mlx source acknowledgements are retained. \\
-CUDA / FAISS / cuVS runtime & Optional acceleration build dependencies; CPU and Metal builds do not require these libraries, and CUDA SIMPLS has no Armadillo dependency. \\
+Native CUDA & Package-owned exact/IVF KNN, k-means, and SIMPLS/LDA use CUDA Toolkit libraries without FAISS, cuVS, RAFT, RMM, or Armadillo links; cuGraph clustering remains an isolated optional adapter. \\
 R and Python wrappers & Thin language bindings in separate repositories, released under licenses compatible with the core. \\
 \bottomrule
 \end{tabularx}

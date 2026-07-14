@@ -46,7 +46,7 @@ ABSTRACT = (
     "matrix construction from either data matrices or supplied KNN graphs, graph construction, "
     "embedding helpers, and clustering utilities. Its "
     "implementation uses float32 numerical matrices and workspaces, a package-owned CPU HNSW "
-    "search, optional FAISS/cuVS CUDA search, native Metal exact and IVF search, label-aware "
+    "search, package-owned CUDA exact/IVF search and k-means, native Metal exact and IVF search, label-aware "
     "SIMPLS PLS-LDA, reusable fold "
     "buffers, and independent M-cycle execution. The result is a wrapper-independent numerical "
     "backend intended to support reproducible R and Python interfaces, with validation reported "
@@ -145,9 +145,9 @@ SECTIONS = [
             (
                 "KNN kernels have strict backend-specific implementations. The dependency-free CPU "
                 "path uses a package-owned float32 HNSW implementation adapted from the MIT-licensed "
-                "FAISS organization. CUDA remains opt-in and links installed FAISS GPU and RAPIDS "
-                "cuVS libraries; its label-aware SIMPLS adapter is native float32 code and does not "
-                "depend on Armadillo. Apple Metal uses only "
+                "FAISS organization. CUDA remains opt-in, but its exact search, recall-tuned IVF-Flat "
+                "search, k-means, and label-aware SIMPLS/LDA are package-owned float32 code requiring "
+                "only CUDA Toolkit libraries. Apple Metal uses only "
                 "system frameworks and provides exact and "
                 "recall-tuned IVF-Flat search. All paths implement the same voting objective. In the "
                 "KODAMA optimizer, neighbor work is organized so the "
@@ -214,7 +214,7 @@ SECTIONS = [
                 "them through C++ types so that R and Python wrappers can share one backend. This "
                 "makes the comparison with the previous version a compatibility question: the "
                 "objective and output contract should match, while implementation details such as "
-                "float32 storage, FAISS/cuVS search, CUDA kernels, and wrapper-independent graph "
+                "float32 storage, package-owned CPU/CUDA/Metal search, CUDA kernels, and wrapper-independent graph "
                 "objects are new."
             ),
         ],
@@ -251,7 +251,7 @@ SECTIONS = [
                 "All timings in this section are wall-clock seconds from the benchmark drivers, "
                 "and all accuracy values are computed on held-out cross-validation folds. CPU "
                 "kernel measurements use the configured single-thread CPU path unless explicitly "
-                "labeled otherwise; CUDA measurements use the same CUDA/FAISS runtime used by the "
+                "labeled otherwise; CUDA measurements use the same CUDA Toolkit runtime used by the "
                 "test suite. Tables are intentionally separated by scope: kernel-level rows do not "
                 "claim end-to-end speedups, and graph-input rows are treated as API validation unless "
                 "paired with data-input KODAMA results under the same M, Tcycle, seed, and graph settings."
@@ -529,15 +529,15 @@ VALIDATION_ROWS = [
 INSTALLATION_ROWS = [
     (
         "C++ CPU",
-        "Configure with CMake using KODAMA_ENABLE_CUDA=OFF, KODAMA_ENABLE_FAISS=OFF, and KODAMA_ENABLE_METAL=OFF; then build, test, and install the exported target.",
+        "Configure with CMake using KODAMA_ENABLE_CUDA=OFF and KODAMA_ENABLE_METAL=OFF; then build, test, and install the exported target.",
     ),
     (
         "C++ Metal",
-        "On macOS, configure with KODAMA_ENABLE_METAL=ON while CUDA and FAISS are off; then build and run CTest. Apple system frameworks are linked automatically.",
+        "On macOS, configure with KODAMA_ENABLE_METAL=ON while CUDA is off; then build and run CTest. Apple system frameworks are linked automatically.",
     ),
     (
         "C++ CUDA",
-        "Activate the environment containing CUDA, FAISS GPU, and cuVS; expose its library path; configure with KODAMA_ENABLE_CUDA=ON; then build and run CTest. Armadillo is not required.",
+        "Activate an environment containing the CUDA toolkit; configure with KODAMA_ENABLE_CUDA=ON and KODAMA_ENABLE_CUGRAPH=OFF; then build and run CTest. FAISS, cuVS, RAFT, RMM, and Armadillo are not required.",
     ),
     (
         "R wrapper",
@@ -557,9 +557,9 @@ INSTALLATION_ROWS = [
 LICENSE_DEPENDENCY_ROWS = [
     ("kodama-cpp", "MIT license intended for the standalone core release."),
     ("KODAMA, fastPLS, and fastEmbedR-derived code", "Authored by the same group and relicensed under MIT in the standalone core."),
-    ("Native CPU HNSW", "Package-owned source adapted from the MIT-licensed FAISS organization; no FAISS link dependency in the default CPU build."),
+    ("Native CPU HNSW", "Package-owned source adapted from the MIT-licensed FAISS organization; no FAISS link dependency."),
     ("Apple Metal", "Uses only Foundation, Metal, and MetalPerformanceShaders system frameworks; FAISS and Faiss-mlx source acknowledgements are retained."),
-    ("CUDA / FAISS / cuVS runtime", "Optional acceleration build dependencies; CPU and Metal builds do not require these libraries, and CUDA SIMPLS has no Armadillo dependency."),
+    ("Native CUDA", "Package-owned exact/IVF KNN, k-means, and SIMPLS/LDA use CUDA Toolkit libraries without FAISS, cuVS, RAFT, RMM, or Armadillo links; cuGraph clustering remains an isolated optional adapter."),
     ("R and Python wrappers", "Thin language bindings in separate repositories, released under licenses compatible with the core."),
 ]
 
@@ -567,7 +567,7 @@ LICENSE_DEPENDENCY_ROWS = [
 WRAPPER_VALIDATION_ROWS = [
     ("C++ core, local CPU", "Dependency-free build passed 2/2 configured tests on macOS."),
     ("C++ core, Apple Metal", "Native Metal build passed 3/3 configured tests; a clean external CMake consumer linked the installed package and selected Metal."),
-    ("C++ core, CUDA", "A fresh CUDA 13.2 build without Armadillo succeeded on chiamaka and ctest passed 2/2 configured tests; pre/post-cleanup MetRef PLS-DA and PLS-LDA accuracies were identical."),
+    ("C++ core, CUDA", "A fresh CUDA 13.2 build without FAISS, cuVS, RAFT, RMM, or Armadillo succeeded on chiamaka and CTest passed 2/2. The linked-soname audit found none of the removed dependencies, and the CMake cache contained no corresponding package option, target, header, or library entry; only the CUDA Toolkit environment directory retained a legacy faissgpu-cuvs label."),
     ("R wrapper, local CPU", "R CMD build followed by R CMD check --as-cran --no-manual --no-vignettes passed on the source tarball with only the expected new-submission NOTE under LC_ALL=C."),
     ("Python wrapper, local CPU", "Temporary virtual-environment install against the local CPU build passed pytest: 4/4 tests."),
 ]
@@ -660,25 +660,25 @@ PARAMETER_SENSITIVITY_PARAGRAPHS = [
 
 PILOT_EXPERIMENT_PARAGRAPHS = [
     (
-        "The benchmark run used copied float32 RData datasets spanning n = 873 to 5,220,347 samples and p = 11 to 16,384 variables. The CUDA machine first rebuilt the project and reran the CTest suite; both configured tests passed. The current table is deliberately kernel-focused: it validates implementation claims and identifies scaling regimes without conflating isolated kernel speed with full KODAMA.matrix runtime."
+        "The benchmark run used copied float32 RData datasets spanning n = 873 to 5,220,347 samples and p = 11 to 16,384 variables. The CUDA machine first rebuilt the project and reran the CTest suite; both configured tests passed. The broad kernel and core tables retain the earlier release-validation snapshot for continuity, whereas the native-CUDA table reports the dependency-distilled search implementation introduced afterward."
     ),
     (
-        "The kernel-level experiment isolates KNNCV and PLSLDACV from the full KODAMA matrix pipeline. CUDA KNN matched CPU accuracy within about 0.001 on COIL20, MNIST, USPS, and mass41 while giving 3.8x to 99.4x speedups once the dataset was large enough to amortize GPU overhead. On the small MetRef KNN task, CPU remained faster because setup overhead dominated. CUDA PLSLDACV matched CPU exactly on MetRef and was 27.2x faster; on USPS it was 23.8x faster with a small positive accuracy difference."
+        "The current package-owned CUDA IVF-Flat path was checked on MNIST70k and MetRef with five-fold cosine KNNCV and k = 10. On MNIST70k it produced accuracy 0.973857 in 4.233 s with nlist = 237 and maximum nprobe = 32, compared with 0.973029 in 4.753 s for the recorded former FAISS/cuVS row. On MetRef it produced 0.816724 in 0.195 s, compared with 0.814433 in 0.297 s. These are implementation spot checks rather than repeated-run performance estimates."
     ),
     (
         "The KODAMA.matrix MetRef validation shows why cross-validated accuracy is reported together with label-quality diagnostics. The KNN optimizer reached very high CV accuracy, but the best label vectors collapsed to few classes and had low ARI. The PLS-LDA optimizer had lower CV accuracy but much stronger external-label agreement. We therefore report CV accuracy, number of active classes, ARI or another label-agreement statistic when available, and the downstream embedding compactness as complementary diagnostics."
     ),
     (
-        "The wrapper validation also identified a packaging requirement: the conda libstdc++ runtime used by the CUDA/FAISS environment must be visible before R starts. The R wrapper installation notes describe the required environment variables, and the configure script links the conda libstdc++ runtime when CONDA_PREFIX is set."
+        "The dependency-distilled CUDA build links CUDA Toolkit libraries but no FAISS, cuVS, RAFT, or RMM soname. Binary wrappers therefore need to locate the CUDA runtime selected at build time, but do not need to provision the removed search libraries."
     ),
 ]
 
 
 BENCHMARK_PROTOCOL_ROWS = [
-    ("Date", "2026-07-06 UTC"),
+    ("Date", "2026-07-14 UTC for native-CUDA validation; earlier broad benchmark snapshot dated 2026-07-06 UTC"),
     ("GPU", "NVIDIA GeForce RTX 5060 Ti, 16 GB device memory, driver 595.71.05"),
-    ("Build validation", "CUDA build succeeded; CTest passed 2/2 configured tests in 1.95 s"),
-    ("Runtime", "CUDA/FAISS/cuVS conda environment used by the benchmark and test suite; Armadillo is not required"),
+    ("Build validation", "Fresh CUDA 13.2 build succeeded; CTest passed 2/2 configured tests in 1.77 s"),
+    ("Runtime", "CUDA Toolkit only for native search/PLS paths; no FAISS, cuVS, RAFT, RMM, or Armadillo link"),
     ("Data format", "RData lists exported to contiguous float32 row-major matrices"),
     ("CPU setting", "Single-thread CPU kernels unless otherwise stated"),
     ("CV kernels", "KNNCV and PLSLDACV measured independently from the full matrix pipeline"),
@@ -689,7 +689,7 @@ BENCHMARK_PROTOCOL_ROWS = [
 
 METAL_VALIDATION_PARAGRAPHS = [
     (
-        "The dependency-light backend experiment was run on macOS with FAISS, CUDA, and OpenMP disabled. "
+        "The dependency-light backend experiment was run on macOS with CUDA and OpenMP disabled. "
         "The CPU build therefore measures the package-owned HNSW and float32 SIMPLS/LDA implementations, "
         "while the Metal build links only Apple system frameworks. Exact CPU/Metal equality of the reported "
         "classification metrics is the primary acceptance criterion; timings are secondary evidence."
@@ -808,6 +808,12 @@ PILOT_CV_ROWS = [
     ("USPS", "KNNCV", "2.273", "0.429", "5.3x", "0.688/0.688", "-0.000819", "-"),
     ("USPS", "PLSLDACV", "3.760", "0.158", "23.8x", "0.684/0.687", "+0.002727", "50"),
     ("mass41", "KNNCV", "366.883", "3.692", "99.4x", "0.912/0.912", "-0.000066", "-"),
+]
+
+
+NATIVE_CUDA_VALIDATION_ROWS = [
+    ("MNIST70k", "native IVF-Flat", "0.973857", "4.233", "237", "32", "0.994531"),
+    ("MetRef", "native IVF-Flat", "0.816724", "0.195", "27", "20", "0.991406"),
 ]
 
 
@@ -1182,14 +1188,14 @@ IMPLEMENTATION_EVIDENCE_ROWS = [
     (
         "Package-owned CPU HNSW",
         "src/native_knn.cpp implements float32 HNSW search used by KNNCV, CoreKNN, graph construction, and KODAMA.matrix without linking FAISS.",
-        "Dependency-free CPU CTest covers folds, prediction accuracy, graph construction, and KODAMA optimization; CMake configures with FAISS disabled.",
-        "On MetRef, native CPU KNNCV reproduced accuracy 0.827033; runtime evidence is reported independently from the optional FAISS/CUDA paths.",
+        "Dependency-free CPU CTest covers folds, prediction accuracy, graph construction, and KODAMA optimization; no FAISS build option remains.",
+        "On MetRef, native CPU KNNCV reproduced accuracy 0.827033; runtime evidence is reported independently from accelerator paths.",
     ),
     (
         "CUDA nearest-neighbor search",
-        "KNNCV_CUDA in src/knncv.cpp and precompute_knn_cv_cuda in src/core.cpp use FAISS GPU IVF-Flat with recorded nlist/nprobe.",
-        "CUDA tests assert backend=CUDA, prediction and fold sizes, constrained folds, float32 dispatch, and accuracy for KNNCV/CoreKNN.",
-        "KNNCV rows report 3.8x to 99.4x speedups on larger datasets with accuracy changes within about 0.001.",
+        "src/native_cuda_backend.cu implements package-owned float32 exact KNN, signed-hash IVF-Flat, GPU k-means, resident inverted lists, and exact-pilot recall tuning; KNNCV_CUDA and CoreKNN call it directly.",
+        "CUDA tests explicitly exercise exact and IVF index types, tuning metadata, constrained folds, float32 CoreKNN, and end-to-end KODAMAMatrix_CUDA initialization. A clean build and ldd audit exclude FAISS/cuVS/RAFT/RMM.",
+        "Native IVF spot checks produced 0.973857 in 4.233 s on MNIST70k and 0.816724 in 0.195 s on MetRef, both above the recorded former FAISS/cuVS accuracy rows.",
     ),
     (
         "Label-aware SIMPLS PLS-LDA",
@@ -1237,7 +1243,7 @@ NOVELTY_ROWS = [
     ),
     (
         "High-recall neighbor search",
-        "Provides package-owned CPU HNSW, optional FAISS/cuVS CUDA search, and native Metal exact/IVF search.",
+        "Provides package-owned CPU HNSW, package-owned CUDA exact/IVF search, and native Metal exact/IVF search.",
     ),
     (
         "Independent M cycles",
@@ -1738,7 +1744,7 @@ def build_architecture_figure() -> None:
 
     box((60, 555, 530, 765), green, green_line, ["CPU backend", "package-owned float32 HNSW", "label-aware SIMPLS/LDA", "optional OpenMP"])
     box((665, 555, 1135, 765), purple, purple_line, ["Apple Metal backend", "exact + IVF-Flat KNN", "MPS SIMPLS/LDA + k-means", "system frameworks only"])
-    box((1270, 555, 1740, 765), amber, amber_line, ["CUDA backend", "FAISS GPU + RAPIDS cuVS", "native float32 SIMPLS/LDA", "no Armadillo dependency", "optional cuGraph"])
+    box((1270, 555, 1740, 765), amber, amber_line, ["CUDA backend", "native exact + IVF-Flat KNN", "native k-means + SIMPLS/LDA", "CUDA Toolkit only", "optional cuGraph"])
 
     box((430, 830, 1370, 930), blue, blue_line, ["Graph, embedding, and clustering utilities", "KNN/SNN graph | CPU/CUDA UMAP/openTSNE | CPU/optional CUDA clustering"])
     box((565, 980, 1235, 1070), gray, gray_line, ["Typed outputs", "labels, accuracy traces, graphs, embeddings", "timings, memory, backend metadata"])
@@ -1882,6 +1888,14 @@ def build_docx() -> None:
             doc.add_heading("CUDA workstation validation", level=2)
             for paragraph in PILOT_EXPERIMENT_PARAGRAPHS:
                 doc.add_paragraph(paragraph)
+            add_table(
+                doc,
+                ("Dataset", "Path", "Accuracy", "Seconds", "nlist", "max nprobe", "pilot recall"),
+                NATIVE_CUDA_VALIDATION_ROWS,
+                [1.0, 1.25, 0.85, 0.8, 0.7, 0.9, 0.95],
+                font_size=7.2,
+            )
+            doc.add_heading("Earlier accelerator validation snapshot", level=3)
             add_table(
                 doc,
                 ("Dataset", "Kernel", "CPU s", "CUDA s", "Speedup", "Acc CPU/CUDA", "Delta", "Comp."),
@@ -2036,7 +2050,7 @@ def build_self_review() -> None:
         [
             "Extend the benchmark table with the larger wrapper-level comparison against the R implementation.",
             "Freeze the public API and cite a versioned release, commit hash, and archival DOI.",
-            "Complete the license compatibility audit for KODAMA, fastPLS, fastEmbedR, FAISS, and CUDA-adjacent libraries.",
+            "Freeze the completed license and provenance audit in the versioned release artifacts.",
             "Convert the final source into the official JMLR LaTeX style and keep the MLOSS page budget in mind.",
             "Run the final ablation matrix across the selected release datasets before making broad claims about visualization improvement.",
         ],
@@ -2055,7 +2069,8 @@ def build_self_review() -> None:
             "Added a public-literature comparison against the original KODAMA paper, the Bioinformatics R-package paper, and the documented R interface.",
             "Added a related-work section positioning KODAMA relative to semi-supervised graph learning, pseudo-labeling, weak supervision, clustering stability, prediction strength, UMAP, t-SNE, and open-source ML reproducibility.",
             "Added a compact architecture figure showing R/Python wrappers, the C++17 core, CPU, CUDA, and Metal backends, graph/embedding/clustering utilities, and typed outputs.",
-            "Added implementation details on float32 storage, label-aware SIMPLS, FAISS/cuVS, CPU HNSW, independent M cycles, typed outputs, and release validation.",
+            "Added implementation details on float32 storage, label-aware SIMPLS, package-owned CPU/CUDA/Metal neighbor search, independent M cycles, typed outputs, and release validation.",
+            "Replaced the installed FAISS/cuVS CUDA search path with package-owned exact/IVF KNN and k-means, and added clean-build, CTest, soname-audit, MNIST70k, and MetRef evidence.",
             "Added an implementation-evidence matrix linking each claim to source files, tests, and measured benchmark rows.",
             "Added evaluation guardrails that explicitly address circularity, parameter dependence, visualization bias, runtime attribution, and wrapper reproducibility.",
             "Added an ablation matrix specifying the required classifier, graph-correction, M/Tcycle, landmark/splitting, backend, and wrapper-parity comparisons.",
@@ -2387,7 +2402,25 @@ def build_tex() -> None:
                 body.append(tex_escape(paragraph))
                 body.append("")
             body.append(r"\begin{table}[h]")
-            body.append(r"\caption{CPU/CUDA cross-validation kernel measurements. Accuracy is reported as CPU/CUDA.}")
+            body.append(r"\caption{Dependency-distilled native CUDA KNN spot checks.}")
+            body.append(r"\small")
+            body.append(r"\begin{tabular}{lllllll}")
+            body.append(r"\toprule")
+            body.append(r"Dataset & Path & Accuracy & Seconds & nlist & max nprobe & Pilot recall \\")
+            body.append(r"\midrule")
+            for dataset, path, accuracy, seconds, nlist, nprobe, recall in NATIVE_CUDA_VALIDATION_ROWS:
+                body.append(
+                    f"{tex_escape(dataset)} & {tex_escape(path)} & {tex_escape(accuracy)} & "
+                    f"{tex_escape(seconds)} & {tex_escape(nlist)} & {tex_escape(nprobe)} & "
+                    f"{tex_escape(recall)} \\\\"
+                )
+            body.append(r"\bottomrule")
+            body.append(r"\end{tabular}")
+            body.append(r"\end{table}")
+            body.append("")
+            body.append(r"\subsubsection{Earlier accelerator validation snapshot}")
+            body.append(r"\begin{table}[h]")
+            body.append(r"\caption{Earlier CPU/CUDA cross-validation kernel measurements retained for release-history continuity. Accuracy is reported as CPU/CUDA.}")
             body.append(r"\small")
             body.append(r"\resizebox{\linewidth}{!}{%")
             body.append(r"\begin{tabular}{llllllll}")

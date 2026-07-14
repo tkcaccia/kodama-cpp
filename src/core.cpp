@@ -1,5 +1,6 @@
 #include "common.hpp"
 #include "metal_backend.hpp"
+#include "native_cuda_backend.hpp"
 #include "native_knn.hpp"
 
 #include <algorithm>
@@ -11,22 +12,6 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
-
-#if defined(KODAMA_ENABLE_FAISS)
-#include <faiss/IndexFlat.h>
-#include <faiss/IndexHNSW.h>
-#include <faiss/IndexIVFFlat.h>
-#include <faiss/MetricType.h>
-#endif
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
-#if defined(KODAMA_ENABLE_CUDA)
-#include <faiss/gpu/GpuIndexIVFFlat.h>
-#include <faiss/gpu/StandardGpuResources.h>
-#endif
 
 namespace kodama {
 namespace {
@@ -48,33 +33,6 @@ struct HNSWParameters {
   int ef_search = 150;
   int tune_k = 50;
   double target_recall = 0.99;
-};
-
-class OmpThreadScope {
- public:
-  explicit OmpThreadScope(int n_threads) {
-#ifdef _OPENMP
-    previous_ = omp_get_max_threads();
-    if (n_threads > 0) {
-      omp_set_num_threads(std::max(1, n_threads));
-    }
-#else
-    (void)n_threads;
-#endif
-  }
-
-  ~OmpThreadScope() {
-#ifdef _OPENMP
-    if (previous_ > 0) {
-      omp_set_num_threads(previous_);
-    }
-#endif
-  }
-
- private:
-#ifdef _OPENMP
-  int previous_ = 0;
-#endif
 };
 
 int clamp_int(int value, int fallback, int lo, int hi) {
@@ -144,47 +102,7 @@ int majority_vote(const std::vector<Neighbor>& neighbors) {
   return best_label;
 }
 
-std::vector<float> make_faiss_matrix(
-  MatrixView x,
-  const std::vector<int>& rows,
-  DistanceMetric metric
-) {
-  std::vector<float> out(rows.size() * x.cols, 0.0f);
-  if (metric != DistanceMetric::Cosine) {
-    if (x.value_type == MatrixValueType::Float32) {
-      const float* data = static_cast<const float*>(x.data);
-      for (std::size_t r = 0; r < rows.size(); ++r) {
-        const std::size_t src = static_cast<std::size_t>(rows[r]) * x.cols;
-        std::copy_n(data + src, x.cols, out.data() + r * x.cols);
-      }
-    } else {
-      for (std::size_t r = 0; r < rows.size(); ++r) {
-        const int row = rows[r];
-        for (std::size_t j = 0; j < x.cols; ++j) {
-          out[r * x.cols + j] = x.value_float(static_cast<std::size_t>(row), j);
-        }
-      }
-    }
-    return out;
-  }
-
-  for (std::size_t r = 0; r < rows.size(); ++r) {
-    long double ss = 0.0;
-    const int row = rows[r];
-    for (std::size_t j = 0; j < x.cols; ++j) {
-      const float v = x.value_float(static_cast<std::size_t>(row), j);
-      ss += static_cast<long double>(v) * static_cast<long double>(v);
-    }
-    const double n = std::sqrt(static_cast<double>(ss));
-    const double scale = metric == DistanceMetric::Cosine && n > 0.0 && std::isfinite(n) ? 1.0 / n : 1.0;
-    for (std::size_t j = 0; j < x.cols; ++j) {
-      out[r * x.cols + j] = static_cast<float>(static_cast<double>(x.value_float(static_cast<std::size_t>(row), j)) * scale);
-    }
-  }
-  return out;
-}
-
-std::vector<float> make_faiss_matrix(MatrixView x, DistanceMetric metric) {
+std::vector<float> make_search_matrix(MatrixView x, DistanceMetric metric) {
   std::vector<float> out(x.rows * x.cols, 0.0f);
   if (metric != DistanceMetric::Cosine) {
     if (x.value_type == MatrixValueType::Float32) {
@@ -215,20 +133,7 @@ std::vector<float> make_faiss_matrix(MatrixView x, DistanceMetric metric) {
   return out;
 }
 
-std::vector<float> gather_faiss_rows(
-  const std::vector<float>& all_x,
-  std::size_t cols,
-  const std::vector<int>& rows
-) {
-  std::vector<float> out(rows.size() * cols, 0.0f);
-  for (std::size_t r = 0; r < rows.size(); ++r) {
-    const int row = rows[r];
-    std::copy_n(all_x.data() + static_cast<std::size_t>(row) * cols, cols, out.data() + r * cols);
-  }
-  return out;
-}
-
-void gather_faiss_rows(
+void gather_search_rows(
   const std::vector<float>& all_x,
   std::size_t cols,
   const std::vector<int>& rows,
@@ -300,7 +205,8 @@ KNNParametersUsed resolve_core_knn_parameters(const KNNOptions& options) {
     (options.index_type == KNNIndexType::MetalIVFFlat ? KNNIndexType::MetalIVFFlat : KNNIndexType::MetalExact) :
     options.index_type;
   if (used.backend == Backend::CPU &&
-      (used.index_type == KNNIndexType::CuvsIVFFlat || used.index_type == KNNIndexType::MetalExact ||
+      (used.index_type == KNNIndexType::CudaExact || used.index_type == KNNIndexType::CudaIVFFlat ||
+       used.index_type == KNNIndexType::MetalExact ||
        used.index_type == KNNIndexType::MetalIVFFlat)) {
     used.index_type = KNNIndexType::NativeHNSW;
   }
@@ -333,7 +239,7 @@ PrecomputedKNN precompute_knn_cv_cpu(
   precomputed.parameters = resolve_core_knn_parameters(options);
   precomputed.folds = detail::make_folds(labels, constrain, options.cv);
   const std::vector<int> fold_ids = detail::sorted_unique_folds(precomputed.folds);
-  const std::vector<float> all_x = make_faiss_matrix(x, precomputed.parameters.metric);
+  const std::vector<float> all_x = make_search_matrix(x, precomputed.parameters.metric);
   std::vector<float> train_x;
   std::vector<float> val_x;
   for (int fold : fold_ids) {
@@ -342,8 +248,8 @@ PrecomputedKNN precompute_knn_cv_cpu(
     if (train.empty()) throw std::runtime_error("KNN fold has no training samples.");
 
     const int k = std::min(precomputed.parameters.k, static_cast<int>(train.size()));
-    gather_faiss_rows(all_x, x.cols, train, train_x);
-    gather_faiss_rows(all_x, x.cols, validation, val_x);
+    gather_search_rows(all_x, x.cols, train, train_x);
+    gather_search_rows(all_x, x.cols, validation, val_x);
     const int d = static_cast<int>(x.cols);
     std::vector<int> idx(validation.size() * static_cast<std::size_t>(k), -1);
     std::vector<float> scores(validation.size() * static_cast<std::size_t>(k), -std::numeric_limits<float>::infinity());
@@ -390,55 +296,6 @@ PrecomputedKNN precompute_knn_cv_cpu(
       }
 #else
       throw std::runtime_error("CoreKNN Metal backend requires KODAMA_ENABLE_METAL.");
-#endif
-    } else if (precomputed.parameters.index_type == KNNIndexType::FaissIVFFlat) {
-#if defined(KODAMA_ENABLE_FAISS)
-      if (precomputed.parameters.metric == DistanceMetric::Euclidean) {
-        throw std::invalid_argument("FAISS IVF CPU KNN currently supports cosine/inner product; use FAISS HNSW for euclidean.");
-      }
-      int nlist = precomputed.parameters.ivf_nlist > 0 ? precomputed.parameters.ivf_nlist :
-        std::max(1, static_cast<int>(std::sqrt(static_cast<double>(train.size() / 4 + 1))));
-      if (precomputed.parameters.ivf_nlist <= 0 && train.size() < 1000) {
-        nlist = std::max(1, static_cast<int>(train.size() / 40));
-      }
-      nlist = std::min(nlist, static_cast<int>(train.size()));
-      faiss::IndexFlatIP quantizer(d);
-      faiss::IndexIVFFlat index(&quantizer, d, nlist, faiss::METRIC_INNER_PRODUCT);
-      index.nprobe = precomputed.parameters.ivf_nprobe > 0 ? precomputed.parameters.ivf_nprobe :
-        std::max<std::size_t>(1, std::min<std::size_t>(static_cast<std::size_t>(nlist), static_cast<std::size_t>(std::sqrt(static_cast<double>(nlist))) + 1));
-      index.nprobe = std::min<std::size_t>(index.nprobe, static_cast<std::size_t>(nlist));
-      index.train(train.size(), train_x.data());
-      index.add(train.size(), train_x.data());
-      OmpThreadScope threads(precomputed.parameters.n_threads);
-      std::vector<faiss::idx_t> faiss_idx(idx.size(), -1);
-      index.search(validation.size(), val_x.data(), k, scores.data(), faiss_idx.data());
-      for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int>(faiss_idx[i]);
-#else
-      throw std::runtime_error("KNNIndexType::FaissIVFFlat requires a build with KODAMA_ENABLE_FAISS=ON.");
-#endif
-    } else if (precomputed.parameters.index_type == KNNIndexType::FaissHNSWFlat) {
-#if defined(KODAMA_ENABLE_FAISS)
-      const HNSWParameters hnsw = tune_hnsw_parameters(static_cast<int>(train.size()), d, k, options);
-      precomputed.parameters.hnsw_m = hnsw.m;
-      precomputed.parameters.hnsw_ef_construction = hnsw.ef_construction;
-      precomputed.parameters.hnsw_ef_search = hnsw.ef_search;
-      precomputed.parameters.hnsw_tune_k = hnsw.tune_k;
-      precomputed.parameters.hnsw_target_recall = hnsw.target_recall;
-      const faiss::MetricType faiss_metric = precomputed.parameters.metric == DistanceMetric::Euclidean ?
-        faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
-      faiss::IndexHNSWFlat index(d, hnsw.m, faiss_metric);
-      index.hnsw.efConstruction = hnsw.ef_construction;
-      index.hnsw.efSearch = hnsw.ef_search;
-      index.add(train.size(), train_x.data());
-      OmpThreadScope threads(precomputed.parameters.n_threads);
-      std::vector<faiss::idx_t> faiss_idx(idx.size(), -1);
-      index.search(validation.size(), val_x.data(), k, scores.data(), faiss_idx.data());
-      for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int>(faiss_idx[i]);
-      if (precomputed.parameters.metric == DistanceMetric::Euclidean) {
-        for (float& score : scores) score = -score;
-      }
-#else
-      throw std::runtime_error("KNNIndexType::FaissHNSWFlat requires a build with KODAMA_ENABLE_FAISS=ON.");
 #endif
     } else {
       const HNSWParameters hnsw = tune_hnsw_parameters(static_cast<int>(train.size()), d, k, options);
@@ -541,7 +398,7 @@ PrecomputedKNN precompute_knn_cv_graph(
   const NeighborGraph graph = normalize_graph_indices(input_graph, samples);
   PrecomputedKNN precomputed;
   precomputed.parameters = resolve_core_knn_parameters(options);
-  precomputed.parameters.index_type = KNNIndexType::FaissHNSWFlat;
+  precomputed.parameters.index_type = KNNIndexType::NativeHNSW;
   precomputed.folds = detail::make_folds(labels, constrain, options.cv);
   const std::vector<int> fold_ids = detail::sorted_unique_folds(precomputed.folds);
   const int k = std::max(1, std::min(options.k, graph.neighbors));
@@ -599,45 +456,59 @@ PrecomputedKNN precompute_knn_cv_cuda(
   PrecomputedKNN precomputed;
   precomputed.parameters = resolve_core_knn_parameters(options);
   precomputed.parameters.backend = Backend::CUDA;
-  precomputed.parameters.index_type = KNNIndexType::FaissIVFFlat;
+  precomputed.parameters.index_type = options.index_type == KNNIndexType::CudaExact ?
+    KNNIndexType::CudaExact : KNNIndexType::CudaIVFFlat;
   precomputed.folds = detail::make_folds(labels, constrain, options.cv);
   const std::vector<int> fold_ids = detail::sorted_unique_folds(precomputed.folds);
-  const std::vector<float> all_x = make_faiss_matrix(x, precomputed.parameters.metric);
+  const std::vector<float> all_x = make_search_matrix(x, precomputed.parameters.metric);
   std::vector<float> train_x;
   std::vector<float> val_x;
-  faiss::gpu::StandardGpuResources resources;
-
   for (int fold : fold_ids) {
     const std::vector<int> validation = detail::indices_where_fold(precomputed.folds, fold, true);
     const std::vector<int> train = detail::indices_where_fold(precomputed.folds, fold, false);
     if (train.empty()) throw std::runtime_error("KNN fold has no training samples.");
 
     const int k = std::min(precomputed.parameters.k, static_cast<int>(train.size()));
-    gather_faiss_rows(all_x, x.cols, train, train_x);
-    gather_faiss_rows(all_x, x.cols, validation, val_x);
+    gather_search_rows(all_x, x.cols, train, train_x);
+    gather_search_rows(all_x, x.cols, validation, val_x);
     const int d = static_cast<int>(x.cols);
-    int nlist = precomputed.parameters.ivf_nlist > 0 ? precomputed.parameters.ivf_nlist :
-      std::max(1, static_cast<int>(std::sqrt(static_cast<double>(train.size()))));
-    nlist = std::min(nlist, static_cast<int>(train.size()));
-    int nprobe = precomputed.parameters.ivf_nprobe > 0 ? precomputed.parameters.ivf_nprobe :
-      std::max(1, static_cast<int>(std::sqrt(static_cast<double>(nlist))) + 1);
-    nprobe = std::min(nprobe, nlist);
-
-    faiss::gpu::GpuIndexIVFFlatConfig config;
-    config.device = precomputed.parameters.gpu_device;
-    const faiss::MetricType faiss_metric = precomputed.parameters.metric == DistanceMetric::Euclidean ?
-      faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
-    faiss::gpu::GpuIndexIVFFlat index(&resources, d, nlist, faiss_metric, config);
-    index.train(train.size(), train_x.data());
-    index.add(train.size(), train_x.data());
-
-    std::vector<faiss::idx_t> idx(validation.size() * static_cast<std::size_t>(k), -1);
-    std::vector<float> scores(validation.size() * static_cast<std::size_t>(k), -std::numeric_limits<float>::infinity());
-    faiss::SearchParametersIVF search_params;
-    search_params.nprobe = static_cast<std::size_t>(nprobe);
-    index.search(validation.size(), val_x.data(), k, scores.data(), idx.data(), &search_params);
-    if (precomputed.parameters.metric == DistanceMetric::Euclidean) {
-      for (float& score : scores) score = -score;
+    detail::NativeCudaIVFStats ivf_stats;
+    const detail::NativeKNNResult search = precomputed.parameters.index_type == KNNIndexType::CudaExact ?
+      detail::native_cuda_exact_knn_search(
+        train_x,
+        static_cast<int>(train.size()),
+        val_x,
+        static_cast<int>(validation.size()),
+        d,
+        k,
+        precomputed.parameters.metric,
+        precomputed.parameters.gpu_device
+      ) :
+      detail::native_cuda_ivf_knn_search(
+        train_x,
+        static_cast<int>(train.size()),
+        val_x,
+        static_cast<int>(validation.size()),
+        d,
+        k,
+        precomputed.parameters.metric,
+        options.ivf_nlist,
+        options.ivf_nprobe,
+        precomputed.parameters.hnsw_target_recall,
+        precomputed.parameters.gpu_device,
+        {},
+        &ivf_stats
+      );
+    if (precomputed.parameters.index_type == KNNIndexType::CudaIVFFlat) {
+      precomputed.parameters.ivf_nlist = ivf_stats.nlist;
+      precomputed.parameters.ivf_nprobe = std::max(precomputed.parameters.ivf_nprobe, ivf_stats.nprobe);
+      precomputed.parameters.ivf_pilot_recall = precomputed.parameters.ivf_pilot_recall == 0.0 ?
+        ivf_stats.pilot_recall : std::min(precomputed.parameters.ivf_pilot_recall, ivf_stats.pilot_recall);
+    }
+    const std::vector<int>& idx = search.indices;
+    std::vector<float> scores(search.distances.size(), -std::numeric_limits<float>::infinity());
+    for (std::size_t i = 0; i < scores.size(); ++i) {
+      scores[i] = detail::native_knn_score(search.distances[i], precomputed.parameters.metric);
     }
 
     PrecomputedKNNFold fold_data;
@@ -1413,7 +1284,7 @@ CoreResult CoreKNN_CUDA(
   (void)constrain;
   (void)fixed;
   (void)options;
-  throw std::runtime_error("CoreKNN_CUDA requires a CUDA/FAISS GPU build.");
+  throw std::runtime_error("CoreKNN_CUDA requires a CUDA build.");
 #endif
 }
 

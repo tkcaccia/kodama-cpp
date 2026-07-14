@@ -8,8 +8,8 @@ project(kodama-cpp
 
 option(KODAMA_BUILD_TESTS "Build kodama-cpp tests" ON)
 option(KODAMA_BUILD_EXAMPLES "Build kodama-cpp examples" ON)
-option(KODAMA_ENABLE_CUDA "Build CUDA FAISS/cuVS backends" OFF)
-option(KODAMA_ENABLE_FAISS "Build optional FAISS CPU backends" OFF)
+option(KODAMA_ENABLE_CUDA "Build package-owned CUDA backends" OFF)
+option(KODAMA_ENABLE_CUGRAPH "Build optional RAPIDS cuGraph clustering adapters" OFF)
 if(APPLE)
   option(KODAMA_ENABLE_METAL "Build native Apple Metal backends" ON)
   option(KODAMA_ENABLE_OPENMP "Build optional OpenMP parallel CPU loops" OFF)
@@ -57,27 +57,6 @@ if(KODAMA_ENABLE_METAL)
   )
 else()
   target_sources(kodama_cpp PRIVATE src/metal_backend_stub.cpp)
-endif()
-
-if(KODAMA_ENABLE_CUDA)
-  set(KODAMA_ENABLE_FAISS ON CACHE BOOL "Build optional FAISS CPU backends" FORCE)
-endif()
-
-if(KODAMA_ENABLE_FAISS)
-  find_path(FAISS_INCLUDE_DIR
-    NAMES faiss/IndexIVFFlat.h
-    HINTS /opt/homebrew/include /usr/local/include $ENV{CONDA_PREFIX}/include
-  )
-  find_library(FAISS_LIBRARY
-    NAMES faiss
-    HINTS /opt/homebrew/lib /usr/local/lib $ENV{CONDA_PREFIX}/lib
-  )
-  if(NOT FAISS_INCLUDE_DIR OR NOT FAISS_LIBRARY)
-    message(FATAL_ERROR "KODAMA_ENABLE_FAISS=ON requires FAISS headers and a FAISS library.")
-  endif()
-  target_include_directories(kodama_cpp PRIVATE ${FAISS_INCLUDE_DIR})
-  target_link_libraries(kodama_cpp PRIVATE ${FAISS_LIBRARY})
-  target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_FAISS=1)
 endif()
 
 set(KODAMA_CONFIG_NEEDS_OPENMP OFF)
@@ -144,71 +123,32 @@ if(KODAMA_ENABLE_CUDA)
       /usr/local/cuda-13.0/targets/x86_64-linux/lib
       /usr/lib/x86_64-linux-gnu
   )
-  find_library(MKL_RT_LIBRARY
-    NAMES mkl_rt
-    HINTS $ENV{CONDA_PREFIX}/lib
-  )
   if(NOT CUDA_TOOLKIT_INCLUDE_DIR OR NOT CUDA_CUBLAS_LIBRARY OR NOT CUDA_RUNTIME_LIBRARY OR NOT CUDA_CUSOLVER_LIBRARY OR NOT CUDA_CURAND_LIBRARY OR NOT CUDA_CUFFT_LIBRARY)
     message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires CUDA headers, libcublas, libcusolver, libcurand, libcufft, and libcudart.")
   endif()
-  find_library(FAISS_GPU_LIBRARY
-    NAMES faiss_gpu
-    HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
-  )
-  if(NOT FAISS_GPU_LIBRARY AND EXISTS "${FAISS_INCLUDE_DIR}/faiss/gpu/GpuIndexIVFFlat.h")
-    set(FAISS_GPU_LIBRARY ${FAISS_LIBRARY})
-  endif()
-  find_path(CUVS_INCLUDE_DIR
-    NAMES cuvs/neighbors/ivf_flat.hpp cuvs/neighbors/cagra.hpp
-    HINTS /usr/local/include $ENV{CONDA_PREFIX}/include
-  )
-  if(NOT FAISS_GPU_LIBRARY)
-    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires FAISS GPU library (libfaiss_gpu).")
-  endif()
-  if(NOT CUVS_INCLUDE_DIR)
-    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires cuVS headers.")
-  endif()
-  find_library(CUVS_LIBRARY
-    NAMES cuvs
-    HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
-  )
-  if(NOT CUVS_LIBRARY)
-    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires libcuvs.")
-  endif()
-  find_path(CUGRAPH_INCLUDE_DIR
-    NAMES cugraph_c/community_algorithms.h
-    HINTS /usr/local/include $ENV{CONDA_PREFIX}/include
-  )
-  find_library(CUGRAPH_LIBRARY
-    NAMES cugraph_c
-    HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
-  )
-  if(CUGRAPH_INCLUDE_DIR AND CUGRAPH_LIBRARY)
+  if(KODAMA_ENABLE_CUGRAPH)
+    find_path(CUGRAPH_INCLUDE_DIR
+      NAMES cugraph_c/community_algorithms.h
+      HINTS /usr/local/include $ENV{CONDA_PREFIX}/include
+    )
+    find_library(CUGRAPH_LIBRARY
+      NAMES cugraph_c
+      HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
+    )
+    if(NOT CUGRAPH_INCLUDE_DIR OR NOT CUGRAPH_LIBRARY)
+      message(FATAL_ERROR "KODAMA_ENABLE_CUGRAPH=ON requires libcugraph_c and its headers.")
+    endif()
     target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUGRAPH=1)
     target_include_directories(kodama_cpp PRIVATE ${CUGRAPH_INCLUDE_DIR})
     target_link_libraries(kodama_cpp PRIVATE ${CUGRAPH_LIBRARY})
-    message(STATUS "RAPIDS cuGraph found: enabling CUDA Louvain/Leiden graph clustering")
-  else()
-    message(STATUS "RAPIDS cuGraph not found: CUDA graph clustering will report unavailable")
   endif()
 
-  target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1 KODAMA_ENABLE_CUVS=1)
-  target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR} ${CUVS_INCLUDE_DIR})
-  target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY} ${CUVS_LIBRARY} ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
-  if(MKL_RT_LIBRARY)
-    target_link_libraries(kodama_cpp PRIVATE ${MKL_RT_LIBRARY})
-  endif()
-  find_library(CONDA_STDCXX_LIBRARY
-    NAMES stdc++
-    HINTS $ENV{CONDA_PREFIX}/lib
-    NO_DEFAULT_PATH
-  )
-  if(CONDA_STDCXX_LIBRARY)
-    target_link_libraries(kodama_cpp PRIVATE ${CONDA_STDCXX_LIBRARY})
-  endif()
-  target_sources(kodama_cpp PRIVATE src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/cuda_simpls_float.cpp)
+  target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1)
+  target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR})
+  target_link_libraries(kodama_cpp PRIVATE ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
+  target_sources(kodama_cpp PRIVATE src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/cuda_simpls_float.cpp src/native_cuda_backend.cu)
   set_property(TARGET kodama_cpp PROPERTY CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
-  set_source_files_properties(src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu PROPERTIES LANGUAGE CUDA)
+  set_source_files_properties(src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/native_cuda_backend.cu PROPERTIES LANGUAGE CUDA)
 endif()
 
 include(GNUInstallDirs)
@@ -253,9 +193,9 @@ if(KODAMA_BUILD_EXAMPLES)
   target_link_libraries(kodama_native_backend_benchmark PRIVATE kodama_cpp)
   add_executable(kodama_backend_benchmark_bin benchmarks/run_kodama_backend_bin.cpp)
   target_link_libraries(kodama_backend_benchmark_bin PRIVATE kodama_cpp)
-  if(KODAMA_ENABLE_FAISS)
-    target_include_directories(kodama_core_sanity_bin PRIVATE ${FAISS_INCLUDE_DIR})
-    target_compile_definitions(kodama_core_sanity_bin PRIVATE KODAMA_ENABLE_FAISS=1)
+  if(KODAMA_ENABLE_CUDA)
+    add_executable(kodama_cuda_knn_benchmark benchmarks/run_cuda_knn_benchmark.cpp)
+    target_link_libraries(kodama_cuda_knn_benchmark PRIVATE kodama_cpp)
   endif()
   if(KODAMA_ENABLE_CUDA)
     target_compile_definitions(kodama_mnist70_sanity PRIVATE KODAMA_ENABLE_CUDA=1)

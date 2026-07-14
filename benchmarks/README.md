@@ -98,8 +98,11 @@ runtime
 peak memory
 ```
 
-The planned GPU benchmark should compare:
+The backend benchmark should compare:
 
-- FAISS CPU IVF-Flat
-- FAISS GPU IVF-Flat cosine / inner product
-- cuVS nearest-neighbour search where available in the CUDA build
+- package-owned CPU HNSW
+- package-owned CUDA exact and recall-tuned IVF-Flat search
+- native Metal exact and recall-tuned IVF-Flat search
+
+External FAISS/cuVS results may be reported as historical baselines, but are
+not build dependencies of the benchmarked library.

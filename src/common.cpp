@@ -39,11 +39,10 @@ const char* to_string(DistanceMetric metric) {
 const char* to_string(KNNIndexType index_type) {
   switch (index_type) {
     case KNNIndexType::NativeHNSW: return "native_hnsw";
+    case KNNIndexType::CudaExact: return "cuda_exact";
+    case KNNIndexType::CudaIVFFlat: return "cuda_ivf_flat";
     case KNNIndexType::MetalExact: return "metal_exact";
     case KNNIndexType::MetalIVFFlat: return "metal_ivf_flat";
-    case KNNIndexType::FaissIVFFlat: return "faiss_ivf_flat";
-    case KNNIndexType::FaissHNSWFlat: return "faiss_hnsw_flat";
-    case KNNIndexType::CuvsIVFFlat: return "cuvs_ivf_flat";
   }
   return "unknown";
 }

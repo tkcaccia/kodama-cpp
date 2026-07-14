@@ -19,20 +19,27 @@ The FAISS MIT license and Faiss-mlx Apache-2.0 license are retained in
 `licenses/FAISS-LICENSE` and `licenses/FAISS-MLX-LICENSE`. The Metal SIMPLS path is
 adapted from `fastPLS` and relicensed here under MIT by its copyright holder.
 
-CPU and Metal builds do not link FAISS, cuVS, fastEmbedR, fastPLS, or an R/Python
-runtime. Metal builds use only Apple system frameworks (Foundation, Metal, and Metal
-Performance Shaders).
+The package-owned CUDA exact search, IVF-Flat search, and k-means code in
+`src/native_cuda_backend.cu` is informed by the algorithmic organization of
+FAISS 1.14.3 (MIT), RAPIDS cuVS (Apache-2.0), and the native Metal work in
+`fastEmbedR`. No FAISS, cuVS, RAFT, or RMM source is copied or linked. The
+complete upstream license texts are retained in `licenses/FAISS-LICENSE` and
+`licenses/CUVS-LICENSE`.
+
+CPU, Metal, and CUDA numerical builds do not link FAISS, cuVS, fastEmbedR,
+fastPLS, or an R/Python runtime. Metal builds use only Apple system frameworks
+(Foundation, Metal, and Metal Performance Shaders). CUDA builds use CUDA
+Toolkit libraries.
 
 External runtime/build dependencies keep their own licenses:
 
-- optional FAISS CPU/GPU backends
 - CUDA Toolkit / cuBLAS / cuSOLVER / cuRAND / cuFFT
-- optional RAPIDS cuVS and cuGraph backends
+- optional RAPIDS cuGraph clustering adapter
 - OpenMP implementation used by the platform
 
-No FAISS or RAPIDS source or binary is copied into this repository. CUDA builds that
-enable those adapters link an installation supplied by the build environment. The cuVS
-Apache-2.0 license is retained in `licenses/CUVS-LICENSE` for those distributions.
+No external FAISS or cuVS binary is distributed with this repository. Builds
+that explicitly enable the optional cuGraph adapter link an installation
+supplied by the build environment.
 
 Distributors of binary packages should include the corresponding dependency
 license notices required by their packaging channel.

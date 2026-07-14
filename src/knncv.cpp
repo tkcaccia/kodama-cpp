@@ -1,5 +1,6 @@
 #include "common.hpp"
 #include "metal_backend.hpp"
+#include "native_cuda_backend.hpp"
 #include "native_knn.hpp"
 
 #include <algorithm>
@@ -9,24 +10,6 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
-
-#if defined(KODAMA_ENABLE_FAISS)
-#include <faiss/IndexFlat.h>
-#include <faiss/IndexHNSW.h>
-#include <faiss/IndexIVFFlat.h>
-#include <faiss/MetricType.h>
-#endif
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
-#if defined(KODAMA_ENABLE_CUDA)
-#include <faiss/gpu/GpuClonerOptions.h>
-#include <faiss/gpu/GpuIndexIVFFlat.h>
-#include <faiss/gpu/StandardGpuResources.h>
-#include <faiss/gpu/utils/DeviceUtils.h>
-#endif
 
 namespace kodama {
 
@@ -43,33 +26,6 @@ struct HNSWParameters {
   int ef_search = 150;
   int tune_k = 50;
   double target_recall = 0.99;
-};
-
-class OmpThreadScope {
- public:
-  explicit OmpThreadScope(int n_threads) {
-#ifdef _OPENMP
-    previous_ = omp_get_max_threads();
-    if (n_threads > 0) {
-      omp_set_num_threads(std::max(1, n_threads));
-    }
-#else
-    (void)n_threads;
-#endif
-  }
-
-  ~OmpThreadScope() {
-#ifdef _OPENMP
-    if (previous_ > 0) {
-      omp_set_num_threads(previous_);
-    }
-#endif
-  }
-
- private:
-#ifdef _OPENMP
-  int previous_ = 0;
-#endif
 };
 
 bool better_neighbor(const Neighbor& a, const Neighbor& b) {
@@ -127,7 +83,7 @@ HNSWParameters tune_hnsw_parameters(int n, int p, int k, DistanceMetric metric, 
   return out;
 }
 
-std::vector<float> make_faiss_matrix(
+std::vector<float> make_search_matrix(
   MatrixView x,
   const std::vector<int>& rows,
   DistanceMetric metric
@@ -170,115 +126,6 @@ int majority_vote(const std::vector<Neighbor>& neighbors) {
   }
   return best_label;
 }
-
-#if defined(KODAMA_ENABLE_FAISS)
-std::vector<int> knn_predict_faiss_ivf_flat_cpu(
-  MatrixView x,
-  const std::vector<int>& labels,
-  const std::vector<int>& train,
-  const std::vector<int>& validation,
-  int k,
-  DistanceMetric metric,
-  int requested_nlist,
-  int requested_nprobe,
-  int n_threads
-) {
-  if (train.empty()) throw std::runtime_error("KNN fold has no training samples.");
-  if (k < 1) throw std::invalid_argument("k must be positive.");
-  if (metric == DistanceMetric::Euclidean) {
-    throw std::invalid_argument("FAISS IVF CPU KNN currently supports cosine/inner product; use FAISS HNSW for euclidean.");
-  }
-  k = std::min(k, static_cast<int>(train.size()));
-  const std::vector<float> train_x = make_faiss_matrix(x, train, metric);
-  const std::vector<float> val_x = make_faiss_matrix(x, validation, metric);
-  const int d = static_cast<int>(x.cols);
-  int nlist = requested_nlist > 0 ? requested_nlist :
-    std::max(1, static_cast<int>(std::sqrt(static_cast<double>(train.size() / 4 + 1))));
-  if (requested_nlist <= 0 && train.size() < 1000) {
-    nlist = std::max(1, static_cast<int>(train.size() / 40));
-  }
-  nlist = std::min(nlist, static_cast<int>(train.size()));
-  faiss::IndexFlatIP quantizer(d);
-  faiss::IndexIVFFlat index(&quantizer, d, nlist, faiss::METRIC_INNER_PRODUCT);
-  index.nprobe = requested_nprobe > 0 ? requested_nprobe :
-    std::max<std::size_t>(1, std::min<std::size_t>(static_cast<std::size_t>(nlist), static_cast<std::size_t>(std::sqrt(static_cast<double>(nlist))) + 1));
-  index.nprobe = std::min<std::size_t>(index.nprobe, static_cast<std::size_t>(nlist));
-  index.train(train.size(), train_x.data());
-  index.add(train.size(), train_x.data());
-
-  std::vector<faiss::idx_t> idx(validation.size() * static_cast<std::size_t>(k), -1);
-  std::vector<float> scores(validation.size() * static_cast<std::size_t>(k), -std::numeric_limits<float>::infinity());
-  OmpThreadScope threads(n_threads);
-  index.search(validation.size(), val_x.data(), k, scores.data(), idx.data());
-
-  std::vector<int> pred(validation.size(), 0);
-  for (std::size_t qi = 0; qi < validation.size(); ++qi) {
-    std::vector<Neighbor> best;
-    best.reserve(static_cast<std::size_t>(k));
-    for (int j = 0; j < k; ++j) {
-      const auto id = idx[qi * static_cast<std::size_t>(k) + static_cast<std::size_t>(j)];
-      if (id < 0) continue;
-      best.push_back(Neighbor{
-        static_cast<double>(scores[qi * static_cast<std::size_t>(k) + static_cast<std::size_t>(j)]),
-        labels[static_cast<std::size_t>(train[static_cast<std::size_t>(id)])]
-      });
-    }
-    pred[qi] = best.empty() ? labels[static_cast<std::size_t>(train.front())] : majority_vote(best);
-  }
-  return pred;
-}
-
-std::vector<int> knn_predict_faiss_hnsw_flat_cpu(
-  MatrixView x,
-  const std::vector<int>& labels,
-  const std::vector<int>& train,
-  const std::vector<int>& validation,
-  int k,
-  DistanceMetric metric,
-  const KNNOptions& options,
-  HNSWParameters* used_params
-) {
-  if (train.empty()) throw std::runtime_error("KNN fold has no training samples.");
-  if (k < 1) throw std::invalid_argument("k must be positive.");
-  k = std::min(k, static_cast<int>(train.size()));
-  const std::vector<float> train_x = make_faiss_matrix(x, train, metric);
-  const std::vector<float> val_x = make_faiss_matrix(x, validation, metric);
-  const int d = static_cast<int>(x.cols);
-  HNSWParameters params = tune_hnsw_parameters(static_cast<int>(train.size()), d, k, metric, options);
-  if (used_params != nullptr) *used_params = params;
-
-  const faiss::MetricType faiss_metric = metric == DistanceMetric::Euclidean ?
-    faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
-  faiss::IndexHNSWFlat index(d, params.m, faiss_metric);
-  index.hnsw.efConstruction = params.ef_construction;
-  index.hnsw.efSearch = params.ef_search;
-  index.add(train.size(), train_x.data());
-
-  std::vector<faiss::idx_t> idx(validation.size() * static_cast<std::size_t>(k), -1);
-  std::vector<float> scores(validation.size() * static_cast<std::size_t>(k), -std::numeric_limits<float>::infinity());
-  OmpThreadScope threads(options.n_threads);
-  index.search(validation.size(), val_x.data(), k, scores.data(), idx.data());
-  if (metric == DistanceMetric::Euclidean) {
-    for (float& score : scores) score = -score;
-  }
-
-  std::vector<int> pred(validation.size(), 0);
-  for (std::size_t qi = 0; qi < validation.size(); ++qi) {
-    std::vector<Neighbor> best;
-    best.reserve(static_cast<std::size_t>(k));
-    for (int j = 0; j < k; ++j) {
-      const auto id = idx[qi * static_cast<std::size_t>(k) + static_cast<std::size_t>(j)];
-      if (id < 0) continue;
-      best.push_back(Neighbor{
-        static_cast<double>(scores[qi * static_cast<std::size_t>(k) + static_cast<std::size_t>(j)]),
-        labels[static_cast<std::size_t>(train[static_cast<std::size_t>(id)])]
-      });
-    }
-    pred[qi] = best.empty() ? labels[static_cast<std::size_t>(train.front())] : majority_vote(best);
-  }
-  return pred;
-}
-#endif
 
 std::vector<int> knn_predict_native_hnsw_cpu(
   MatrixView x,
@@ -390,8 +237,7 @@ std::vector<int> knn_predict_metal(
 }
 
 #if defined(KODAMA_ENABLE_CUDA)
-std::vector<int> knn_predict_faiss_ivf_flat_cuda(
-  faiss::gpu::StandardGpuResources& resources,
+std::vector<int> knn_predict_native_cuda(
   MatrixView x,
   const std::vector<int>& labels,
   const std::vector<int>& train,
@@ -400,45 +246,53 @@ std::vector<int> knn_predict_faiss_ivf_flat_cuda(
   DistanceMetric metric,
   int gpu_device,
   int nlist,
-  int nprobe
+  int nprobe,
+  bool exact,
+  detail::NativeCudaIVFStats* ivf_stats
 ) {
   if (train.empty()) throw std::runtime_error("KNN fold has no training samples.");
   if (k < 1) throw std::invalid_argument("k must be positive.");
   k = std::min(k, static_cast<int>(train.size()));
-  const std::vector<float> train_x = make_faiss_matrix(x, train, metric);
-  const std::vector<float> val_x = make_faiss_matrix(x, validation, metric);
+  const std::vector<float> train_x = make_search_matrix(x, train, metric);
+  const std::vector<float> val_x = make_search_matrix(x, validation, metric);
   const int d = static_cast<int>(x.cols);
-  nlist = nlist > 0 ? nlist : std::max(1, static_cast<int>(std::sqrt(static_cast<double>(train.size()))));
-  nlist = std::min(nlist, static_cast<int>(train.size()));
-  nprobe = nprobe > 0 ? nprobe : std::max(1, static_cast<int>(std::sqrt(static_cast<double>(nlist))) + 1);
-  nprobe = std::min(nprobe, nlist);
-
-  faiss::gpu::GpuIndexIVFFlatConfig config;
-  config.device = gpu_device;
-  const faiss::MetricType faiss_metric = metric == DistanceMetric::Euclidean ?
-    faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
-  faiss::gpu::GpuIndexIVFFlat index(&resources, d, nlist, faiss_metric, config);
-  index.train(train.size(), train_x.data());
-  index.add(train.size(), train_x.data());
-
-  std::vector<faiss::idx_t> idx(validation.size() * static_cast<std::size_t>(k), -1);
-  std::vector<float> scores(validation.size() * static_cast<std::size_t>(k), -std::numeric_limits<float>::infinity());
-  faiss::SearchParametersIVF search_params;
-  search_params.nprobe = static_cast<std::size_t>(nprobe);
-  index.search(validation.size(), val_x.data(), k, scores.data(), idx.data(), &search_params);
-  if (metric == DistanceMetric::Euclidean) {
-    for (float& score : scores) score = -score;
-  }
+  const detail::NativeKNNResult search = exact ?
+    detail::native_cuda_exact_knn_search(
+      train_x,
+      static_cast<int>(train.size()),
+      val_x,
+      static_cast<int>(validation.size()),
+      d,
+      k,
+      metric,
+      gpu_device
+    ) :
+    detail::native_cuda_ivf_knn_search(
+      train_x,
+      static_cast<int>(train.size()),
+      val_x,
+      static_cast<int>(validation.size()),
+      d,
+      k,
+      metric,
+      nlist,
+      nprobe,
+      0.99,
+      gpu_device,
+      {},
+      ivf_stats
+    );
 
   std::vector<int> pred(validation.size(), 0);
   for (std::size_t qi = 0; qi < validation.size(); ++qi) {
     std::vector<Neighbor> best;
-    best.reserve(static_cast<std::size_t>(k));
-    for (int j = 0; j < k; ++j) {
-      const auto id = idx[qi * static_cast<std::size_t>(k) + static_cast<std::size_t>(j)];
+    best.reserve(static_cast<std::size_t>(search.neighbors));
+    for (int j = 0; j < search.neighbors; ++j) {
+      const std::size_t offset = qi * static_cast<std::size_t>(search.neighbors) + static_cast<std::size_t>(j);
+      const int id = search.indices[offset];
       if (id < 0) continue;
       best.push_back(Neighbor{
-        static_cast<double>(scores[qi * static_cast<std::size_t>(k) + static_cast<std::size_t>(j)]),
+        static_cast<double>(detail::native_knn_score(search.distances[offset], metric)),
         labels[static_cast<std::size_t>(train[static_cast<std::size_t>(id)])]
       });
     }
@@ -471,18 +325,20 @@ KNNParametersUsed resolve_knn_parameters(const KNNOptions& options) {
 #else
     throw std::runtime_error("Metal KNNCV backend was requested but this build was not compiled with KODAMA_ENABLE_METAL.");
 #endif
-  } else if (options.backend == Backend::CUDA || options.index_type == KNNIndexType::CuvsIVFFlat) {
+  } else if (options.backend == Backend::CUDA || options.index_type == KNNIndexType::CudaExact ||
+             options.index_type == KNNIndexType::CudaIVFFlat) {
 #if defined(KODAMA_ENABLE_CUDA)
     used.backend = Backend::CUDA;
-    used.index_type = options.index_type;
+    used.index_type = options.index_type == KNNIndexType::CudaExact ?
+      KNNIndexType::CudaExact : KNNIndexType::CudaIVFFlat;
 #else
     throw std::runtime_error("CUDA KNNCV backend was requested but this build was not compiled with KODAMA_ENABLE_CUDA.");
 #endif
   } else {
     used.backend = Backend::CPU;
     used.index_type = options.index_type;
-    if (used.index_type == KNNIndexType::CuvsIVFFlat || used.index_type == KNNIndexType::MetalExact ||
-        used.index_type == KNNIndexType::MetalIVFFlat) {
+    if (used.index_type == KNNIndexType::CudaExact || used.index_type == KNNIndexType::CudaIVFFlat ||
+        used.index_type == KNNIndexType::MetalExact || used.index_type == KNNIndexType::MetalIVFFlat) {
       used.index_type = KNNIndexType::NativeHNSW;
     }
   }
@@ -522,62 +378,23 @@ KNNCVResult KNNCV_CPU(
     const std::vector<int> validation = detail::indices_where_fold(result.fold_assignments, fold, true);
     const std::vector<int> train = detail::indices_where_fold(result.fold_assignments, fold, false);
     std::vector<int> fold_pred;
-    if (result.parameters.index_type == KNNIndexType::FaissIVFFlat) {
-#if defined(KODAMA_ENABLE_FAISS)
-      fold_pred = knn_predict_faiss_ivf_flat_cpu(
-        x,
-        labels,
-        train,
-        validation,
-        result.parameters.k,
-        result.parameters.metric,
-        result.parameters.ivf_nlist,
-        result.parameters.ivf_nprobe,
-        result.parameters.n_threads
-      );
-#else
-      throw std::runtime_error("KNNIndexType::FaissIVFFlat requires a build with KODAMA_ENABLE_FAISS=ON.");
-#endif
-    } else if (result.parameters.index_type == KNNIndexType::FaissHNSWFlat) {
-#if defined(KODAMA_ENABLE_FAISS)
-      HNSWParameters hnsw_params;
-      fold_pred = knn_predict_faiss_hnsw_flat_cpu(
-        x,
-        labels,
-        train,
-        validation,
-        result.parameters.k,
-        result.parameters.metric,
-        options,
-        &hnsw_params
-      );
-      result.parameters.hnsw_m = hnsw_params.m;
-      result.parameters.hnsw_ef_construction = hnsw_params.ef_construction;
-      result.parameters.hnsw_ef_search = hnsw_params.ef_search;
-      result.parameters.hnsw_tune_k = hnsw_params.tune_k;
-      result.parameters.hnsw_target_recall = hnsw_params.target_recall;
-#else
-      throw std::runtime_error("KNNIndexType::FaissHNSWFlat requires a build with KODAMA_ENABLE_FAISS=ON.");
-#endif
-    } else {
-      HNSWParameters hnsw_params;
-      fold_pred = knn_predict_native_hnsw_cpu(
-        x,
-        labels,
-        train,
-        validation,
-        result.parameters.k,
-        result.parameters.metric,
-        options,
-        &hnsw_params
-      );
-      result.parameters.index_type = KNNIndexType::NativeHNSW;
-      result.parameters.hnsw_m = hnsw_params.m;
-      result.parameters.hnsw_ef_construction = hnsw_params.ef_construction;
-      result.parameters.hnsw_ef_search = hnsw_params.ef_search;
-      result.parameters.hnsw_tune_k = hnsw_params.tune_k;
-      result.parameters.hnsw_target_recall = hnsw_params.target_recall;
-    }
+    HNSWParameters hnsw_params;
+    fold_pred = knn_predict_native_hnsw_cpu(
+      x,
+      labels,
+      train,
+      validation,
+      result.parameters.k,
+      result.parameters.metric,
+      options,
+      &hnsw_params
+    );
+    result.parameters.index_type = KNNIndexType::NativeHNSW;
+    result.parameters.hnsw_m = hnsw_params.m;
+    result.parameters.hnsw_ef_construction = hnsw_params.ef_construction;
+    result.parameters.hnsw_ef_search = hnsw_params.ef_search;
+    result.parameters.hnsw_tune_k = hnsw_params.tune_k;
+    result.parameters.hnsw_target_recall = hnsw_params.target_recall;
     for (std::size_t i = 0; i < validation.size(); ++i) {
       result.predicted_labels[static_cast<std::size_t>(validation[i])] = fold_pred[i];
     }
@@ -613,15 +430,15 @@ KNNCVResult KNNCV_CUDA(
   result.predicted_labels.assign(labels.size(), 0);
   result.fold_assignments = detail::make_folds(labels, constrain, cuda_options.cv);
   result.parameters = resolve_knn_parameters(cuda_options);
-  result.parameters.index_type = KNNIndexType::FaissIVFFlat;
+  result.parameters.index_type = cuda_options.index_type == KNNIndexType::CudaExact ?
+    KNNIndexType::CudaExact : KNNIndexType::CudaIVFFlat;
 
   const std::vector<int> fold_ids = detail::sorted_unique_folds(result.fold_assignments);
-  faiss::gpu::StandardGpuResources resources;
   for (int fold : fold_ids) {
     const std::vector<int> validation = detail::indices_where_fold(result.fold_assignments, fold, true);
     const std::vector<int> train = detail::indices_where_fold(result.fold_assignments, fold, false);
-    std::vector<int> fold_pred = knn_predict_faiss_ivf_flat_cuda(
-      resources,
+    detail::NativeCudaIVFStats ivf_stats;
+    std::vector<int> fold_pred = knn_predict_native_cuda(
       x,
       labels,
       train,
@@ -629,9 +446,17 @@ KNNCVResult KNNCV_CUDA(
       result.parameters.k,
       result.parameters.metric,
       result.parameters.gpu_device,
-      result.parameters.ivf_nlist,
-      result.parameters.ivf_nprobe
+      cuda_options.ivf_nlist,
+      cuda_options.ivf_nprobe,
+      result.parameters.index_type == KNNIndexType::CudaExact,
+      &ivf_stats
     );
+    if (result.parameters.index_type == KNNIndexType::CudaIVFFlat) {
+      result.parameters.ivf_nlist = ivf_stats.nlist;
+      result.parameters.ivf_nprobe = std::max(result.parameters.ivf_nprobe, ivf_stats.nprobe);
+      result.parameters.ivf_pilot_recall = result.parameters.ivf_pilot_recall == 0.0 ?
+        ivf_stats.pilot_recall : std::min(result.parameters.ivf_pilot_recall, ivf_stats.pilot_recall);
+    }
     for (std::size_t i = 0; i < validation.size(); ++i) {
       result.predicted_labels[static_cast<std::size_t>(validation[i])] = fold_pred[i];
     }
@@ -653,7 +478,7 @@ KNNCVResult KNNCV_CUDA(
   (void)labels;
   (void)constrain;
   (void)options;
-  throw std::runtime_error("KNNCV_CUDA requires a CUDA/FAISS GPU build.");
+  throw std::runtime_error("KNNCV_CUDA requires a CUDA build.");
 #endif
 }
 

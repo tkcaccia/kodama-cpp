@@ -1,5 +1,6 @@
 #include "kodama/kodama.hpp"
 #include "metal_backend.hpp"
+#include "native_cuda_backend.hpp"
 #include "native_knn.hpp"
 #include "spatial_grid_knn.hpp"
 
@@ -22,9 +23,6 @@
 
 #ifdef KODAMA_ENABLE_CUDA
 #include "kodama_matrix_cuda.hpp"
-
-#include <faiss/gpu/GpuIndexFlat.h>
-#include <faiss/gpu/StandardGpuResources.h>
 #endif
 
 #ifdef KODAMA_ENABLE_CUGRAPH
@@ -1108,33 +1106,27 @@ NeighborGraph KODAMAKNNGraph_CUDA(MatrixView x, const GraphClusterOptions& optio
     }
     return detail::spatial_grid_self_knn(data.data(), n, d, k, options.n_threads, true);
   }
-  const faiss::MetricType faiss_metric = options.metric == DistanceMetric::Euclidean ? faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
   if (options.metric == DistanceMetric::Cosine) normalize_rows(data, x.rows, x.cols);
-  faiss::gpu::StandardGpuResources resources;
-  faiss::gpu::GpuIndexFlatConfig config;
-  config.device = options.gpu_device;
-  faiss::gpu::GpuIndexFlat index(&resources, d, faiss_metric, config);
-  index.add(n, data.data());
-  const int search_k = std::min(n, k + 1);
-  std::vector<float> distances(static_cast<std::size_t>(n) * search_k);
-  std::vector<faiss::idx_t> idx(static_cast<std::size_t>(n) * search_k);
-  index.search(n, data.data(), search_k, distances.data(), idx.data());
+  std::vector<int> exclusions(static_cast<std::size_t>(n));
+  std::iota(exclusions.begin(), exclusions.end(), 0);
+  const detail::NativeKNNResult search = detail::native_cuda_exact_knn_search(
+    data,
+    n,
+    data,
+    n,
+    d,
+    k,
+    options.metric,
+    options.gpu_device,
+    exclusions
+  );
   NeighborGraph out;
-  out.neighbors = k;
-  out.indices.assign(static_cast<std::size_t>(n) * k, -1);
-  out.distances.assign(static_cast<std::size_t>(n) * k, std::numeric_limits<float>::infinity());
-  for (int i = 0; i < n; ++i) {
-    int kept = 0;
-    for (int j = 0; j < search_k && kept < k; ++j) {
-      const int nb = static_cast<int>(idx[static_cast<std::size_t>(i) * search_k + j]);
-      if (nb < 0 || nb == i) continue;
-      float dist = distances[static_cast<std::size_t>(i) * search_k + j];
-      dist = options.metric == DistanceMetric::Euclidean ? (dist > 0.0f ? std::sqrt(dist) : 0.0f) : 1.0f - dist;
-      const std::size_t off = static_cast<std::size_t>(i) * k + kept;
-      out.indices[off] = nb + 1;
-      out.distances[off] = dist;
-      ++kept;
-    }
+  out.neighbors = search.neighbors;
+  out.indices = search.indices;
+  out.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
+  for (std::size_t i = 0; i < out.indices.size(); ++i) {
+    if (out.indices[i] >= 0) ++out.indices[i];
+    out.distances[i] = detail::native_knn_output_distance(search.distances[i], options.metric);
   }
   return out;
 #else

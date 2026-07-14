@@ -22,11 +22,10 @@ enum class DistanceMetric {
 
 enum class KNNIndexType {
   NativeHNSW,
+  CudaExact,
+  CudaIVFFlat,
   MetalExact,
-  MetalIVFFlat,
-  FaissIVFFlat,
-  FaissHNSWFlat,
-  CuvsIVFFlat
+  MetalIVFFlat
 };
 
 enum class PLSMode {

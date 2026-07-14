@@ -179,9 +179,8 @@ Step timing highlights for auto:
 | MERFISH | 32.033 | 0.190 | 0.016 | 0.445 | 0.018 | 45.569 |
 | Br8100 | 20.001 | 0.098 | 0.009 | 0.187 | 0.005 | 25.073 |
 
-Next GPU traffic target: the full input matrix is still supplied to FAISS
-k-means from host memory in each M run. FAISS GPU indices can consume device
-pointers, but FAISS `Clustering` still performs centroid updates at the host
-algorithm level, so true matrix residency for landmark k-means should be done
-as a dedicated cuVS/custom GPU k-means path rather than by passing a device
-pointer into the current FAISS clustering call.
+Accepted follow-up: CUDA KNN and landmark initialization now use the
+package-owned float32 implementation in `src/native_cuda_backend.cu`.
+It supplies exact search, recall-tuned IVF-Flat search, and GPU k-means without
+FAISS/cuVS/RAFT/RMM runtime links. A clean CUDA 13 build passed both CTest
+suites, and a linked-soname audit found none of those libraries.
