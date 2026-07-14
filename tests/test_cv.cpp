@@ -173,7 +173,7 @@ int main() {
   check_constrained_folds(d.constrain, kres.fold_assignments);
   require(kres.global_accuracy > 0.95, "KNNCV accuracy unexpectedly low.");
   require(kres.confusion.n_labels == 3, "KNNCV confusion matrix label count mismatch.");
-  require(kres.parameters.index_type == kodama::KNNIndexType::FaissHNSWFlat, "KNNCV CPU did not use FAISS HNSW by default.");
+  require(kres.parameters.index_type == kodama::KNNIndexType::NativeHNSW, "KNNCV CPU did not use native HNSW by default.");
   require(kres.parameters.hnsw_tune_k == 50, "KNNCV CPU HNSW tune k was not 50.");
   require(std::abs(kres.parameters.hnsw_target_recall - 0.99) < 1e-12, "KNNCV CPU HNSW target recall was not 0.99.");
   require(kres.parameters.hnsw_m > 0, "KNNCV CPU HNSW m was not recorded.");
@@ -238,21 +238,6 @@ int main() {
   kodama::PLSCVResult fdispatch_lres = kodama::PLSLDACV(fview, d.y, d.constrain, pls);
   check_pls_result(fdispatch_lres, d.y, d.constrain, 4);
   require(fdispatch_lres.global_accuracy > 0.60, "Float32 generic PLS-LDA accuracy unexpectedly low.");
-
-  kodama::PLSCVResult ckres = kodama::PLSCKNNCV(view, d.y, d.constrain, pls);
-  check_pls_result(ckres, d.y, d.constrain, 4);
-  require(ckres.parameters.mode == kodama::PLSMode::PLS_CKNN, "PLS-cKNN did not report cKNN mode.");
-  require(ckres.global_accuracy > 0.60, "PLS-cKNN accuracy unexpectedly low.");
-
-  kodama::PLSCVResult fckres = kodama::PLSCKNNCV_CPU(fview, d.y, d.constrain, pls);
-  check_pls_result(fckres, d.y, d.constrain, 4);
-  require(fckres.parameters.mode == kodama::PLSMode::PLS_CKNN, "Float32 PLS-cKNN did not report cKNN mode.");
-  require(fckres.global_accuracy > 0.60, "Float32 PLS-cKNN accuracy unexpectedly low.");
-
-  kodama::PLSCVResult fdispatch_ckres = kodama::PLSCKNNCV(fview, d.y, d.constrain, pls);
-  check_pls_result(fdispatch_ckres, d.y, d.constrain, 4);
-  require(fdispatch_ckres.parameters.mode == kodama::PLSMode::PLS_CKNN, "Float32 generic PLS-cKNN did not report cKNN mode.");
-  require(fdispatch_ckres.global_accuracy > 0.60, "Float32 generic PLS-cKNN accuracy unexpectedly low.");
 
   std::vector<int> noisy = make_noisy_labels(d.y);
   const double initial_agreement = direct_agreement(noisy, d.y);
@@ -480,17 +465,6 @@ int main() {
   require(float_cuda_lres.parameters.backend == kodama::Backend::CUDA, "Float32 CUDA PLS-LDA did not report CUDA backend.");
   check_pls_result(float_cuda_lres, d.y, d.constrain, 4);
   require(float_cuda_lres.global_accuracy > 0.60, "Float32 CUDA PLS-LDA accuracy unexpectedly low.");
-  kodama::PLSCVResult cuda_ckres = kodama::PLSCKNNCV_CUDA(view, d.y, d.constrain, cuda_pls);
-  require(cuda_ckres.parameters.backend == kodama::Backend::CUDA, "CUDA PLS-cKNN did not report CUDA backend.");
-  require(cuda_ckres.parameters.mode == kodama::PLSMode::PLS_CKNN, "CUDA PLS-cKNN did not report cKNN mode.");
-  check_pls_result(cuda_ckres, d.y, d.constrain, 4);
-  require(cuda_ckres.global_accuracy > 0.60, "CUDA PLS-cKNN accuracy unexpectedly low.");
-  kodama::PLSCVResult float_cuda_ckres = kodama::PLSCKNNCV_CUDA(fview, d.y, d.constrain, cuda_pls);
-  require(float_cuda_ckres.parameters.backend == kodama::Backend::CUDA, "Float32 CUDA PLS-cKNN did not report CUDA backend.");
-  require(float_cuda_ckres.parameters.mode == kodama::PLSMode::PLS_CKNN, "Float32 CUDA PLS-cKNN did not report cKNN mode.");
-  check_pls_result(float_cuda_ckres, d.y, d.constrain, 4);
-  require(float_cuda_ckres.global_accuracy > 0.60, "Float32 CUDA PLS-cKNN accuracy unexpectedly low.");
-
   kodama::CoreOptions cuda_core_pls = core_pls;
   cuda_core_pls.pls.backend = kodama::Backend::CUDA;
   kodama::CoreResult cuda_core_lres = kodama::CorePLSLDA_CUDA(fview, noisy, d.constrain, fixed, cuda_core_pls);
@@ -506,6 +480,39 @@ int main() {
   require(cuda_core_kres.clbest.size() == noisy.size(), "Float32 CUDA Core KNN clbest size mismatch.");
   require(cuda_core_kres.cycles_completed >= 1, "Float32 CUDA Core KNN did not run any cycles.");
   require(cuda_core_kres.accbest >= initial_knn_acc, "Float32 CUDA Core KNN decreased best CV accuracy.");
+#endif
+
+#if defined(KODAMA_ENABLE_METAL)
+  require(kodama::MetalAvailable(), "Metal build did not find an Apple Metal device.");
+  kodama::KNNOptions metal_knn = knn;
+  metal_knn.backend = kodama::Backend::Metal;
+  metal_knn.index_type = kodama::KNNIndexType::MetalExact;
+  kodama::KNNCVResult metal_kres = kodama::KNNCV_METAL(fview, d.y, d.constrain, metal_knn);
+  require(metal_kres.parameters.backend == kodama::Backend::Metal, "Metal KNNCV did not report Metal backend.");
+  require(metal_kres.parameters.index_type == kodama::KNNIndexType::MetalExact, "Metal KNNCV did not report exact Metal search.");
+  check_constrained_folds(d.constrain, metal_kres.fold_assignments);
+  require(metal_kres.global_accuracy > 0.95, "Metal KNNCV accuracy unexpectedly low.");
+
+  kodama::PLSOptions metal_pls = pls;
+  metal_pls.backend = kodama::Backend::Metal;
+  kodama::PLSCVResult metal_lres = kodama::PLSLDACV_METAL(fview, d.y, d.constrain, metal_pls);
+  require(metal_lres.parameters.backend == kodama::Backend::Metal, "Metal PLS-LDA did not report Metal backend.");
+  check_pls_result(metal_lres, d.y, d.constrain, 4);
+  require(metal_lres.global_accuracy > 0.60, "Metal PLS-LDA accuracy unexpectedly low.");
+  require(std::abs(metal_lres.global_accuracy - flres.global_accuracy) < 0.10, "Metal PLS-LDA diverged from CPU accuracy.");
+
+  kodama::CoreOptions metal_core_knn = core_knn;
+  metal_core_knn.knn.backend = kodama::Backend::Metal;
+  metal_core_knn.knn.index_type = kodama::KNNIndexType::MetalExact;
+  kodama::CoreResult metal_core_kres = kodama::CoreKNN_METAL(fview, noisy, d.constrain, fixed, metal_core_knn);
+  require(metal_core_kres.clbest.size() == noisy.size(), "Metal Core KNN clbest size mismatch.");
+  require(metal_core_kres.cycles_completed >= 1, "Metal Core KNN did not run any cycles.");
+
+  kodama::CoreOptions metal_core_pls = core_pls;
+  metal_core_pls.pls.backend = kodama::Backend::Metal;
+  kodama::CoreResult metal_core_lres = kodama::CorePLSLDA_METAL(fview, noisy, d.constrain, fixed, metal_core_pls);
+  require(metal_core_lres.clbest.size() == noisy.size(), "Metal Core PLS-LDA clbest size mismatch.");
+  require(metal_core_lres.cycles_completed >= 1, "Metal Core PLS-LDA did not run any cycles.");
 #endif
 
   std::cout << "All kodama-cpp CV tests passed.\n";

@@ -10,7 +10,8 @@ namespace kodama {
 enum class Backend {
   Auto,
   CPU,
-  CUDA
+  CUDA,
+  Metal
 };
 
 enum class DistanceMetric {
@@ -20,6 +21,9 @@ enum class DistanceMetric {
 };
 
 enum class KNNIndexType {
+  NativeHNSW,
+  MetalExact,
+  MetalIVFFlat,
   FaissIVFFlat,
   FaissHNSWFlat,
   CuvsIVFFlat
@@ -27,8 +31,7 @@ enum class KNNIndexType {
 
 enum class PLSMode {
   PLS_DA,
-  PLS_LDA,
-  PLS_CKNN
+  PLS_LDA
 };
 
 enum class CoreClassifier {
@@ -100,7 +103,7 @@ struct KNNOptions {
   int k = 10;
   DistanceMetric metric = DistanceMetric::Cosine;
   Backend backend = Backend::CPU;
-  KNNIndexType index_type = KNNIndexType::FaissHNSWFlat;
+  KNNIndexType index_type = KNNIndexType::NativeHNSW;
   int ivf_nlist = 0;
   int ivf_nprobe = 0;
   int hnsw_m = 0;
@@ -116,10 +119,6 @@ struct PLSOptions {
   FoldOptions cv;
   int max_components = 10;
   int fixed_components = 0;
-  int cknn_k = 3;
-  int cknn_top_m = 20;
-  double cknn_tau = 0.2;
-  double cknn_alpha = 0.5;
   bool center = true;
   bool scale = true;
   Backend backend = Backend::CPU;
@@ -184,11 +183,12 @@ struct ConfusionMatrix {
 
 struct KNNParametersUsed {
   Backend backend = Backend::CPU;
-  KNNIndexType index_type = KNNIndexType::FaissHNSWFlat;
+  KNNIndexType index_type = KNNIndexType::NativeHNSW;
   DistanceMetric metric = DistanceMetric::Cosine;
   int k = 10;
   int ivf_nlist = 0;
   int ivf_nprobe = 0;
+  double ivf_pilot_recall = 0.0;
   int hnsw_m = 0;
   int hnsw_ef_construction = 0;
   int hnsw_ef_search = 0;
@@ -216,10 +216,6 @@ struct PLSParametersUsed {
   int max_components = 10;
   int selected_components = 1;
   int fixed_components = 0;
-  int cknn_k = 3;
-  int cknn_top_m = 20;
-  double cknn_tau = 0.2;
-  double cknn_alpha = 0.5;
   bool center = true;
   bool scale = true;
   int gpu_device = 0;
@@ -349,6 +345,7 @@ struct KODAMAMatrixResult {
   int samples = 0;
   int cycles = 0;
   int n_threads = 1;
+  Backend backend = Backend::CPU;
   bool gpu_auto_workers = false;
   bool gpu_scheduler_enabled = false;
   int gpu_scheduler_lanes = 0;
@@ -433,6 +430,13 @@ KNNCVResult KNNCV_CUDA(
   const KNNOptions& options = KNNOptions()
 );
 
+KNNCVResult KNNCV_METAL(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const KNNOptions& options = KNNOptions()
+);
+
 PLSCVResult PLSDACV(
   MatrixView x,
   const std::vector<int>& labels,
@@ -441,13 +445,6 @@ PLSCVResult PLSDACV(
 );
 
 PLSCVResult PLSLDACV(
-  MatrixView x,
-  const std::vector<int>& labels,
-  const std::vector<int>& constrain,
-  const PLSOptions& options = PLSOptions()
-);
-
-PLSCVResult PLSCKNNCV(
   MatrixView x,
   const std::vector<int>& labels,
   const std::vector<int>& constrain,
@@ -468,13 +465,6 @@ PLSCVResult PLSLDACV_CPU(
   const PLSOptions& options = PLSOptions()
 );
 
-PLSCVResult PLSCKNNCV_CPU(
-  MatrixView x,
-  const std::vector<int>& labels,
-  const std::vector<int>& constrain,
-  const PLSOptions& options = PLSOptions()
-);
-
 PLSCVResult PLSDACV_CUDA(
   MatrixView x,
   const std::vector<int>& labels,
@@ -489,7 +479,7 @@ PLSCVResult PLSLDACV_CUDA(
   const PLSOptions& options = PLSOptions()
 );
 
-PLSCVResult PLSCKNNCV_CUDA(
+PLSCVResult PLSLDACV_METAL(
   MatrixView x,
   const std::vector<int>& labels,
   const std::vector<int>& constrain,
@@ -504,6 +494,13 @@ std::vector<int> PLSLDAPredict_CPU(
 );
 
 std::vector<int> PLSLDAPredict_CUDA(
+  MatrixView train,
+  const std::vector<int>& labels,
+  MatrixView test,
+  const PLSOptions& options = PLSOptions()
+);
+
+std::vector<int> PLSLDAPredict_METAL(
   MatrixView train,
   const std::vector<int>& labels,
   MatrixView test,
@@ -573,6 +570,22 @@ CoreResult CoreKNN_CUDA(
   const CoreOptions& options = CoreOptions()
 );
 
+CoreResult CorePLSLDA_METAL(
+  MatrixView x,
+  const std::vector<int>& clbest,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const CoreOptions& options = CoreOptions()
+);
+
+CoreResult CoreKNN_METAL(
+  MatrixView x,
+  const std::vector<int>& clbest,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const CoreOptions& options = CoreOptions()
+);
+
 CoreResult CoreKNNGraph_CPU(
   const NeighborGraph& graph,
   int samples,
@@ -599,6 +612,14 @@ KODAMAMatrixResult KODAMAMatrix_CPU(
 );
 
 KODAMAMatrixResult KODAMAMatrix_CUDA(
+  MatrixView x,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrix_METAL(
   MatrixView x,
   const std::vector<int>& starting_labels = std::vector<int>(),
   const std::vector<int>& constrain = std::vector<int>(),
@@ -647,6 +668,15 @@ KODAMAMatrixResult KODAMAMatrixFromGraphData_CUDA(
   const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
 );
 
+KODAMAMatrixResult KODAMAMatrixFromGraphData_METAL(
+  MatrixView x,
+  const NeighborGraph& graph,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
 KODAMAMatrixResult KODAMAMatrixFromGraphData(
   MatrixView x,
   const NeighborGraph& graph,
@@ -657,6 +687,15 @@ KODAMAMatrixResult KODAMAMatrixFromGraphData(
 );
 
 KODAMAMatrixResult KODAMAMatrixFromGraph_CUDA(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrixFromGraph_METAL(
   const NeighborGraph& graph,
   int samples,
   const std::vector<int>& starting_labels = std::vector<int>(),
@@ -704,6 +743,11 @@ NeighborGraph KODAMAKNNGraph_CUDA(
   const GraphClusterOptions& options = GraphClusterOptions()
 );
 
+NeighborGraph KODAMAKNNGraph_METAL(
+  MatrixView x,
+  const GraphClusterOptions& options = GraphClusterOptions()
+);
+
 NeighborGraph KODAMAKNNGraph(
   MatrixView x,
   const GraphClusterOptions& options = GraphClusterOptions()
@@ -746,5 +790,6 @@ const char* to_string(CoreClassifier classifier);
 const char* to_string(GraphWeightType weight_type);
 const char* to_string(GraphClusterMethod method);
 const char* to_string(GraphFeatureMode mode);
+bool MetalAvailable();
 
 }  // namespace kodama

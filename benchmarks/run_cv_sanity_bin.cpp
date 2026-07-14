@@ -90,6 +90,7 @@ BenchRow run_knn(const std::string& dataset, const std::string& name, const std:
        << ";index=" << kodama::to_string(result.parameters.index_type)
        << ";nlist=" << result.parameters.ivf_nlist
        << ";nprobe=" << result.parameters.ivf_nprobe
+       << ";pilot_recall=" << result.parameters.ivf_pilot_recall
        << ";hnsw_m=" << result.parameters.hnsw_m
        << ";hnsw_ef_construction=" << result.parameters.hnsw_ef_construction
        << ";hnsw_ef_search=" << result.parameters.hnsw_ef_search
@@ -271,6 +272,22 @@ int main(int argc, char** argv) {
       return kodama::KNNCV_CUDA(view, y, constrain, opt);
     }));
   }
+  if (method_enabled("KNNCV_METAL") && kodama::MetalAvailable()) {
+    record(run_knn(dataset, "KNNCV_METAL", "metal", [&] {
+      kodama::KNNOptions opt = knn;
+      opt.backend = kodama::Backend::Metal;
+      opt.index_type = kodama::KNNIndexType::MetalExact;
+      return kodama::KNNCV_METAL(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled("KNNCV_METAL_IVF") && kodama::MetalAvailable()) {
+    record(run_knn(dataset, "KNNCV_METAL_IVF", "metal", [&] {
+      kodama::KNNOptions opt = knn;
+      opt.backend = kodama::Backend::Metal;
+      opt.index_type = kodama::KNNIndexType::MetalIVFFlat;
+      return kodama::KNNCV_METAL(view, y, constrain, opt);
+    }));
+  }
   if (method_enabled("PLSDACV_CPU")) {
     record(run_pls(dataset, "PLSDACV_CPU", "cpu", [&] {
       kodama::PLSOptions opt = pls;
@@ -299,6 +316,13 @@ int main(int argc, char** argv) {
       opt.backend = kodama::Backend::CUDA;
       opt.gpu_device = 0;
       return kodama::PLSLDACV_CUDA(view, y, constrain, opt);
+    }));
+  }
+  if (method_enabled("PLSLDACV_METAL") && kodama::MetalAvailable()) {
+    record(run_pls(dataset, "PLSLDACV_METAL", "metal", [&] {
+      kodama::PLSOptions opt = pls;
+      opt.backend = kodama::Backend::Metal;
+      return kodama::PLSLDACV_METAL(view, y, constrain, opt);
     }));
   }
   return 0;

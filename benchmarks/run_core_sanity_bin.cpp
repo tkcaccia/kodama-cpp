@@ -5,12 +5,11 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include <faiss/IndexFlat.h>
 
 #include "kodama/kodama.hpp"
 
@@ -161,17 +160,36 @@ std::vector<int> kmeans_labels(const std::vector<Real>& x, int n, int p, int k) 
                 sample_x.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(p));
   }
 
-  std::vector<faiss::idx_t> assign(static_cast<std::size_t>(sample_n), -1);
-  std::vector<float> dist(static_cast<std::size_t>(sample_n), 0.0f);
+  auto nearest_centroid = [&](const float* point) {
+    int best = 0;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (int c = 0; c < k; ++c) {
+      const float* center = centers.data() + static_cast<std::size_t>(c) * static_cast<std::size_t>(p);
+      double distance = 0.0;
+      for (int j = 0; j < p; ++j) {
+        const double delta = static_cast<double>(point[j]) - static_cast<double>(center[j]);
+        distance += delta * delta;
+      }
+      if (distance < best_distance || (distance == best_distance && c < best)) {
+        best = c;
+        best_distance = distance;
+      }
+    }
+    return best;
+  };
+
+  std::vector<int> assign(static_cast<std::size_t>(sample_n), -1);
   for (int iter = 0; iter < 12; ++iter) {
-    faiss::IndexFlatL2 index(p);
-    index.add(k, centers.data());
-    index.search(sample_n, sample_x.data(), 1, dist.data(), assign.data());
+    for (int i = 0; i < sample_n; ++i) {
+      assign[static_cast<std::size_t>(i)] = nearest_centroid(
+        sample_x.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(p)
+      );
+    }
 
     std::vector<float> next(centers.size(), 0.0f);
     std::vector<int> counts(static_cast<std::size_t>(k), 0);
     for (int i = 0; i < sample_n; ++i) {
-      const int c = static_cast<int>(assign[static_cast<std::size_t>(i)]);
+      const int c = assign[static_cast<std::size_t>(i)];
       if (c < 0) continue;
       counts[static_cast<std::size_t>(c)]++;
       float* dst = next.data() + static_cast<std::size_t>(c) * static_cast<std::size_t>(p);
@@ -190,14 +208,12 @@ std::vector<int> kmeans_labels(const std::vector<Real>& x, int n, int p, int k) 
     centers.swap(next);
   }
 
-  faiss::IndexFlatL2 centroids(p);
-  centroids.add(k, centers.data());
-  std::vector<faiss::idx_t> idx(static_cast<std::size_t>(n), -1);
-  std::vector<float> full_dist(static_cast<std::size_t>(n), 0.0f);
-  centroids.search(n, xf.data(), 1, full_dist.data(), idx.data());
-
   std::vector<int> out(static_cast<std::size_t>(n), 1);
-  for (int i = 0; i < n; ++i) out[static_cast<std::size_t>(i)] = static_cast<int>(idx[static_cast<std::size_t>(i)]) + 1;
+  for (int i = 0; i < n; ++i) {
+    out[static_cast<std::size_t>(i)] = nearest_centroid(
+      xf.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(p)
+    ) + 1;
+  }
   return out;
 }
 

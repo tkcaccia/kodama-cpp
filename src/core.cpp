@@ -1,4 +1,6 @@
 #include "common.hpp"
+#include "metal_backend.hpp"
+#include "native_knn.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,10 +12,12 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(KODAMA_ENABLE_FAISS)
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexIVFFlat.h>
 #include <faiss/MetricType.h>
+#endif
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -291,9 +295,15 @@ void initialize_knn_label_map(KNNPredictionScratch& scratch, const std::vector<i
 
 KNNParametersUsed resolve_core_knn_parameters(const KNNOptions& options) {
   KNNParametersUsed used;
-  used.backend = Backend::CPU;
-  used.index_type = options.index_type == KNNIndexType::FaissIVFFlat ?
-    KNNIndexType::FaissIVFFlat : KNNIndexType::FaissHNSWFlat;
+  used.backend = options.backend == Backend::Metal ? Backend::Metal : Backend::CPU;
+  used.index_type = options.backend == Backend::Metal ?
+    (options.index_type == KNNIndexType::MetalIVFFlat ? KNNIndexType::MetalIVFFlat : KNNIndexType::MetalExact) :
+    options.index_type;
+  if (used.backend == Backend::CPU &&
+      (used.index_type == KNNIndexType::CuvsIVFFlat || used.index_type == KNNIndexType::MetalExact ||
+       used.index_type == KNNIndexType::MetalIVFFlat)) {
+    used.index_type = KNNIndexType::NativeHNSW;
+  }
   used.metric = options.metric;
   used.k = options.k;
   used.ivf_nlist = options.ivf_nlist;
@@ -316,7 +326,7 @@ PrecomputedKNN precompute_knn_cv_cpu(
 ) {
   if (options.k < 1) throw std::invalid_argument("KNNOptions::k must be positive.");
   if (options.backend == Backend::CUDA) {
-    throw std::invalid_argument("CoreKNN precomputed-neighbor mode currently supports CPU FAISS KNN.");
+    throw std::invalid_argument("CoreKNN CPU/Metal precomputation cannot be used with the CUDA backend.");
   }
 
   PrecomputedKNN precomputed;
@@ -335,9 +345,54 @@ PrecomputedKNN precompute_knn_cv_cpu(
     gather_faiss_rows(all_x, x.cols, train, train_x);
     gather_faiss_rows(all_x, x.cols, validation, val_x);
     const int d = static_cast<int>(x.cols);
-    std::vector<faiss::idx_t> idx(validation.size() * static_cast<std::size_t>(k), -1);
+    std::vector<int> idx(validation.size() * static_cast<std::size_t>(k), -1);
     std::vector<float> scores(validation.size() * static_cast<std::size_t>(k), -std::numeric_limits<float>::infinity());
-    if (precomputed.parameters.index_type == KNNIndexType::FaissIVFFlat) {
+    if (precomputed.parameters.index_type == KNNIndexType::MetalExact ||
+        precomputed.parameters.index_type == KNNIndexType::MetalIVFFlat) {
+#if defined(KODAMA_ENABLE_METAL)
+      detail::MetalIVFStats ivf_stats;
+      const detail::NativeKNNResult metal =
+        precomputed.parameters.index_type == KNNIndexType::MetalIVFFlat ?
+          detail::metal_ivf_knn_search(
+            train_x,
+            static_cast<int>(train.size()),
+            val_x,
+            static_cast<int>(validation.size()),
+            d,
+            k,
+            precomputed.parameters.metric,
+            options.ivf_nlist,
+            options.ivf_nprobe,
+            {},
+            &ivf_stats
+          ) :
+          detail::metal_exact_knn_search(
+            train_x,
+            static_cast<int>(train.size()),
+            val_x,
+            static_cast<int>(validation.size()),
+            d,
+            k,
+            precomputed.parameters.metric
+          );
+      if (precomputed.parameters.index_type == KNNIndexType::MetalIVFFlat) {
+        precomputed.parameters.ivf_nlist = ivf_stats.nlist;
+        precomputed.parameters.ivf_nprobe = std::max(precomputed.parameters.ivf_nprobe, ivf_stats.nprobe);
+        precomputed.parameters.ivf_pilot_recall = std::min(
+          precomputed.parameters.ivf_pilot_recall == 0.0 ? 1.0 : precomputed.parameters.ivf_pilot_recall,
+          ivf_stats.pilot_recall
+        );
+      }
+      idx = metal.indices;
+      scores.resize(metal.distances.size());
+      for (std::size_t i = 0; i < scores.size(); ++i) {
+        scores[i] = detail::native_knn_score(metal.distances[i], precomputed.parameters.metric);
+      }
+#else
+      throw std::runtime_error("CoreKNN Metal backend requires KODAMA_ENABLE_METAL.");
+#endif
+    } else if (precomputed.parameters.index_type == KNNIndexType::FaissIVFFlat) {
+#if defined(KODAMA_ENABLE_FAISS)
       if (precomputed.parameters.metric == DistanceMetric::Euclidean) {
         throw std::invalid_argument("FAISS IVF CPU KNN currently supports cosine/inner product; use FAISS HNSW for euclidean.");
       }
@@ -355,8 +410,14 @@ PrecomputedKNN precompute_knn_cv_cpu(
       index.train(train.size(), train_x.data());
       index.add(train.size(), train_x.data());
       OmpThreadScope threads(precomputed.parameters.n_threads);
-      index.search(validation.size(), val_x.data(), k, scores.data(), idx.data());
-    } else {
+      std::vector<faiss::idx_t> faiss_idx(idx.size(), -1);
+      index.search(validation.size(), val_x.data(), k, scores.data(), faiss_idx.data());
+      for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int>(faiss_idx[i]);
+#else
+      throw std::runtime_error("KNNIndexType::FaissIVFFlat requires a build with KODAMA_ENABLE_FAISS=ON.");
+#endif
+    } else if (precomputed.parameters.index_type == KNNIndexType::FaissHNSWFlat) {
+#if defined(KODAMA_ENABLE_FAISS)
       const HNSWParameters hnsw = tune_hnsw_parameters(static_cast<int>(train.size()), d, k, options);
       precomputed.parameters.hnsw_m = hnsw.m;
       precomputed.parameters.hnsw_ef_construction = hnsw.ef_construction;
@@ -370,9 +431,38 @@ PrecomputedKNN precompute_knn_cv_cpu(
       index.hnsw.efSearch = hnsw.ef_search;
       index.add(train.size(), train_x.data());
       OmpThreadScope threads(precomputed.parameters.n_threads);
-      index.search(validation.size(), val_x.data(), k, scores.data(), idx.data());
+      std::vector<faiss::idx_t> faiss_idx(idx.size(), -1);
+      index.search(validation.size(), val_x.data(), k, scores.data(), faiss_idx.data());
+      for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int>(faiss_idx[i]);
       if (precomputed.parameters.metric == DistanceMetric::Euclidean) {
         for (float& score : scores) score = -score;
+      }
+#else
+      throw std::runtime_error("KNNIndexType::FaissHNSWFlat requires a build with KODAMA_ENABLE_FAISS=ON.");
+#endif
+    } else {
+      const HNSWParameters hnsw = tune_hnsw_parameters(static_cast<int>(train.size()), d, k, options);
+      precomputed.parameters.index_type = KNNIndexType::NativeHNSW;
+      precomputed.parameters.hnsw_m = hnsw.m;
+      precomputed.parameters.hnsw_ef_construction = hnsw.ef_construction;
+      precomputed.parameters.hnsw_ef_search = hnsw.ef_search;
+      precomputed.parameters.hnsw_tune_k = hnsw.tune_k;
+      precomputed.parameters.hnsw_target_recall = hnsw.target_recall;
+      const detail::NativeKNNResult native = detail::native_hnsw_search(
+        train_x,
+        static_cast<int>(train.size()),
+        val_x,
+        static_cast<int>(validation.size()),
+        d,
+        k,
+        precomputed.parameters.metric,
+        detail::NativeHNSWParameters{hnsw.m, hnsw.ef_construction, hnsw.ef_search},
+        precomputed.parameters.n_threads
+      );
+      idx = native.indices;
+      scores.resize(native.distances.size());
+      for (std::size_t i = 0; i < scores.size(); ++i) {
+        scores[i] = detail::native_knn_score(native.distances[i], precomputed.parameters.metric);
       }
     }
 
@@ -1273,6 +1363,32 @@ CoreResult CorePLSLDA_CUDA(
 #endif
 }
 
+CoreResult CorePLSLDA_METAL(
+  MatrixView x,
+  const std::vector<int>& initial_clbest,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const CoreOptions& options
+) {
+#if defined(KODAMA_ENABLE_METAL)
+  CoreOptions metal_options = options;
+  metal_options.classifier = CoreClassifier::PLS_LDA;
+  metal_options.pls.backend = Backend::Metal;
+  const PLSOptions cv_options = to_plslda_cv_options(metal_options.pls, Backend::Metal);
+  return maximize_core(x, initial_clbest, constrain, fixed, metal_options, [&](const std::vector<int>& labels) {
+    PLSCVResult cv = PLSLDACV_METAL(x, labels, constrain, cv_options);
+    return CVPrediction{cv.predicted_labels, cv.runtime_seconds, cv.peak_memory_mb};
+  });
+#else
+  (void)x;
+  (void)initial_clbest;
+  (void)constrain;
+  (void)fixed;
+  (void)options;
+  throw std::runtime_error("CorePLSLDA_METAL requires an Apple Metal build.");
+#endif
+}
+
 CoreResult CoreKNN_CUDA(
   MatrixView x,
   const std::vector<int>& initial_clbest,
@@ -1301,6 +1417,42 @@ CoreResult CoreKNN_CUDA(
 #endif
 }
 
+CoreResult CoreKNN_METAL(
+  MatrixView x,
+  const std::vector<int>& initial_clbest,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const CoreOptions& options
+) {
+#if defined(KODAMA_ENABLE_METAL)
+  CoreOptions metal_options = options;
+  metal_options.classifier = CoreClassifier::KNN;
+  metal_options.knn.backend = Backend::Metal;
+  if (metal_options.knn.index_type != KNNIndexType::MetalIVFFlat) {
+    metal_options.knn.index_type = KNNIndexType::MetalExact;
+  }
+  detail::validate_inputs(x, initial_clbest, constrain);
+  const PrecomputedKNN precomputed = precompute_knn_cv_cpu(
+    x,
+    initial_clbest,
+    constrain,
+    metal_options.knn
+  );
+  KNNPredictionScratch scratch;
+  initialize_knn_label_map(scratch, initial_clbest);
+  return maximize_core(x, initial_clbest, constrain, fixed, metal_options, [&](const std::vector<int>& labels) {
+    return predict_precomputed_knn(precomputed, labels, scratch);
+  });
+#else
+  (void)x;
+  (void)initial_clbest;
+  (void)constrain;
+  (void)fixed;
+  (void)options;
+  throw std::runtime_error("CoreKNN_METAL requires an Apple Metal build.");
+#endif
+}
+
 CoreResult CorePLSLDA(
   MatrixView x,
   const std::vector<int>& initial_clbest,
@@ -1309,6 +1461,7 @@ CoreResult CorePLSLDA(
   const CoreOptions& options
 ) {
   if (options.pls.backend == Backend::CUDA) return CorePLSLDA_CUDA(x, initial_clbest, constrain, fixed, options);
+  if (options.pls.backend == Backend::Metal) return CorePLSLDA_METAL(x, initial_clbest, constrain, fixed, options);
   return CorePLSLDA_CPU(x, initial_clbest, constrain, fixed, options);
 }
 
@@ -1320,6 +1473,7 @@ CoreResult CoreKNN(
   const CoreOptions& options
 ) {
   if (options.knn.backend == Backend::CUDA) return CoreKNN_CUDA(x, initial_clbest, constrain, fixed, options);
+  if (options.knn.backend == Backend::Metal) return CoreKNN_METAL(x, initial_clbest, constrain, fixed, options);
   return CoreKNN_CPU(x, initial_clbest, constrain, fixed, options);
 }
 

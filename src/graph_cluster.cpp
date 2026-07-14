@@ -1,4 +1,6 @@
 #include "kodama/kodama.hpp"
+#include "metal_backend.hpp"
+#include "native_knn.hpp"
 #include "spatial_grid_knn.hpp"
 
 #include <algorithm>
@@ -13,9 +15,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#include <faiss/IndexFlat.h>
-#include <faiss/IndexHNSW.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -94,41 +93,69 @@ NeighborGraph build_hnsw_graph(MatrixView x, const GraphClusterOptions& options)
   const int n = static_cast<int>(x.rows);
   const int d = static_cast<int>(x.cols);
   const int k = std::max(1, std::min(options.k, n - 1));
-  std::vector<float> data = copy_float32(x);
-  const faiss::MetricType faiss_metric = options.metric == DistanceMetric::Euclidean ? faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
-  if (options.metric == DistanceMetric::Cosine) normalize_rows(data, x.rows, x.cols);
-
-  faiss::IndexHNSWFlat index(d, std::min(32, std::max(1, n - 1)), faiss_metric);
-  index.hnsw.efConstruction = 200;
-  index.hnsw.efSearch = std::max(150, k + 1);
-  index.add(n, data.data());
-
-  const int search_k = std::min(n, k + 1);
-  std::vector<float> distances(static_cast<std::size_t>(n) * search_k);
-  std::vector<faiss::idx_t> idx(static_cast<std::size_t>(n) * search_k);
-  OmpScope scope(options.n_threads);
-  index.search(n, data.data(), search_k, distances.data(), idx.data());
+  const std::vector<float> data = detail::prepare_native_matrix(x, options.metric);
+  std::vector<int> self_indices(static_cast<std::size_t>(n));
+  std::iota(self_indices.begin(), self_indices.end(), 0);
+  const detail::NativeKNNResult search = detail::native_hnsw_search(
+    data,
+    n,
+    data,
+    n,
+    d,
+    k,
+    options.metric,
+    detail::NativeHNSWParameters{
+      std::min(32, std::max(2, n - 1)),
+      200,
+      std::max(150, k + 1)
+    },
+    options.n_threads,
+    self_indices
+  );
 
   NeighborGraph out;
   out.neighbors = k;
   out.indices.assign(static_cast<std::size_t>(n) * k, -1);
   out.distances.assign(static_cast<std::size_t>(n) * k, std::numeric_limits<float>::infinity());
   for (int i = 0; i < n; ++i) {
-    int kept = 0;
-    for (int j = 0; j < search_k && kept < k; ++j) {
-      const int nb = static_cast<int>(idx[static_cast<std::size_t>(i) * search_k + j]);
+    for (int j = 0; j < search.neighbors; ++j) {
+      const std::size_t pos = static_cast<std::size_t>(i) * static_cast<std::size_t>(search.neighbors) + static_cast<std::size_t>(j);
+      const int nb = search.indices[pos];
       if (nb < 0 || nb == i) continue;
-      float dist = distances[static_cast<std::size_t>(i) * search_k + j];
-      if (options.metric == DistanceMetric::Cosine || options.metric == DistanceMetric::InnerProduct) {
-        dist = 1.0f - dist;
-      } else {
-        dist = dist > 0.0f ? std::sqrt(dist) : 0.0f;
-      }
-      const std::size_t off = static_cast<std::size_t>(i) * k + kept;
+      const std::size_t off = static_cast<std::size_t>(i) * static_cast<std::size_t>(k) + static_cast<std::size_t>(j);
       out.indices[off] = nb + 1;
-      out.distances[off] = dist;
-      ++kept;
+      out.distances[off] = detail::native_knn_output_distance(search.distances[pos], options.metric);
     }
+  }
+  return out;
+}
+
+NeighborGraph build_metal_graph(MatrixView x, const GraphClusterOptions& options) {
+  if (x.rows < 2 || x.cols < 1) throw std::invalid_argument("KODAMAKNNGraph requires at least two rows.");
+  const int n = static_cast<int>(x.rows);
+  const int d = static_cast<int>(x.cols);
+  const int k = std::max(1, std::min(options.k, n - 1));
+  const std::vector<float> data = detail::prepare_native_matrix(x, options.metric);
+  std::vector<int> self_indices(static_cast<std::size_t>(n));
+  std::iota(self_indices.begin(), self_indices.end(), 0);
+  const detail::NativeKNNResult search = detail::metal_exact_knn_search(
+    data,
+    n,
+    data,
+    n,
+    d,
+    k,
+    options.metric,
+    self_indices
+  );
+
+  NeighborGraph out;
+  out.neighbors = search.neighbors;
+  out.indices.resize(search.indices.size(), -1);
+  out.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
+  for (std::size_t i = 0; i < search.indices.size(); ++i) {
+    if (search.indices[i] >= 0) out.indices[i] = search.indices[i] + 1;
+    out.distances[i] = detail::native_knn_output_distance(search.distances[i], options.metric);
   }
   return out;
 }
@@ -1117,8 +1144,22 @@ NeighborGraph KODAMAKNNGraph_CUDA(MatrixView x, const GraphClusterOptions& optio
 #endif
 }
 
+NeighborGraph KODAMAKNNGraph_METAL(MatrixView x, const GraphClusterOptions& options) {
+#ifdef KODAMA_ENABLE_METAL
+  GraphClusterOptions opts = options;
+  opts.backend = Backend::Metal;
+  return build_metal_graph(x, opts);
+#else
+  (void)x;
+  (void)options;
+  throw std::runtime_error("KODAMAKNNGraph_METAL requires an Apple Metal build.");
+#endif
+}
+
 NeighborGraph KODAMAKNNGraph(MatrixView x, const GraphClusterOptions& options) {
-  return options.backend == Backend::CUDA ? KODAMAKNNGraph_CUDA(x, options) : KODAMAKNNGraph_CPU(x, options);
+  if (options.backend == Backend::CUDA) return KODAMAKNNGraph_CUDA(x, options);
+  if (options.backend == Backend::Metal) return KODAMAKNNGraph_METAL(x, options);
+  return KODAMAKNNGraph_CPU(x, options);
 }
 
 GraphClusterResult KODAMAGraphCluster_CPU(const NeighborGraph& graph, int samples, const GraphClusterOptions& options) {
@@ -1149,7 +1190,11 @@ GraphClusterResult KODAMAGraphCluster_CUDA(const NeighborGraph& graph, int sampl
 }
 
 GraphClusterResult KODAMAGraphCluster(const NeighborGraph& graph, int samples, const GraphClusterOptions& options) {
-  return options.backend == Backend::CUDA ? KODAMAGraphCluster_CUDA(graph, samples, options) : KODAMAGraphCluster_CPU(graph, samples, options);
+  if (options.backend == Backend::CUDA) return KODAMAGraphCluster_CUDA(graph, samples, options);
+  if (options.backend == Backend::Metal) {
+    throw std::runtime_error("Metal graph clustering is not implemented; use Backend::CPU explicitly.");
+  }
+  return KODAMAGraphCluster_CPU(graph, samples, options);
 }
 
 GraphClusterResult KODAMAEmbeddingGraphCluster(MatrixView embedding, const NeighborGraph& graph, const GraphClusterOptions& options) {
@@ -1160,6 +1205,9 @@ GraphClusterResult KODAMAEmbeddingGraphCluster(MatrixView embedding, const Neigh
   const int samples = static_cast<int>(embedding.rows);
   if (samples < 2) throw std::invalid_argument("KODAMAEmbeddingCluster requires at least two rows.");
   GraphClusterOptions opts = options;
+  if (opts.backend == Backend::Metal) {
+    throw std::runtime_error("Metal graph clustering is not implemented; use Backend::CPU explicitly.");
+  }
   EdgeList edges = edge_list_from_graph(graph, samples, opts);
   if (opts.target_clusters > 0) bridge_embedding_components(edges, embedding);
   GraphClusterResult out;

@@ -1,4 +1,6 @@
 #include "common.hpp"
+#include "metal_backend.hpp"
+#include "native_knn.hpp"
 #include "spatial_grid_knn.hpp"
 
 #include <algorithm>
@@ -16,15 +18,13 @@
 #include <unordered_map>
 #include <vector>
 
-#include <faiss/Clustering.h>
-#include <faiss/IndexHNSW.h>
-#include <faiss/IndexFlat.h>
-#include <faiss/MetricType.h>
-
 #ifdef KODAMA_ENABLE_CUDA
 #include "kodama_matrix_cuda.hpp"
 
 #include <cuda_runtime.h>
+#include <faiss/Clustering.h>
+#include <faiss/IndexFlat.h>
+#include <faiss/MetricType.h>
 #include <faiss/gpu/GpuIndexFlat.h>
 #include <faiss/gpu/StandardGpuResources.h>
 #endif
@@ -164,36 +164,44 @@ NeighborGraph hnsw_graph(
   int dim,
   int neighbors,
   DistanceMetric metric,
-  int n_threads
+  int n_threads,
+  bool self_search = false,
+  bool include_self = true
 ) {
   if (n_base < 1 || n_query < 1 || dim < 1) throw std::invalid_argument("HNSW graph input is empty.");
   neighbors = std::max(1, std::min(neighbors, n_base));
   std::vector<float> xb = base;
   std::vector<float> xq = query;
-  const faiss::MetricType faiss_metric = metric == DistanceMetric::Euclidean ? faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
   if (metric == DistanceMetric::Cosine) {
     normalize_rows_for_cosine(xb, static_cast<std::size_t>(n_base), static_cast<std::size_t>(dim));
     normalize_rows_for_cosine(xq, static_cast<std::size_t>(n_query), static_cast<std::size_t>(dim));
   }
 
-  const int m = std::min(32, std::max(1, n_base > 1 ? n_base - 1 : 1));
-  faiss::IndexHNSWFlat index(dim, m, faiss_metric);
-  index.hnsw.efConstruction = std::max(200, m);
-  index.hnsw.efSearch = std::max(150, neighbors);
-  index.add(n_base, xb.data());
+  std::vector<int> query_train_indices;
+  if (self_search && !include_self) {
+    query_train_indices.resize(static_cast<std::size_t>(n_query));
+    std::iota(query_train_indices.begin(), query_train_indices.end(), 0);
+  }
+  const int m = std::min(32, std::max(2, n_base > 1 ? n_base - 1 : 2));
+  const detail::NativeKNNResult search = detail::native_hnsw_search(
+    xb,
+    n_base,
+    xq,
+    n_query,
+    dim,
+    neighbors,
+    metric,
+    detail::NativeHNSWParameters{m, std::max(200, m), std::max(150, neighbors)},
+    n_threads,
+    query_train_indices
+  );
 
   NeighborGraph graph;
-  graph.neighbors = neighbors;
-  graph.indices.assign(static_cast<std::size_t>(n_query) * neighbors, -1);
-  graph.distances.assign(static_cast<std::size_t>(n_query) * neighbors, std::numeric_limits<float>::infinity());
-  std::vector<faiss::idx_t> idx(static_cast<std::size_t>(n_query) * neighbors, -1);
-  OmpThreadScope threads(n_threads);
-  index.search(n_query, xq.data(), neighbors, graph.distances.data(), idx.data());
-  for (std::size_t i = 0; i < idx.size(); ++i) graph.indices[i] = static_cast<int>(idx[i]);
-  if (metric == DistanceMetric::Cosine || metric == DistanceMetric::InnerProduct) {
-    for (float& d : graph.distances) d = 1.0f - d;
-  } else {
-    for (float& d : graph.distances) d = d > 0.0f ? std::sqrt(d) : 0.0f;
+  graph.neighbors = search.neighbors;
+  graph.indices = search.indices;
+  graph.distances.resize(search.distances.size());
+  for (std::size_t i = 0; i < search.distances.size(); ++i) {
+    graph.distances[i] = detail::native_knn_output_distance(search.distances[i], metric);
   }
   return graph;
 }
@@ -248,28 +256,73 @@ NeighborGraph self_knn_graph(
   int neighbors,
   DistanceMetric metric,
   int n_threads,
-  bool use_gpu,
+  Backend backend,
   int gpu_device,
-  bool include_self
+  bool include_self,
+  KNNIndexType metal_index_type,
+  int metal_ivf_nlist,
+  int metal_ivf_nprobe
 ) {
-  if (detail::should_use_spatial_grid_knn(n, dim, metric)) {
+  if (backend != Backend::Metal && detail::should_use_spatial_grid_knn(n, dim, metric)) {
 #if defined(KODAMA_ENABLE_CUDA)
-    if (use_gpu && neighbors <= 256) {
+    if (backend == Backend::CUDA && neighbors <= 256) {
       return detail::spatial_grid_self_knn_cuda(data, n, dim, neighbors, gpu_device, false, include_self);
     }
 #else
-    (void)use_gpu;
     (void)gpu_device;
 #endif
     return detail::spatial_grid_self_knn(data.data(), n, dim, neighbors, n_threads, false, include_self);
   }
 #if defined(KODAMA_ENABLE_CUDA)
-  if (use_gpu) return faiss_gpu_flat_graph(data, data, n, n, dim, neighbors, metric, gpu_device);
+  if (backend == Backend::CUDA) return faiss_gpu_flat_graph(data, data, n, n, dim, neighbors, metric, gpu_device);
 #else
-  (void)use_gpu;
   (void)gpu_device;
 #endif
-  return hnsw_graph(data, data, n, n, dim, neighbors, metric, n_threads);
+  if (backend == Backend::Metal) {
+#if defined(KODAMA_ENABLE_METAL)
+    std::vector<float> prepared = data;
+    if (metric == DistanceMetric::Cosine) normalize_rows_for_cosine(prepared, n, dim);
+    std::vector<int> exclusions;
+    if (!include_self) {
+      exclusions.resize(static_cast<std::size_t>(n));
+      std::iota(exclusions.begin(), exclusions.end(), 0);
+    }
+    const detail::NativeKNNResult search = metal_index_type == KNNIndexType::MetalIVFFlat ?
+      detail::metal_ivf_knn_search(
+        prepared,
+        n,
+        prepared,
+        n,
+        dim,
+        neighbors,
+        metric,
+        metal_ivf_nlist,
+        metal_ivf_nprobe,
+        exclusions
+      ) :
+      detail::metal_exact_knn_search(
+        prepared,
+        n,
+        prepared,
+        n,
+        dim,
+        neighbors,
+        metric,
+        exclusions
+      );
+    NeighborGraph graph;
+    graph.neighbors = search.neighbors;
+    graph.indices = search.indices;
+    graph.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
+    for (std::size_t i = 0; i < search.distances.size(); ++i) {
+      graph.distances[i] = detail::native_knn_output_distance(search.distances[i], metric);
+    }
+    return graph;
+#else
+    throw std::runtime_error("KODAMA Metal graph construction requires an Apple Metal build.");
+#endif
+  }
+  return hnsw_graph(data, data, n, n, dim, neighbors, metric, n_threads, true, include_self);
 }
 
 std::vector<int> kmeans_labels(
@@ -280,33 +333,24 @@ std::vector<int> kmeans_labels(
   std::mt19937_64& rng,
   int max_iter = 10,
   int n_threads = 1,
-  bool use_gpu = false,
+  Backend backend = Backend::CPU,
   int gpu_device = 0
 ) {
   k = std::max(1, std::min(k, n));
 
-  faiss::ClusteringParameters cp;
-  cp.niter = std::max(1, max_iter);
-  cp.nredo = 1;
-  cp.verbose = false;
-  cp.spherical = false;
-  cp.seed = static_cast<int>(rng() & 0x7fffffffULL);
-  cp.min_points_per_centroid = 1;
-  cp.max_points_per_centroid = std::max(
-    256,
-    static_cast<int>((static_cast<long long>(n) + k - 1) / k)
-  );
-  std::vector<float> distances(static_cast<std::size_t>(n), 0.0f);
-  std::vector<faiss::idx_t> idx(static_cast<std::size_t>(n), -1);
-  auto train_and_assign = [&](faiss::Index& train_index, faiss::Index& assign_index) {
-    faiss::Clustering clustering(p, k, cp);
-    clustering.train(n, x.data(), train_index);
-    assign_index.add(k, clustering.centroids.data());
-    assign_index.search(n, x.data(), 1, distances.data(), idx.data());
-  };
-
 #ifdef KODAMA_ENABLE_CUDA
-  if (use_gpu) {
+  if (backend == Backend::CUDA) {
+    faiss::ClusteringParameters cp;
+    cp.niter = std::max(1, max_iter);
+    cp.nredo = 1;
+    cp.verbose = false;
+    cp.spherical = false;
+    cp.seed = static_cast<int>(rng() & 0x7fffffffULL);
+    cp.min_points_per_centroid = 1;
+    cp.max_points_per_centroid = std::max(
+      256,
+      static_cast<int>((static_cast<long long>(n) + k - 1) / k)
+    );
     thread_local std::unique_ptr<faiss::gpu::StandardGpuResources> resources;
     thread_local int resources_device = -1;
     if (!resources || resources_device != gpu_device) {
@@ -317,26 +361,95 @@ std::vector<int> kmeans_labels(
     config.device = gpu_device;
     faiss::gpu::GpuIndexFlatL2 train_index(resources.get(), p, config);
     faiss::gpu::GpuIndexFlatL2 assign_index(resources.get(), p, config);
-    train_and_assign(train_index, assign_index);
-  } else
+    faiss::Clustering clustering(p, k, cp);
+    clustering.train(n, x.data(), train_index);
+    assign_index.add(k, clustering.centroids.data());
+    std::vector<float> distances(static_cast<std::size_t>(n), 0.0f);
+    std::vector<faiss::idx_t> idx(static_cast<std::size_t>(n), -1);
+    assign_index.search(n, x.data(), 1, distances.data(), idx.data());
+    std::vector<int> labels(static_cast<std::size_t>(n), 1);
+    for (int i = 0; i < n; ++i) {
+      const faiss::idx_t label = idx[static_cast<std::size_t>(i)];
+      if (label < 0 || label >= k) throw std::runtime_error("FAISS k-means returned an invalid cluster label.");
+      labels[static_cast<std::size_t>(i)] = static_cast<int>(label) + 1;
+    }
+    return labels;
+  }
 #else
-  (void)use_gpu;
   (void)gpu_device;
 #endif
-  {
-    OmpThreadScope threads(n_threads);
-    faiss::IndexFlatL2 train_index(p);
-    faiss::IndexFlatL2 assign_index(p);
-    train_and_assign(train_index, assign_index);
+
+  std::vector<int> order(static_cast<std::size_t>(n));
+  std::iota(order.begin(), order.end(), 0);
+  std::shuffle(order.begin(), order.end(), rng);
+  if (backend == Backend::Metal) {
+#if defined(KODAMA_ENABLE_METAL)
+    return detail::metal_kmeans_labels(x, n, p, k, order, std::max(1, max_iter));
+#else
+    throw std::runtime_error("KODAMA Metal k-means requires an Apple Metal build.");
+#endif
+  }
+  std::vector<float> centroids(static_cast<std::size_t>(k) * static_cast<std::size_t>(p), 0.0f);
+  for (int cluster = 0; cluster < k; ++cluster) {
+    std::copy_n(
+      x.data() + static_cast<std::size_t>(order[static_cast<std::size_t>(cluster)]) * static_cast<std::size_t>(p),
+      p,
+      centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p)
+    );
   }
 
   std::vector<int> labels(static_cast<std::size_t>(n), 1);
-  for (int i = 0; i < n; ++i) {
-    const faiss::idx_t label = idx[static_cast<std::size_t>(i)];
-    if (label < 0 || label >= k) {
-      throw std::runtime_error("FAISS k-means returned an invalid cluster label.");
+  std::vector<int> previous(static_cast<std::size_t>(n), -1);
+  std::vector<double> sums(static_cast<std::size_t>(k) * static_cast<std::size_t>(p), 0.0);
+  std::vector<int> counts(static_cast<std::size_t>(k), 0);
+  OmpThreadScope threads(n_threads);
+  for (int iteration = 0; iteration < std::max(1, max_iter); ++iteration) {
+    std::atomic<int> changed{0};
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int row = 0; row < n; ++row) {
+      int best_cluster = 0;
+      double best_distance = std::numeric_limits<double>::infinity();
+      const float* point = x.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(p);
+      for (int cluster = 0; cluster < k; ++cluster) {
+        const float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
+        double distance = 0.0;
+        for (int feature = 0; feature < p; ++feature) {
+          const double delta = static_cast<double>(point[feature]) - static_cast<double>(centroid[feature]);
+          distance += delta * delta;
+        }
+        if (distance < best_distance || (distance == best_distance && cluster < best_cluster)) {
+          best_distance = distance;
+          best_cluster = cluster;
+        }
+      }
+      labels[static_cast<std::size_t>(row)] = best_cluster + 1;
+      if (previous[static_cast<std::size_t>(row)] != best_cluster) changed.fetch_add(1, std::memory_order_relaxed);
     }
-    labels[static_cast<std::size_t>(i)] = static_cast<int>(label) + 1;
+
+    std::fill(sums.begin(), sums.end(), 0.0);
+    std::fill(counts.begin(), counts.end(), 0);
+    for (int row = 0; row < n; ++row) {
+      const int cluster = labels[static_cast<std::size_t>(row)] - 1;
+      ++counts[static_cast<std::size_t>(cluster)];
+      const float* point = x.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(p);
+      double* sum = sums.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
+      for (int feature = 0; feature < p; ++feature) sum[feature] += point[feature];
+      previous[static_cast<std::size_t>(row)] = cluster;
+    }
+    for (int cluster = 0; cluster < k; ++cluster) {
+      float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
+      if (counts[static_cast<std::size_t>(cluster)] == 0) {
+        const int replacement = order[static_cast<std::size_t>((cluster + iteration) % n)];
+        std::copy_n(x.data() + static_cast<std::size_t>(replacement) * static_cast<std::size_t>(p), p, centroid);
+        continue;
+      }
+      const double scale = 1.0 / static_cast<double>(counts[static_cast<std::size_t>(cluster)]);
+      const double* sum = sums.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
+      for (int feature = 0; feature < p; ++feature) centroid[feature] = static_cast<float>(sum[feature] * scale);
+    }
+    if (changed.load(std::memory_order_relaxed) == 0) break;
   }
   return labels;
 }
@@ -422,7 +535,7 @@ std::vector<int> spatial_graph_components(
   int dims,
   int target_components,
   int n_threads,
-  bool use_gpu,
+  Backend backend,
   int gpu_device
 ) {
   target_components = std::max(1, std::min(target_components, n));
@@ -439,9 +552,12 @@ std::vector<int> spatial_graph_components(
     k,
     DistanceMetric::Euclidean,
     n_threads,
-    use_gpu,
+    backend,
     gpu_device,
-    true
+    true,
+    KNNIndexType::MetalExact,
+    0,
+    0
   );
   struct Edge {
     float distance;
@@ -489,7 +605,9 @@ std::vector<float> spatial_jitter_from_graph(
   int n,
   int dims,
   int neighbors,
-  int n_threads
+  int n_threads,
+  Backend backend,
+  int gpu_device
 ) {
   const int k = std::max(1, std::min(neighbors, n));
   NeighborGraph graph = self_knn_graph(
@@ -499,9 +617,12 @@ std::vector<float> spatial_jitter_from_graph(
     k,
     DistanceMetric::Euclidean,
     n_threads,
-    false,
+    backend,
+    gpu_device,
+    true,
+    KNNIndexType::MetalExact,
     0,
-    true
+    0
   );
   const int far_col = std::min(19, graph.neighbors - 1);
   std::vector<double> sums(static_cast<std::size_t>(dims), 0.0);
@@ -1159,7 +1280,6 @@ IterationResult run_iteration(
     std::cerr << "[kodama] M " << run_id << "/" << options.runs
               << " landmark k-means with " << landmarks << " centers" << std::endl;
   }
-  const bool kmeans_on_gpu = options.backend == Backend::CUDA;
   const int kmeans_gpu_device = options.knn.gpu_device;
   const std::vector<int> landmark_clusters = kmeans_labels(
     full_float,
@@ -1169,7 +1289,7 @@ IterationResult run_iteration(
     rng,
     10,
     options.n_threads,
-    kmeans_on_gpu,
+    options.backend,
     kmeans_gpu_device
   );
   if (options.progress) {
@@ -1198,7 +1318,7 @@ IterationResult run_iteration(
         spatial_dims,
         nspatialclusters,
         options.n_threads,
-        kmeans_on_gpu,
+        options.backend,
         kmeans_gpu_device
       );
     } else {
@@ -1210,7 +1330,7 @@ IterationResult run_iteration(
         rng,
         10,
         options.n_threads,
-        kmeans_on_gpu,
+        options.backend,
         kmeans_gpu_device
       );
     }
@@ -1271,7 +1391,7 @@ IterationResult run_iteration(
       rng,
       10,
       options.n_threads,
-      kmeans_on_gpu,
+      options.backend,
       kmeans_gpu_device
     );
     scratch.xw = run_constrain_is_identity ? scratch.init : constrained_majority(scratch.init, scratch.x_constrain);
@@ -1287,7 +1407,7 @@ IterationResult run_iteration(
   core.auto_class_coarsening = options.classifier == CoreClassifier::PLS_LDA;
   core.many_to_one_absorption = true;
   core.knn = options.knn;
-  core.knn.backend = options.backend == Backend::CUDA ? Backend::CUDA : Backend::CPU;
+  core.knn.backend = options.backend;
   core.knn.metric = options.metric;
   core.knn.cv.stratified = false;
   core.knn.cv.seed = options.seed + static_cast<std::uint64_t>(run_id);
@@ -1297,7 +1417,7 @@ IterationResult run_iteration(
   core.knn.n_threads = options.backend == Backend::CUDA ?
     options.n_threads : std::max(1, options.knn.n_threads);
   core.pls = options.pls;
-  core.pls.backend = options.backend == Backend::CUDA ? Backend::CUDA : Backend::CPU;
+  core.pls.backend = options.backend;
   core.pls.cv.stratified = false;
   core.pls.cv.seed = options.seed + static_cast<std::uint64_t>(run_id);
   core.pls.max_components = options.components;
@@ -1306,15 +1426,22 @@ IterationResult run_iteration(
     options.n_threads : std::max(1, options.pls.n_threads);
 
   auto run_knn_core = [&](const std::vector<int>& labels, const CoreOptions& phase) {
-    return options.backend == Backend::CUDA ?
-      CoreKNN_CUDA(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase) :
-      CoreKNN_CPU(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+    if (options.backend == Backend::CUDA) {
+      return CoreKNN_CUDA(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+    }
+    if (options.backend == Backend::Metal) {
+      return CoreKNN_METAL(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+    }
+    return CoreKNN_CPU(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
   };
   auto run_pls_core = [&](const std::vector<int>& labels, const CoreOptions& phase) {
-    if (options.backend != Backend::CUDA) {
-      return CorePLSLDA_CPU(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+    if (options.backend == Backend::CUDA) {
+      return CorePLSLDA_CUDA(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
     }
-    return CorePLSLDA_CUDA(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+    if (options.backend == Backend::Metal) {
+      return CorePLSLDA_METAL(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
+    }
+    return CorePLSLDA_CPU(x_view, labels, scratch.x_constrain, scratch.x_fixed, phase);
   };
 
   CoreResult core_result;
@@ -1359,9 +1486,14 @@ IterationResult run_iteration(
     } else {
       copy_float32_rows_into(full_float, full.cols, tpoints, scratch.x_test);
       MatrixView test_view{scratch.x_test.data(), tpoints.size(), full.cols};
-      const std::vector<int> projected = options.backend == Backend::CUDA ?
-        PLSLDAPredict_CUDA(x_view, core_result.clbest, test_view, core.pls) :
-        PLSLDAPredict_CPU(x_view, core_result.clbest, test_view, core.pls);
+      std::vector<int> projected;
+      if (options.backend == Backend::CUDA) {
+        projected = PLSLDAPredict_CUDA(x_view, core_result.clbest, test_view, core.pls);
+      } else if (options.backend == Backend::Metal) {
+        projected = PLSLDAPredict_METAL(x_view, core_result.clbest, test_view, core.pls);
+      } else {
+        projected = PLSLDAPredict_CPU(x_view, core_result.clbest, test_view, core.pls);
+      }
       for (std::size_t i = 0; i < tpoints.size(); ++i) {
         out.res[static_cast<std::size_t>(tpoints[i])] = projected[i];
       }
@@ -1443,7 +1575,9 @@ KODAMAMatrixResult run_kodama_matrix(
       static_cast<int>(x.rows),
       options.spatial_cols,
       std::max(20, options.graph_neighbors > 0 ? options.graph_neighbors : 100),
-      options.n_threads
+      options.n_threads,
+      options.backend,
+      options.knn.gpu_device
     );
   const double spatial_precompute_seconds = spatial_precompute_timer.seconds();
   const int neighbors = std::max(1, static_cast<int>(std::floor(std::min({
@@ -1457,6 +1591,7 @@ KODAMAMatrixResult run_kodama_matrix(
   result.samples = static_cast<int>(x.rows);
   result.cycles = options.cycles;
   result.n_threads = options.n_threads;
+  result.backend = options.backend;
   result.gpu_auto_workers = worker_plan.automatic;
   result.gpu_scheduler_enabled = options.backend == Backend::CUDA;
   result.gpu_scheduler_lanes = options.backend == Backend::CUDA ? worker_plan.workers : 0;
@@ -1495,9 +1630,12 @@ KODAMAMatrixResult run_kodama_matrix(
       neighbors + 1,
       options.metric,
       options.n_threads,
-      options.backend == Backend::CUDA,
+      options.backend,
       options.knn.gpu_device,
-      true
+      true,
+      options.knn.index_type,
+      options.knn.ivf_nlist,
+      options.knn.ivf_nprobe
     );
   }
   result.graph_seconds = graph_timer.seconds();
@@ -1515,9 +1653,12 @@ KODAMAMatrixResult run_kodama_matrix(
       neighbors + 1,
       DistanceMetric::Euclidean,
       options.n_threads,
-      options.backend == Backend::CUDA,
+      options.backend,
       options.knn.gpu_device,
-      true
+      true,
+      options.knn.index_type,
+      options.knn.ivf_nlist,
+      options.knn.ivf_nprobe
     );
     NeighborGraph spatial_trimmed = trim_self_neighbors(spatial_global_graph, static_cast<int>(x.rows), neighbors);
     result.knn = merge_feature_spatial_graphs(result.knn, spatial_trimmed, static_cast<int>(x.rows), neighbors);
@@ -1662,6 +1803,32 @@ KODAMAMatrixResult KODAMAMatrix_CUDA(
 #endif
 }
 
+KODAMAMatrixResult KODAMAMatrix_METAL(
+  MatrixView x,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+#if defined(KODAMA_ENABLE_METAL)
+  KODAMAMatrixOptions metal_options = options;
+  metal_options.backend = Backend::Metal;
+  metal_options.knn.backend = Backend::Metal;
+  if (metal_options.knn.index_type != KNNIndexType::MetalIVFFlat) {
+    metal_options.knn.index_type = KNNIndexType::MetalExact;
+  }
+  metal_options.pls.backend = Backend::Metal;
+  return run_kodama_matrix(x, starting_labels, constrain, fixed, metal_options);
+#else
+  (void)x;
+  (void)starting_labels;
+  (void)constrain;
+  (void)fixed;
+  (void)options;
+  throw std::runtime_error("KODAMAMatrix_METAL requires an Apple Metal build.");
+#endif
+}
+
 KODAMAMatrixResult KODAMAMatrix(
   MatrixView x,
   const std::vector<int>& starting_labels,
@@ -1670,6 +1837,7 @@ KODAMAMatrixResult KODAMAMatrix(
   const KODAMAMatrixOptions& options
 ) {
   if (options.backend == Backend::CUDA) return KODAMAMatrix_CUDA(x, starting_labels, constrain, fixed, options);
+  if (options.backend == Backend::Metal) return KODAMAMatrix_METAL(x, starting_labels, constrain, fixed, options);
   return KODAMAMatrix_CPU(x, starting_labels, constrain, fixed, options);
 }
 
@@ -1754,6 +1922,37 @@ KODAMAMatrixResult KODAMAMatrixFromGraphData_CUDA(
 #endif
 }
 
+KODAMAMatrixResult KODAMAMatrixFromGraphData_METAL(
+  MatrixView x,
+  const NeighborGraph& graph,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+#if defined(KODAMA_ENABLE_METAL)
+  if (x.rows < 2) throw std::invalid_argument("KODAMAMatrixFromGraphData requires at least two rows.");
+  KODAMAMatrixOptions metal_options = options;
+  metal_options.backend = Backend::Metal;
+  metal_options.knn.backend = Backend::Metal;
+  if (metal_options.knn.index_type != KNNIndexType::MetalIVFFlat) {
+    metal_options.knn.index_type = KNNIndexType::MetalExact;
+  }
+  metal_options.pls.backend = Backend::Metal;
+  KODAMAMatrixResult result = run_kodama_matrix(x, starting_labels, constrain, fixed, metal_options, &graph);
+  result.graph_feature_seconds = 0.0;
+  return result;
+#else
+  (void)x;
+  (void)graph;
+  (void)starting_labels;
+  (void)constrain;
+  (void)fixed;
+  (void)options;
+  throw std::runtime_error("KODAMAMatrixFromGraphData_METAL requires an Apple Metal build.");
+#endif
+}
+
 KODAMAMatrixResult KODAMAMatrixFromGraphData(
   MatrixView x,
   const NeighborGraph& graph,
@@ -1763,6 +1962,7 @@ KODAMAMatrixResult KODAMAMatrixFromGraphData(
   const KODAMAMatrixOptions& options
 ) {
   if (options.backend == Backend::CUDA) return KODAMAMatrixFromGraphData_CUDA(x, graph, starting_labels, constrain, fixed, options);
+  if (options.backend == Backend::Metal) return KODAMAMatrixFromGraphData_METAL(x, graph, starting_labels, constrain, fixed, options);
   return KODAMAMatrixFromGraphData_CPU(x, graph, starting_labels, constrain, fixed, options);
 }
 
@@ -1796,6 +1996,41 @@ KODAMAMatrixResult KODAMAMatrixFromGraph_CUDA(
 #endif
 }
 
+KODAMAMatrixResult KODAMAMatrixFromGraph_METAL(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& starting_labels,
+  const std::vector<int>& constrain,
+  const std::vector<int>& fixed,
+  const KODAMAMatrixOptions& options
+) {
+#if defined(KODAMA_ENABLE_METAL)
+  KODAMAMatrixOptions metal_options = options;
+  metal_options.backend = Backend::Metal;
+  metal_options.knn.backend = Backend::Metal;
+  if (metal_options.knn.index_type != KNNIndexType::MetalIVFFlat) {
+    metal_options.knn.index_type = KNNIndexType::MetalExact;
+  }
+  metal_options.pls.backend = Backend::Metal;
+  detail::Timer feature_timer;
+  std::vector<float> features = KODAMAGraphFeatures_CPU(graph, samples, metal_options);
+  const double graph_feature_seconds = feature_timer.seconds();
+  const int components = static_cast<int>(features.size() / static_cast<std::size_t>(samples));
+  MatrixView view{features.data(), static_cast<std::size_t>(samples), static_cast<std::size_t>(components)};
+  KODAMAMatrixResult result = run_kodama_matrix(view, starting_labels, constrain, fixed, metal_options, &graph);
+  result.graph_feature_seconds = graph_feature_seconds;
+  return result;
+#else
+  (void)graph;
+  (void)samples;
+  (void)starting_labels;
+  (void)constrain;
+  (void)fixed;
+  (void)options;
+  throw std::runtime_error("KODAMAMatrixFromGraph_METAL requires an Apple Metal build.");
+#endif
+}
+
 KODAMAMatrixResult KODAMAMatrixFromGraph(
   const NeighborGraph& graph,
   int samples,
@@ -1805,6 +2040,7 @@ KODAMAMatrixResult KODAMAMatrixFromGraph(
   const KODAMAMatrixOptions& options
 ) {
   if (options.backend == Backend::CUDA) return KODAMAMatrixFromGraph_CUDA(graph, samples, starting_labels, constrain, fixed, options);
+  if (options.backend == Backend::Metal) return KODAMAMatrixFromGraph_METAL(graph, samples, starting_labels, constrain, fixed, options);
   return KODAMAMatrixFromGraph_CPU(graph, samples, starting_labels, constrain, fixed, options);
 }
 

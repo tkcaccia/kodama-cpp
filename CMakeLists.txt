@@ -9,6 +9,14 @@ project(kodama-cpp
 option(KODAMA_BUILD_TESTS "Build kodama-cpp tests" ON)
 option(KODAMA_BUILD_EXAMPLES "Build kodama-cpp examples" ON)
 option(KODAMA_ENABLE_CUDA "Build CUDA FAISS/cuVS backends" OFF)
+option(KODAMA_ENABLE_FAISS "Build optional FAISS CPU backends" OFF)
+if(APPLE)
+  option(KODAMA_ENABLE_METAL "Build native Apple Metal backends" ON)
+  option(KODAMA_ENABLE_OPENMP "Build optional OpenMP parallel CPU loops" OFF)
+else()
+  option(KODAMA_ENABLE_METAL "Build native Apple Metal backends" OFF)
+  option(KODAMA_ENABLE_OPENMP "Build optional OpenMP parallel CPU loops" ON)
+endif()
 
 add_library(kodama_cpp
   src/common.cpp
@@ -16,6 +24,7 @@ add_library(kodama_cpp
   src/graph_cluster.cpp
   src/kodama_matrix.cpp
   src/knncv.cpp
+  src/native_knn.cpp
   src/plscv.cpp
   src/visualization.cpp
 )
@@ -33,49 +42,52 @@ target_include_directories(kodama_cpp
 
 target_compile_features(kodama_cpp PUBLIC cxx_std_17)
 
-find_path(FAISS_INCLUDE_DIR
-  NAMES faiss/IndexIVFFlat.h
-  HINTS /opt/homebrew/include /usr/local/include $ENV{CONDA_PREFIX}/include
-)
-find_library(FAISS_LIBRARY
-  NAMES faiss
-  HINTS /opt/homebrew/lib /usr/local/lib $ENV{CONDA_PREFIX}/lib
-)
-if(NOT FAISS_INCLUDE_DIR OR NOT FAISS_LIBRARY)
-  message(FATAL_ERROR "FAISS is mandatory for kodama-cpp. Install FAISS or set FAISS_INCLUDE_DIR and FAISS_LIBRARY.")
-endif()
-target_include_directories(kodama_cpp PRIVATE ${FAISS_INCLUDE_DIR})
-target_link_libraries(kodama_cpp PRIVATE ${FAISS_LIBRARY})
-target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_FAISS=1)
-
-find_package(OpenMP QUIET)
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(kodama_cpp PRIVATE OpenMP::OpenMP_CXX)
-else()
-  find_path(OPENMP_OMP_INCLUDE_DIR
-    NAMES omp.h
-    HINTS
-      /opt/homebrew/opt/libomp/include
-      /usr/local/opt/libomp/include
-      $ENV{CONDA_PREFIX}/include
-  )
-  find_library(OPENMP_OMP_LIBRARY
-    NAMES omp gomp iomp5
-    HINTS
-      /opt/homebrew/opt/libomp/lib
-      /usr/local/opt/libomp/lib
-      $ENV{CONDA_PREFIX}/lib
-  )
-  if(OPENMP_OMP_INCLUDE_DIR)
-    target_include_directories(kodama_cpp PRIVATE ${OPENMP_OMP_INCLUDE_DIR})
+if(KODAMA_ENABLE_METAL)
+  if(NOT APPLE)
+    message(FATAL_ERROR "KODAMA_ENABLE_METAL=ON is supported only on Apple platforms.")
   endif()
-  if(OPENMP_OMP_LIBRARY)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang")
-      target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Xpreprocessor> $<$<COMPILE_LANGUAGE:CXX>:-fopenmp>)
-    else()
-      target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fopenmp>)
-    endif()
-    target_link_libraries(kodama_cpp PRIVATE ${OPENMP_OMP_LIBRARY})
+  enable_language(OBJCXX)
+  target_sources(kodama_cpp PRIVATE src/metal_backend.mm)
+  set_source_files_properties(src/metal_backend.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_METAL=1)
+  target_link_libraries(kodama_cpp PRIVATE
+    "-framework Metal"
+    "-framework MetalPerformanceShaders"
+    "-framework Foundation"
+  )
+else()
+  target_sources(kodama_cpp PRIVATE src/metal_backend_stub.cpp)
+endif()
+
+if(KODAMA_ENABLE_CUDA)
+  set(KODAMA_ENABLE_FAISS ON CACHE BOOL "Build optional FAISS CPU backends" FORCE)
+endif()
+
+if(KODAMA_ENABLE_FAISS)
+  find_path(FAISS_INCLUDE_DIR
+    NAMES faiss/IndexIVFFlat.h
+    HINTS /opt/homebrew/include /usr/local/include $ENV{CONDA_PREFIX}/include
+  )
+  find_library(FAISS_LIBRARY
+    NAMES faiss
+    HINTS /opt/homebrew/lib /usr/local/lib $ENV{CONDA_PREFIX}/lib
+  )
+  if(NOT FAISS_INCLUDE_DIR OR NOT FAISS_LIBRARY)
+    message(FATAL_ERROR "KODAMA_ENABLE_FAISS=ON requires FAISS headers and a FAISS library.")
+  endif()
+  target_include_directories(kodama_cpp PRIVATE ${FAISS_INCLUDE_DIR})
+  target_link_libraries(kodama_cpp PRIVATE ${FAISS_LIBRARY})
+  target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_FAISS=1)
+endif()
+
+set(KODAMA_CONFIG_NEEDS_OPENMP OFF)
+if(KODAMA_ENABLE_OPENMP)
+  find_package(OpenMP QUIET COMPONENTS CXX)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(kodama_cpp PRIVATE OpenMP::OpenMP_CXX)
+    set(KODAMA_CONFIG_NEEDS_OPENMP ON)
+  else()
+    message(WARNING "KODAMA_ENABLE_OPENMP=ON, but OpenMP CXX was not found; building without OpenMP.")
   endif()
 endif()
 
@@ -132,19 +144,12 @@ if(KODAMA_ENABLE_CUDA)
       /usr/local/cuda-13.0/targets/x86_64-linux/lib
       /usr/lib/x86_64-linux-gnu
   )
-  find_path(ARMADILLO_INCLUDE_DIR
-    NAMES armadillo
-    HINTS /usr/include /usr/local/include $ENV{CONDA_PREFIX}/include
-  )
   find_library(MKL_RT_LIBRARY
     NAMES mkl_rt
     HINTS $ENV{CONDA_PREFIX}/lib
   )
   if(NOT CUDA_TOOLKIT_INCLUDE_DIR OR NOT CUDA_CUBLAS_LIBRARY OR NOT CUDA_RUNTIME_LIBRARY OR NOT CUDA_CUSOLVER_LIBRARY OR NOT CUDA_CURAND_LIBRARY OR NOT CUDA_CUFFT_LIBRARY)
     message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires CUDA headers, libcublas, libcusolver, libcurand, libcufft, and libcudart.")
-  endif()
-  if(NOT ARMADILLO_INCLUDE_DIR)
-    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires Armadillo headers for the fastPLS CUDA SIMPLS backend.")
   endif()
   find_library(FAISS_GPU_LIBRARY
     NAMES faiss_gpu
@@ -188,8 +193,7 @@ if(KODAMA_ENABLE_CUDA)
   endif()
 
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1 KODAMA_ENABLE_CUVS=1)
-  target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR} ${CUVS_INCLUDE_DIR} ${ARMADILLO_INCLUDE_DIR})
-  target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-I${ARMADILLO_INCLUDE_DIR}>)
+  target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR} ${CUVS_INCLUDE_DIR})
   target_link_libraries(kodama_cpp PRIVATE ${FAISS_GPU_LIBRARY} ${CUVS_LIBRARY} ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
   if(MKL_RT_LIBRARY)
     target_link_libraries(kodama_cpp PRIVATE ${MKL_RT_LIBRARY})
@@ -202,9 +206,9 @@ if(KODAMA_ENABLE_CUDA)
   if(CONDA_STDCXX_LIBRARY)
     target_link_libraries(kodama_cpp PRIVATE ${CONDA_STDCXX_LIBRARY})
   endif()
-  target_sources(kodama_cpp PRIVATE src/pls_cknn_cuda.cu src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/fastpls_cuda_simpls.cpp)
+  target_sources(kodama_cpp PRIVATE src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/cuda_simpls_float.cpp)
   set_property(TARGET kodama_cpp PROPERTY CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
-  set_source_files_properties(src/pls_cknn_cuda.cu src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu PROPERTIES LANGUAGE CUDA)
+  set_source_files_properties(src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu PROPERTIES LANGUAGE CUDA)
 endif()
 
 include(GNUInstallDirs)
@@ -245,7 +249,14 @@ if(KODAMA_BUILD_EXAMPLES)
   target_link_libraries(kodama_cv_sanity_bin PRIVATE kodama_cpp)
   add_executable(kodama_core_sanity_bin benchmarks/run_core_sanity_bin.cpp)
   target_link_libraries(kodama_core_sanity_bin PRIVATE kodama_cpp)
-  target_include_directories(kodama_core_sanity_bin PRIVATE ${FAISS_INCLUDE_DIR})
+  add_executable(kodama_native_backend_benchmark benchmarks/run_native_backend_benchmark.cpp)
+  target_link_libraries(kodama_native_backend_benchmark PRIVATE kodama_cpp)
+  add_executable(kodama_backend_benchmark_bin benchmarks/run_kodama_backend_bin.cpp)
+  target_link_libraries(kodama_backend_benchmark_bin PRIVATE kodama_cpp)
+  if(KODAMA_ENABLE_FAISS)
+    target_include_directories(kodama_core_sanity_bin PRIVATE ${FAISS_INCLUDE_DIR})
+    target_compile_definitions(kodama_core_sanity_bin PRIVATE KODAMA_ENABLE_FAISS=1)
+  endif()
   if(KODAMA_ENABLE_CUDA)
     target_compile_definitions(kodama_mnist70_sanity PRIVATE KODAMA_ENABLE_CUDA=1)
     target_compile_definitions(kodama_cv_sanity_bin PRIVATE KODAMA_ENABLE_CUDA=1)
@@ -257,6 +268,13 @@ if(KODAMA_BUILD_TESTS)
   enable_testing()
   add_executable(kodama_cpp_tests tests/test_cv.cpp)
   target_link_libraries(kodama_cpp_tests PRIVATE kodama_cpp)
+  if(KODAMA_ENABLE_METAL)
+    target_compile_definitions(kodama_cpp_tests PRIVATE KODAMA_ENABLE_METAL=1)
+    add_executable(kodama_metal_tests tests/test_metal.cpp)
+    target_link_libraries(kodama_metal_tests PRIVATE kodama_cpp)
+    add_test(NAME kodama_metal_tests COMMAND kodama_metal_tests)
+    set_tests_properties(kodama_metal_tests PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
   if(KODAMA_ENABLE_CUDA)
     target_compile_definitions(kodama_cpp_tests PRIVATE KODAMA_ENABLE_CUDA=1)
   endif()

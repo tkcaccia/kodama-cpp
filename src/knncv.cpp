@@ -1,4 +1,6 @@
 #include "common.hpp"
+#include "metal_backend.hpp"
+#include "native_knn.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,10 +10,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(KODAMA_ENABLE_FAISS)
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexIVFFlat.h>
 #include <faiss/MetricType.h>
+#endif
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -167,6 +171,7 @@ int majority_vote(const std::vector<Neighbor>& neighbors) {
   return best_label;
 }
 
+#if defined(KODAMA_ENABLE_FAISS)
 std::vector<int> knn_predict_faiss_ivf_flat_cpu(
   MatrixView x,
   const std::vector<int>& labels,
@@ -273,6 +278,116 @@ std::vector<int> knn_predict_faiss_hnsw_flat_cpu(
   }
   return pred;
 }
+#endif
+
+std::vector<int> knn_predict_native_hnsw_cpu(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& train,
+  const std::vector<int>& validation,
+  int k,
+  DistanceMetric metric,
+  const KNNOptions& options,
+  HNSWParameters* used_params
+) {
+  if (train.empty()) throw std::runtime_error("KNN fold has no training samples.");
+  if (k < 1) throw std::invalid_argument("k must be positive.");
+  k = std::min(k, static_cast<int>(train.size()));
+  const HNSWParameters parameters = tune_hnsw_parameters(
+    static_cast<int>(train.size()),
+    static_cast<int>(x.cols),
+    k,
+    metric,
+    options
+  );
+  if (used_params != nullptr) *used_params = parameters;
+
+  const std::vector<float> train_x = detail::prepare_native_matrix(x, train, metric);
+  const std::vector<float> validation_x = detail::prepare_native_matrix(x, validation, metric);
+  const detail::NativeKNNResult search = detail::native_hnsw_search(
+    train_x,
+    static_cast<int>(train.size()),
+    validation_x,
+    static_cast<int>(validation.size()),
+    static_cast<int>(x.cols),
+    k,
+    metric,
+    detail::NativeHNSWParameters{parameters.m, parameters.ef_construction, parameters.ef_search},
+    options.n_threads
+  );
+
+  std::vector<int> predicted(validation.size(), labels[static_cast<std::size_t>(train.front())]);
+  for (std::size_t query = 0; query < validation.size(); ++query) {
+    std::vector<Neighbor> best;
+    best.reserve(static_cast<std::size_t>(search.neighbors));
+    for (int rank = 0; rank < search.neighbors; ++rank) {
+      const std::size_t pos = query * static_cast<std::size_t>(search.neighbors) + static_cast<std::size_t>(rank);
+      const int local_id = search.indices[pos];
+      if (local_id < 0) continue;
+      best.push_back(Neighbor{
+        static_cast<double>(detail::native_knn_score(search.distances[pos], metric)),
+        labels[static_cast<std::size_t>(train[static_cast<std::size_t>(local_id)])]
+      });
+    }
+    if (!best.empty()) predicted[query] = majority_vote(best);
+  }
+  return predicted;
+}
+
+std::vector<int> knn_predict_metal(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& train,
+  const std::vector<int>& validation,
+  int k,
+  DistanceMetric metric,
+  const KNNOptions& options,
+  detail::MetalIVFStats* ivf_stats
+) {
+  if (train.empty()) throw std::runtime_error("KNN fold has no training samples.");
+  k = std::min(k, static_cast<int>(train.size()));
+  const std::vector<float> train_x = detail::prepare_native_matrix(x, train, metric);
+  const std::vector<float> validation_x = detail::prepare_native_matrix(x, validation, metric);
+  const detail::NativeKNNResult search = options.index_type == KNNIndexType::MetalIVFFlat ?
+    detail::metal_ivf_knn_search(
+      train_x,
+      static_cast<int>(train.size()),
+      validation_x,
+      static_cast<int>(validation.size()),
+      static_cast<int>(x.cols),
+      k,
+      metric,
+      options.ivf_nlist,
+      options.ivf_nprobe,
+      {},
+      ivf_stats
+    ) :
+    detail::metal_exact_knn_search(
+      train_x,
+      static_cast<int>(train.size()),
+      validation_x,
+      static_cast<int>(validation.size()),
+      static_cast<int>(x.cols),
+      k,
+      metric
+    );
+  std::vector<int> predicted(validation.size(), labels[static_cast<std::size_t>(train.front())]);
+  for (std::size_t query = 0; query < validation.size(); ++query) {
+    std::vector<Neighbor> best;
+    best.reserve(static_cast<std::size_t>(search.neighbors));
+    for (int rank = 0; rank < search.neighbors; ++rank) {
+      const std::size_t pos = query * static_cast<std::size_t>(search.neighbors) + static_cast<std::size_t>(rank);
+      const int local_id = search.indices[pos];
+      if (local_id < 0) continue;
+      best.push_back(Neighbor{
+        static_cast<double>(detail::native_knn_score(search.distances[pos], metric)),
+        labels[static_cast<std::size_t>(train[static_cast<std::size_t>(local_id)])]
+      });
+    }
+    if (!best.empty()) predicted[query] = majority_vote(best);
+  }
+  return predicted;
+}
 
 #if defined(KODAMA_ENABLE_CUDA)
 std::vector<int> knn_predict_faiss_ivf_flat_cuda(
@@ -347,7 +462,16 @@ KNNParametersUsed resolve_knn_parameters(const KNNOptions& options) {
   used.gpu_device = options.gpu_device;
   used.n_threads = options.n_threads;
 
-  if (options.backend == Backend::CUDA || options.index_type == KNNIndexType::CuvsIVFFlat) {
+  if (options.backend == Backend::Metal || options.index_type == KNNIndexType::MetalExact ||
+      options.index_type == KNNIndexType::MetalIVFFlat) {
+#if defined(KODAMA_ENABLE_METAL)
+    used.backend = Backend::Metal;
+    used.index_type = options.index_type == KNNIndexType::MetalIVFFlat ?
+      KNNIndexType::MetalIVFFlat : KNNIndexType::MetalExact;
+#else
+    throw std::runtime_error("Metal KNNCV backend was requested but this build was not compiled with KODAMA_ENABLE_METAL.");
+#endif
+  } else if (options.backend == Backend::CUDA || options.index_type == KNNIndexType::CuvsIVFFlat) {
 #if defined(KODAMA_ENABLE_CUDA)
     used.backend = Backend::CUDA;
     used.index_type = options.index_type;
@@ -356,8 +480,11 @@ KNNParametersUsed resolve_knn_parameters(const KNNOptions& options) {
 #endif
   } else {
     used.backend = Backend::CPU;
-    used.index_type = options.index_type == KNNIndexType::FaissIVFFlat ?
-      KNNIndexType::FaissIVFFlat : KNNIndexType::FaissHNSWFlat;
+    used.index_type = options.index_type;
+    if (used.index_type == KNNIndexType::CuvsIVFFlat || used.index_type == KNNIndexType::MetalExact ||
+        used.index_type == KNNIndexType::MetalIVFFlat) {
+      used.index_type = KNNIndexType::NativeHNSW;
+    }
   }
   return used;
 }
@@ -371,6 +498,7 @@ KNNCVResult KNNCV(
   const KNNOptions& options
 ) {
   if (options.backend == Backend::CUDA) return KNNCV_CUDA(x, labels, constrain, options);
+  if (options.backend == Backend::Metal) return KNNCV_METAL(x, labels, constrain, options);
   return KNNCV_CPU(x, labels, constrain, options);
 }
 
@@ -395,6 +523,7 @@ KNNCVResult KNNCV_CPU(
     const std::vector<int> train = detail::indices_where_fold(result.fold_assignments, fold, false);
     std::vector<int> fold_pred;
     if (result.parameters.index_type == KNNIndexType::FaissIVFFlat) {
+#if defined(KODAMA_ENABLE_FAISS)
       fold_pred = knn_predict_faiss_ivf_flat_cpu(
         x,
         labels,
@@ -406,7 +535,11 @@ KNNCVResult KNNCV_CPU(
         result.parameters.ivf_nprobe,
         result.parameters.n_threads
       );
-    } else {
+#else
+      throw std::runtime_error("KNNIndexType::FaissIVFFlat requires a build with KODAMA_ENABLE_FAISS=ON.");
+#endif
+    } else if (result.parameters.index_type == KNNIndexType::FaissHNSWFlat) {
+#if defined(KODAMA_ENABLE_FAISS)
       HNSWParameters hnsw_params;
       fold_pred = knn_predict_faiss_hnsw_flat_cpu(
         x,
@@ -418,6 +551,27 @@ KNNCVResult KNNCV_CPU(
         options,
         &hnsw_params
       );
+      result.parameters.hnsw_m = hnsw_params.m;
+      result.parameters.hnsw_ef_construction = hnsw_params.ef_construction;
+      result.parameters.hnsw_ef_search = hnsw_params.ef_search;
+      result.parameters.hnsw_tune_k = hnsw_params.tune_k;
+      result.parameters.hnsw_target_recall = hnsw_params.target_recall;
+#else
+      throw std::runtime_error("KNNIndexType::FaissHNSWFlat requires a build with KODAMA_ENABLE_FAISS=ON.");
+#endif
+    } else {
+      HNSWParameters hnsw_params;
+      fold_pred = knn_predict_native_hnsw_cpu(
+        x,
+        labels,
+        train,
+        validation,
+        result.parameters.k,
+        result.parameters.metric,
+        options,
+        &hnsw_params
+      );
+      result.parameters.index_type = KNNIndexType::NativeHNSW;
       result.parameters.hnsw_m = hnsw_params.m;
       result.parameters.hnsw_ef_construction = hnsw_params.ef_construction;
       result.parameters.hnsw_ef_search = hnsw_params.ef_search;
@@ -501,6 +655,77 @@ KNNCVResult KNNCV_CUDA(
   (void)options;
   throw std::runtime_error("KNNCV_CUDA requires a CUDA/FAISS GPU build.");
 #endif
+}
+
+KNNCVResult KNNCV_METAL(
+  MatrixView x,
+  const std::vector<int>& labels,
+  const std::vector<int>& constrain,
+  const KNNOptions& options
+) {
+#if defined(KODAMA_ENABLE_METAL)
+  KNNOptions metal_options = options;
+  metal_options.backend = Backend::Metal;
+  if (metal_options.index_type != KNNIndexType::MetalIVFFlat) {
+    metal_options.index_type = KNNIndexType::MetalExact;
+  }
+  detail::validate_inputs(x, labels, constrain);
+  if (metal_options.k < 1) throw std::invalid_argument("KNNOptions::k must be positive.");
+  detail::Timer timer;
+  KNNCVResult result;
+  result.true_labels = labels;
+  result.predicted_labels.assign(labels.size(), 0);
+  result.fold_assignments = detail::make_folds(labels, constrain, metal_options.cv);
+  result.parameters = resolve_knn_parameters(metal_options);
+  const std::vector<int> fold_ids = detail::sorted_unique_folds(result.fold_assignments);
+  for (int fold : fold_ids) {
+    const std::vector<int> validation = detail::indices_where_fold(result.fold_assignments, fold, true);
+    const std::vector<int> train = detail::indices_where_fold(result.fold_assignments, fold, false);
+    detail::MetalIVFStats ivf_stats;
+    const std::vector<int> fold_pred = knn_predict_metal(
+      x,
+      labels,
+      train,
+      validation,
+      result.parameters.k,
+      result.parameters.metric,
+      metal_options,
+      &ivf_stats
+    );
+    if (result.parameters.index_type == KNNIndexType::MetalIVFFlat) {
+      result.parameters.ivf_nlist = ivf_stats.nlist;
+      result.parameters.ivf_nprobe = std::max(result.parameters.ivf_nprobe, ivf_stats.nprobe);
+      result.parameters.ivf_pilot_recall = std::min(
+        result.parameters.ivf_pilot_recall == 0.0 ? 1.0 : result.parameters.ivf_pilot_recall,
+        ivf_stats.pilot_recall
+      );
+    }
+    for (std::size_t i = 0; i < validation.size(); ++i) {
+      result.predicted_labels[static_cast<std::size_t>(validation[i])] = fold_pred[i];
+    }
+    result.folds.push_back(FoldResult{
+      fold,
+      static_cast<int>(train.size()),
+      static_cast<int>(validation.size()),
+      detail::accuracy_on_indices(labels, result.predicted_labels, validation)
+    });
+  }
+  result.global_accuracy = detail::accuracy(labels, result.predicted_labels);
+  result.confusion = detail::make_confusion(labels, result.predicted_labels);
+  result.runtime_seconds = timer.seconds();
+  result.peak_memory_mb = detail::peak_memory_mb();
+  return result;
+#else
+  (void)x;
+  (void)labels;
+  (void)constrain;
+  (void)options;
+  throw std::runtime_error("KNNCV_METAL requires an Apple Metal build.");
+#endif
+}
+
+bool MetalAvailable() {
+  return detail::metal_backend_available();
 }
 
 }  // namespace kodama
