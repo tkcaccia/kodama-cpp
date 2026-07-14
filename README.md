@@ -9,17 +9,16 @@ Python; thin wrappers live in `tkcaccia/kodama-r` and
 
 | Backend | Required libraries | Native functionality |
 | --- | --- | --- |
-| CPU | C++17 standard library | float32 HNSW KNN, KODAMA KNN/PLS-LDA, SIMPLS/LDA, graph, UMAP/openTSNE, clustering |
+| CPU | C++17 standard library | float32 HNSW KNN, KODAMA KNN/PLS-LDA, SIMPLS/LDA, graph, UMAP/openTSNE, random-walk clustering |
 | CPU + OpenMP | OpenMP compiler runtime | Optional parallel CPU loops |
 | Apple Metal | Foundation, Metal, MetalPerformanceShaders | exact and IVF-Flat KNN, k-means, KODAMA KNN/PLS-LDA, label-aware SIMPLS/LDA |
-| CUDA | CUDA toolkit; cuGraph optional | package-owned exact and recall-tuned IVF-Flat KNN, k-means, float32 label-aware SIMPLS/LDA, KODAMA KNN/PLS-LDA, UMAP/openTSNE; optional CUDA clustering |
+| CUDA | CUDA toolkit | package-owned exact and recall-tuned IVF-Flat KNN, k-means, float32 label-aware SIMPLS/LDA, KODAMA KNN/PLS-LDA, UMAP/openTSNE |
 
 The CPU, Metal, and CUDA numerical backends do not link FAISS, cuVS, RAFT,
 RMM, fastEmbedR, fastPLS, R, or Python. Apple Metal uses only system
-frameworks; CUDA is opt-in and uses CUDA Toolkit libraries. The optional
-cuGraph adapter is isolated behind `KODAMA_ENABLE_CUGRAPH=ON`. Backend names
-are strict: an unavailable accelerator raises an error rather than silently
-running CPU code under a GPU label.
+frameworks; CUDA is opt-in and uses CUDA Toolkit libraries. Backend names are
+strict: an unavailable accelerator raises an error rather than silently running
+CPU code under a GPU label.
 
 ## Public Scope
 
@@ -27,7 +26,7 @@ running CPU code under a GPU label.
 - `PLSLDACV`, `PLSLDACV_CPU`, `PLSLDACV_CUDA`, `PLSLDACV_METAL`
 - `CoreKNN_*` and `CorePLSLDA_*`
 - `KODAMAMatrix_*`, including matrix+graph and graph-input variants
-- KNN graph construction, UMAP/openTSNE, Louvain/Leiden/random-walk clustering
+- KNN graph construction, UMAP/openTSNE, and CPU random-walk clustering
 
 KODAMA optimization exposes only the KNN and PLS-LDA classifiers. Numerical
 data matrices, PLS/LDA workspaces, and accelerator buffers use float32;
@@ -40,9 +39,9 @@ fallback.
 Metal currently covers nearest-neighbor search, k-means, cross-validation,
 and the matrix-based KODAMA KNN/PLS-LDA optimization. Graph-only spectral
 feature construction is performed on the CPU before Metal optimization.
-UMAP/openTSNE and community clustering remain explicit CPU/CUDA operations;
-requesting unavailable Metal clustering raises an error instead of silently
-falling back to the CPU.
+UMAP/openTSNE remain explicit CPU/CUDA operations. Random-walk clustering is
+CPU-only; callers may construct its input graph with CPU, CUDA, or Metal before
+calling the clustering kernel explicitly.
 
 ## Build
 
@@ -72,7 +71,6 @@ CUDA build, using an installed CUDA toolkit:
 ```sh
 cmake -S . -B build-cuda \
   -DKODAMA_ENABLE_CUDA=ON \
-  -DKODAMA_ENABLE_CUGRAPH=OFF \
   -DCMAKE_CUDA_COMPILER="$CONDA_PREFIX/bin/nvcc"
 cmake --build build-cuda -j
 ctest --test-dir build-cuda --output-on-failure

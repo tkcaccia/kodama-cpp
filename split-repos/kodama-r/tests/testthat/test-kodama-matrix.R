@@ -48,7 +48,7 @@ test_that("public API wrappers are exposed", {
   core_pls <- CorePLSLDA(x, labels, cycles = 1, folds = 3, ncomp = 2, backend = "cpu")
   graph <- KODAMA.graph(x, k = 5, backend = "cpu")
   emb <- KODAMA.visualization(graph, method = "UMAP", k = 5, n.epochs = 3, backend = "cpu")
-  clu <- KODAMA.clustering(graph, method = "louvain", backend = "cpu", resolution = 1)
+  clu <- KODAMA.clustering(graph, n.iterations = 2, random.walk.steps = 2)
 
   expect_length(knncv$predicted, nrow(x))
   expect_length(pls$predicted, nrow(x))

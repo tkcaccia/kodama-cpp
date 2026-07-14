@@ -96,25 +96,22 @@ if [ -n "$CONDA_PREFIX_VALUE" ]; then
   add_lib_dir "$CONDA_PREFIX_VALUE/targets/x86_64-linux/lib"
   add_rpath "$CONDA_PREFIX_VALUE/lib"
 fi
-add_lib_dir /opt/homebrew/opt/faiss/lib
 add_lib_dir /opt/homebrew/opt/libomp/lib
 add_lib_dir /opt/homebrew/opt/llvm/lib
 add_lib_dir /usr/local/lib
 add_lib_dir /usr/local/cuda/lib64
 add_lib_dir /usr/local/cuda-13.0/targets/x86_64-linux/lib
-add_rpath /opt/homebrew/opt/faiss/lib
 add_rpath /opt/homebrew/opt/libomp/lib
 add_rpath /opt/homebrew/opt/llvm/lib
 
 if [ "$SYSTEM_NAME" != "Darwin" ]; then
   for lib_name in \
-    faiss_gpu cuvs cugraph_c cugraph raft rmm \
     cublasLt cublas cusolver cusparse curand cufft cudart; do
     add_optional_lib "$lib_name"
   done
 fi
 
-PKG_LIBS_VALUE="$PKG_LIBS_VALUE -lfaiss $OMP_LIB"
+PKG_LIBS_VALUE="$PKG_LIBS_VALUE $OMP_LIB"
 if [ -n "$STDCXX_LIB" ]; then
   PKG_LIBS_VALUE="$PKG_LIBS_VALUE \"$STDCXX_LIB\""
 fi
@@ -130,5 +127,5 @@ EOF
 cat > "$PKG_DIR/src/Makevars.win" <<EOF
 CXX_STD = CXX17
 PKG_CPPFLAGS = -I"$KODAMA_CPP_ROOT/include"
-PKG_LIBS = "$KODAMA_CPP_LIB" -lfaiss
+PKG_LIBS = "$KODAMA_CPP_LIB"
 EOF

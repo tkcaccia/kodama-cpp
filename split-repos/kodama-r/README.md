@@ -13,7 +13,7 @@ At install time the package compiles only the small Rcpp bridge in `src/`.
 The bridge links against a previously built `libkodama_cpp` library:
 
 ```text
-R session -> kodamaR R functions -> Rcpp bridge -> libkodama_cpp -> FAISS/CUDA runtime
+R session -> kodamaR R functions -> Rcpp bridge -> libkodama_cpp
 ```
 
 The wrapper exports:
@@ -23,8 +23,7 @@ The wrapper exports:
 - `KODAMA.matrix()` for complete KODAMA matrix construction.
 - `KODAMA.visualization()` for UMAP/openTSNE embeddings from KODAMA graphs.
 - `KODAMA.graph()`, `KODAMA.makeSNNGraph()`, `makeSNNGraph()`, and
-  `KODAMA.clustering()` for graph construction and Louvain/Leiden/random-walk
-  clustering.
+  `KODAMA.clustering()` for graph construction and CPU random-walk clustering.
 
 ## Prerequisites
 
@@ -33,20 +32,18 @@ wrapper:
 
 - CMake and a C++17 compiler.
 - R, `Rcpp`, and `testthat`.
-- FAISS for CPU nearest-neighbor search.
-- Optional CUDA/cuVS/cuGraph runtime when installing a CUDA-enabled
-  `kodama-cpp` build.
+- The CUDA Toolkit when installing a CUDA-enabled `kodama-cpp` build.
 
 On macOS with Homebrew, the CPU development environment is typically:
 
 ```sh
-brew install cmake faiss libomp
+brew install cmake libomp
 Rscript -e 'install.packages(c("Rcpp", "testthat"), repos = "https://cloud.r-project.org")'
 ```
 
-On Linux/CUDA machines, use the same conda or micromamba environment used to
-build and run FAISS/CUDA. The important rule is that `R CMD INSTALL` and later
-R sessions must see the same shared libraries used by `kodama-cpp`.
+On Linux/CUDA machines, use the same CUDA environment used to build the core.
+The important rule is that `R CMD INSTALL` and later R sessions must see the
+same CUDA Toolkit libraries used by `kodama-cpp`.
 
 ## Build `kodama-cpp`
 
@@ -194,7 +191,7 @@ kk <- KODAMA.matrix(
 KODAMA.timing(kk)
 labels <- kk$best_labels
 um <- KODAMA.visualization(kk, "UMAP", k = 30, backend = "cuda")
-clu <- KODAMA.clustering(um, method = "leiden", n.clusters = length(unique(truth)))
+clu <- KODAMA.clustering(um, n.iterations = 10, random.walk.steps = 4)
 ```
 
 `KODAMA.matrix()` returns a `kodama_matrix` object. The raw C++ fields are still

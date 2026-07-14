@@ -44,11 +44,6 @@
     } else {
       ""
     }
-    cugraph_flag <- if (backend == "cuda" && any(file.exists(file.path(lib_dirs, "libcugraph_c.so")))) {
-      "-lcugraph_c"
-    } else {
-      ""
-    }
     old_pkgs <- Sys.getenv("PKG_CPPFLAGS")
     old_libs <- Sys.getenv("PKG_LIBS")
     on.exit({
@@ -64,7 +59,6 @@
         rpath_flags,
         "-lfaiss",
         if (backend == "cuda") paste(faiss_gpu_flag, "-lcuvs -lcublas -lcusolver -lcurand -lcufft -lcudart") else "",
-        cugraph_flag,
         omp_flag,
         conda_stdcxx
       )
@@ -261,11 +255,6 @@ KODAMA.matrix.cpp <- local({
       } else {
         ""
       }
-      cugraph_flag <- if (backend == "cuda" && any(file.exists(file.path(lib_dirs, "libcugraph_c.so")))) {
-        "-lcugraph_c"
-      } else {
-        ""
-      }
       old_pkgs <- Sys.getenv("PKG_CPPFLAGS")
       old_libs <- Sys.getenv("PKG_LIBS")
       on.exit({
@@ -281,7 +270,6 @@ KODAMA.matrix.cpp <- local({
           rpath_flags,
           "-lfaiss",
           if (backend == "cuda") paste(faiss_gpu_flag, "-lcuvs -lcublas -lcusolver -lcurand -lcufft -lcudart") else "",
-          cugraph_flag,
           omp_flag,
           conda_stdcxx
         )
@@ -568,118 +556,61 @@ KODAMA.knn.graph.cpp <- function(data,
 }
 
 KODAMA.graph.cluster.from.knn.cpp <- function(knn,
-                                              method = c("louvain", "leiden", "random_walking"),
-                                              backend = c("cpu", "cuda"),
                                               weight = c("distance", "adaptive", "binary", "snn"),
                                               n.cores = 4L,
-                                              n.runs = 1L,
                                               n.iterations = 10L,
                                               random.walk.steps = 4L,
                                               n.clusters = NULL,
-                                              resolution = NULL,
-                                              resolution.init = 0,
-                                              resolution.delta = 0.2,
                                               prune = 0,
-                                              mutual = FALSE,
-                                              seed = 1L,
-                                              gpu.device = 0L) {
-  method <- match.arg(method)
-  backend <- match.arg(backend)
-  .kodama_cpp_temp_load(backend)
+                                              mutual = FALSE) {
+  .kodama_cpp_temp_load("cpu")
   weight <- match.arg(weight)
-  .kodama_validate_cluster_target(resolution, n.clusters)
   kodama_graph_cluster_from_knn_temp(
     indices = knn$indices,
     distances = knn$distances,
-    method = method,
-    backend = backend,
     weight = weight,
     n_threads = as.integer(n.cores),
-    n_runs = as.integer(n.runs),
     n_iterations = as.integer(n.iterations),
     random_walk_steps = as.integer(random.walk.steps),
     n_clusters = if (is.null(n.clusters)) 0L else as.integer(n.clusters),
-    resolution = if (is.null(resolution)) 1 else as.numeric(resolution),
-    resolution_init = as.numeric(resolution.init),
-    resolution_delta = as.numeric(resolution.delta),
     prune = as.numeric(prune),
-    mutual = isTRUE(mutual),
-    seed = as.integer(seed),
-    gpu_device = as.integer(gpu.device)
+    mutual = isTRUE(mutual)
   )
 }
 
 KODAMA.graph.cluster.cpp <- function(embedding,
-                                     method = c("louvain", "leiden", "random_walking"),
-                                     backend = c("cpu", "cuda"),
                                      graph.backend = c("cpu", "cuda"),
                                      weight = c("distance", "adaptive", "binary", "snn"),
                                      metric = "euclidean",
                                      k = 30L,
                                      n.cores = 4L,
-                                     n.runs = 1L,
                                      n.iterations = 10L,
                                      random.walk.steps = 4L,
                                      n.clusters = NULL,
-                                     resolution = NULL,
-                                     resolution.init = 0,
-                                     resolution.delta = 0.2,
                                      prune = 0,
                                      mutual = FALSE,
-                                     seed = 1L,
                                      gpu.device = 0L) {
-  method <- match.arg(method)
-  backend <- match.arg(backend)
   graph.backend <- match.arg(graph.backend)
-  .kodama_cpp_temp_load(if (backend == "cuda" || graph.backend == "cuda") "cuda" else "cpu")
+  .kodama_cpp_temp_load(graph.backend)
   weight <- match.arg(weight)
-  .kodama_validate_cluster_target(resolution, n.clusters)
   embedding <- as.matrix(embedding)
   storage.mode(embedding) <- "double"
   kodama_embedding_cluster_temp(
     embedding = embedding,
-    method = method,
-    backend = backend,
     graph_backend = graph.backend,
     weight = weight,
     metric = metric,
     k = as.integer(k),
     n_threads = as.integer(n.cores),
-    n_runs = as.integer(n.runs),
     n_iterations = as.integer(n.iterations),
     random_walk_steps = as.integer(random.walk.steps),
     n_clusters = if (is.null(n.clusters)) 0L else as.integer(n.clusters),
-    resolution = if (is.null(resolution)) 1 else as.numeric(resolution),
-    resolution_init = as.numeric(resolution.init),
-    resolution_delta = as.numeric(resolution.delta),
     prune = as.numeric(prune),
     mutual = isTRUE(mutual),
-    seed = as.integer(seed),
     gpu_device = as.integer(gpu.device)
   )
 }
 
 `%||%` <- function(x, y) {
   if (is.null(x)) y else x
-}
-
-.kodama_validate_cluster_target <- function(resolution, n.clusters) {
-  has_resolution <- !is.null(resolution)
-  has_clusters <- !is.null(n.clusters)
-  if (has_resolution == has_clusters) {
-    stop("Provide exactly one of `resolution` or `n.clusters`.", call. = FALSE)
-  }
-  if (has_clusters) {
-    n.clusters <- suppressWarnings(as.integer(n.clusters))
-    if (length(n.clusters) != 1L || is.na(n.clusters) || n.clusters < 1L) {
-      stop("`n.clusters` must be a positive integer.", call. = FALSE)
-    }
-  }
-  if (has_resolution) {
-    resolution <- suppressWarnings(as.numeric(resolution))
-    if (length(resolution) != 1L || is.na(resolution) || !is.finite(resolution) || resolution <= 0) {
-      stop("`resolution` must be a positive number.", call. = FALSE)
-    }
-  }
-  invisible(TRUE)
 }

@@ -564,7 +564,7 @@ KODAMA.diagnostics <- function(all = FALSE) {
     linked <- tryCatch(system2(linker, args, stdout = TRUE, stderr = TRUE), error = function(e) character())
   }
   if (!all && length(linked)) {
-    linked <- grep("faiss|omp|gomp|blas|openblas|mkl|cuda|cublas|cufft|cuvs|cugraph|stdc", linked, ignore.case = TRUE, value = TRUE)
+    linked <- grep("omp|gomp|blas|openblas|mkl|cuda|cublas|cufft|stdc", linked, ignore.case = TRUE, value = TRUE)
   }
   env <- Sys.getenv(c(
     "CONDA_PREFIX", "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH",
@@ -725,86 +725,59 @@ KODAMA.visualization <- function(x,
   )
 }
 
-#' Cluster a graph or embedding with Louvain, Leiden, or random walk
+#' Cluster a graph or embedding with random walks
 #'
 #' @param x Input embedding matrix, KODAMA result, or KNN graph list.
-#' @param method Clustering method.
-#' @param n.clusters Optional target number of clusters. A value of zero uses
-#'   the supplied `resolution` without target-cluster search.
-#' @param resolution Resolution value used by Louvain/Leiden-style methods.
+#' @param n.clusters Optional target number of clusters. Random-walk clustering
+#'   reports an error when it cannot produce the requested count exactly.
 #' @param weight Graph edge-weighting rule.
 #' @param k Number of neighbors used when `x` is an embedding matrix.
 #' @param metric Distance or similarity metric used when `x` is a matrix.
-#' @param backend Execution backend for clustering.
 #' @param graph.backend Backend used to construct a graph from an embedding.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
-#' @param n.runs Number of clustering restarts.
 #' @param n.iterations Number of clustering refinement iterations.
 #' @param random.walk.steps Number of random-walk steps.
-#' @param gpu.device CUDA device id when `backend = "cuda"`.
-#' @param seed Integer random seed.
+#' @param gpu.device CUDA device id when `graph.backend = "cuda"`.
 #' @export
 KODAMA.clustering <- function(x,
-                              method = c("louvain", "leiden", "random_walk"),
                               n.clusters = 0L,
-                              resolution = 1,
                               weight = c("distance", "snn", "adaptive", "binary"),
                               k = 30L,
                               metric = c("euclidean", "cosine", "inner_product"),
-                              backend = c("cpu", "cuda"),
-                              graph.backend = backend,
+                              graph.backend = c("cpu", "cuda"),
                               n.cores = 4L,
-                              n.runs = 1L,
                               n.iterations = 10L,
                               random.walk.steps = 4L,
-                              gpu.device = 0L,
-                              seed = 1L) {
-  method <- match.arg(method)
+                              gpu.device = 0L) {
   weight <- match.arg(weight)
   metric <- match.arg(metric)
-  backend <- match.arg(backend)
   graph.backend <- match.arg(graph.backend, c("cpu", "cuda"))
   graph <- extract_kodama_graph(x)
   if (!is.null(graph)) {
     return(kodama_graph_cluster_cpp(
       graph$indices,
       graph$distances,
-      method,
-      backend,
       weight,
       as.integer(n.cores),
-      as.integer(n.runs),
       as.integer(n.iterations),
       as.integer(random.walk.steps),
       as.integer(n.clusters),
-      as.numeric(resolution),
       0,
-      0.2,
-      0,
-      FALSE,
-      as.integer(seed),
-      as.integer(gpu.device)
+      FALSE
     ))
   }
   kodama_embedding_cluster_cpp(
     as_kodama_matrix(x),
-    method,
-    backend,
     graph.backend,
     weight,
     metric,
     as.integer(k),
     as.integer(n.cores),
-    as.integer(n.runs),
     as.integer(n.iterations),
     as.integer(random.walk.steps),
     as.integer(n.clusters),
-    as.numeric(resolution),
-    0,
-    0.2,
     0,
     FALSE,
-    as.integer(seed),
     as.integer(gpu.device)
   )
 }

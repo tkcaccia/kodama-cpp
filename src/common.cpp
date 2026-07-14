@@ -73,15 +73,6 @@ const char* to_string(GraphWeightType weight_type) {
   return "unknown";
 }
 
-const char* to_string(GraphClusterMethod method) {
-  switch (method) {
-    case GraphClusterMethod::Louvain: return "louvain";
-    case GraphClusterMethod::Leiden: return "leiden";
-    case GraphClusterMethod::RandomWalking: return "random_walking";
-  }
-  return "unknown";
-}
-
 const char* to_string(GraphFeatureMode mode) {
   switch (mode) {
     case GraphFeatureMode::LaplacianSelfTuning: return "laplacian_self_tuning";

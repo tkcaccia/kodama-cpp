@@ -17,25 +17,8 @@
 #include <utility>
 #include <vector>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
 #ifdef KODAMA_ENABLE_CUDA
 #include "kodama_matrix_cuda.hpp"
-#endif
-
-#ifdef KODAMA_ENABLE_CUGRAPH
-#define FALSE CUGRAPH_FALSE
-#define TRUE CUGRAPH_TRUE
-#include <cugraph_c/array.h>
-#include <cugraph_c/community_algorithms.h>
-#include <cugraph_c/error.h>
-#include <cugraph_c/graph.h>
-#include <cugraph_c/random.h>
-#include <cugraph_c/resource_handle.h>
-#undef FALSE
-#undef TRUE
 #endif
 
 namespace kodama {
@@ -45,23 +28,6 @@ struct Timer {
   std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
   double seconds() const {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-  }
-};
-
-struct OmpScope {
-  int previous = 0;
-  explicit OmpScope(int n_threads) {
-#ifdef _OPENMP
-    previous = omp_get_max_threads();
-    if (n_threads > 0) omp_set_num_threads(n_threads);
-#else
-    (void)n_threads;
-#endif
-  }
-  ~OmpScope() {
-#ifdef _OPENMP
-    if (previous > 0) omp_set_num_threads(previous);
-#endif
   }
 };
 
@@ -558,12 +524,6 @@ std::vector<int> compact(std::vector<int> x) {
   return x;
 }
 
-int dense_membership_count(const std::vector<int>& membership) {
-  int count = 0;
-  for (int c : membership) count = std::max(count, c + 1);
-  return count;
-}
-
 std::vector<double> community_degree(const CsrGraph& g, const std::vector<int>& membership) {
   int max_comm = 0;
   for (int c : membership) max_comm = std::max(max_comm, c);
@@ -572,7 +532,7 @@ std::vector<double> community_degree(const CsrGraph& g, const std::vector<int>& 
   return deg;
 }
 
-double modularity(const CsrGraph& g, const std::vector<int>& membership, double resolution) {
+double modularity(const CsrGraph& g, const std::vector<int>& membership) {
   if (g.n == 0 || g.total_weight <= 0.0) return 0.0;
   const double two_m = 2.0 * g.total_weight;
   double internal = 0.0;
@@ -586,103 +546,7 @@ double modularity(const CsrGraph& g, const std::vector<int>& membership, double 
   const std::vector<double> cdeg = community_degree(g, membership);
   double expected = 0.0;
   for (double d : cdeg) expected += d * d;
-  return internal / two_m - resolution * expected / (two_m * two_m);
-}
-
-std::vector<int> louvain_local_moving(const CsrGraph& g, int max_iter, double resolution, int n_threads, int seed) {
-  std::vector<int> membership(static_cast<std::size_t>(g.n));
-  std::iota(membership.begin(), membership.end(), 0);
-  if (g.total_weight <= 0.0) return membership;
-  const double two_m = 2.0 * g.total_weight;
-  max_iter = std::max(1, max_iter);
-  (void)n_threads;
-  (void)seed;
-  std::vector<double> cdeg = community_degree(g, membership);
-  for (int iter = 0; iter < max_iter; ++iter) {
-    int changed = 0;
-    for (int u = 0; u < g.n; ++u) {
-      std::unordered_map<int, double> neigh;
-      neigh.reserve(static_cast<std::size_t>(g.ptr[static_cast<std::size_t>(u + 1)] - g.ptr[static_cast<std::size_t>(u)] + 1));
-      const int old = membership[static_cast<std::size_t>(u)];
-      for (int p = g.ptr[static_cast<std::size_t>(u)]; p < g.ptr[static_cast<std::size_t>(u + 1)]; ++p) {
-        neigh[membership[static_cast<std::size_t>(g.to[static_cast<std::size_t>(p)])]] += g.weight[static_cast<std::size_t>(p)];
-      }
-      const double k_i = g.degree[static_cast<std::size_t>(u)];
-      cdeg[static_cast<std::size_t>(old)] -= k_i;
-      int best = old;
-      double best_gain = 0.0;
-      for (const auto& kv : neigh) {
-        if (kv.first < 0 || kv.first >= static_cast<int>(cdeg.size())) continue;
-        const double gain = kv.second - resolution * k_i * cdeg[static_cast<std::size_t>(kv.first)] / two_m;
-        if (gain > best_gain + 1e-12 || (std::abs(gain - best_gain) <= 1e-12 && kv.first < best && gain > 0.0)) {
-          best_gain = gain;
-          best = kv.first;
-        }
-      }
-      cdeg[static_cast<std::size_t>(best)] += k_i;
-      if (best != old) {
-        membership[static_cast<std::size_t>(u)] = best;
-        ++changed;
-      }
-    }
-    membership = compact(std::move(membership));
-    cdeg = community_degree(g, membership);
-    if (changed == 0) break;
-  }
-  return compact(std::move(membership));
-}
-
-CsrGraph coarsen_graph(const CsrGraph& g, const std::vector<int>& membership, int n_communities) {
-  std::unordered_map<std::uint64_t, double> weights;
-  weights.reserve(static_cast<std::size_t>(g.ptr.back() / 2 + 1));
-  for (int u = 0; u < g.n; ++u) {
-    const int cu = membership[static_cast<std::size_t>(u)];
-    for (int p = g.ptr[static_cast<std::size_t>(u)]; p < g.ptr[static_cast<std::size_t>(u + 1)]; ++p) {
-      const int v = g.to[static_cast<std::size_t>(p)];
-      if (v <= u) continue;
-      const int cv = membership[static_cast<std::size_t>(v)];
-      if (cu == cv) continue;
-      weights[edge_key(cu, cv)] += g.weight[static_cast<std::size_t>(p)];
-    }
-  }
-
-  EdgeList edges;
-  edges.n = n_communities;
-  edges.from.reserve(weights.size());
-  edges.to.reserve(weights.size());
-  edges.weight.reserve(weights.size());
-  for (const auto& kv : weights) {
-    if (kv.second <= 0.0 || !std::isfinite(kv.second)) continue;
-    edges.from.push_back(edge_from(kv.first));
-    edges.to.push_back(edge_to(kv.first));
-    edges.weight.push_back(kv.second);
-  }
-  return csr_from_edges(edges);
-}
-
-std::vector<int> louvain_multilevel(const CsrGraph& g, int max_iter, double resolution, int n_threads, int seed) {
-  std::vector<int> original_to_current(static_cast<std::size_t>(g.n));
-  std::iota(original_to_current.begin(), original_to_current.end(), 0);
-  if (g.total_weight <= 0.0) return original_to_current;
-
-  CsrGraph current = g;
-  const int max_levels = std::max(1, std::min(50, max_iter));
-  for (int level = 0; level < max_levels; ++level) {
-    std::vector<int> level_membership =
-      louvain_local_moving(current, max_iter, resolution, n_threads, seed + level * 104729);
-    level_membership = compact(std::move(level_membership));
-    const int n_communities = dense_membership_count(level_membership);
-    if (n_communities >= current.n) break;
-
-    for (int& c : original_to_current) c = level_membership[static_cast<std::size_t>(c)];
-    original_to_current = compact(std::move(original_to_current));
-    if (n_communities <= 1) break;
-
-    CsrGraph next = coarsen_graph(current, level_membership, n_communities);
-    if (next.n >= current.n || next.total_weight <= 0.0) break;
-    current = std::move(next);
-  }
-  return compact(std::move(original_to_current));
+  return internal / two_m - expected / (two_m * two_m);
 }
 
 std::vector<int> split_disconnected(const CsrGraph& g, const std::vector<int>& membership) {
@@ -770,309 +634,53 @@ GraphClusterResult make_result(const CsrGraph& g, const std::vector<int>& member
     out.membership[static_cast<std::size_t>(i)] = membership0[static_cast<std::size_t>(i)] + 1;
     max_comm = std::max(max_comm, membership0[static_cast<std::size_t>(i)] + 1);
   }
-  out.modularity = modularity(g, membership0, options.resolution);
+  out.modularity = modularity(g, membership0);
   out.n_communities = max_comm;
   out.n_vertices = g.n;
   out.n_edges = n_edges;
   out.target_clusters = options.target_clusters;
   out.target_gap = options.target_clusters > 0 ? std::abs(out.n_communities - options.target_clusters) : 0;
-  out.target_exact = options.target_clusters > 0 && out.target_gap == 0;
-  out.selected_resolution = options.resolution;
+  out.target_exact = options.target_clusters == 0 || out.target_gap == 0;
   out.backend = backend;
-  out.method = options.method;
   out.runtime_seconds = elapsed;
   return out;
-}
-
-GraphClusterResult run_cpu_cluster_once(const CsrGraph& g, const EdgeList& edge_list, const GraphClusterOptions& options, double elapsed) {
-  std::vector<int> best;
-  double best_mod = -std::numeric_limits<double>::infinity();
-  GraphClusterOptions opts = options;
-  opts.n_runs = std::max(1, opts.n_runs);
-  opts.n_iterations = std::max(1, opts.n_iterations);
-  opts.random_walk_steps = std::max(1, opts.random_walk_steps);
-  opts.n_threads = std::max(1, opts.n_threads);
-  if (!std::isfinite(opts.resolution) || opts.resolution <= 0.0) opts.resolution = 1.0;
-  std::vector<double> all(static_cast<std::size_t>(opts.n_runs), 0.0);
-  int selected = 1;
-  for (int run = 0; run < opts.n_runs; ++run) {
-    const int run_seed = static_cast<int>(opts.seed + static_cast<std::uint64_t>(run) * 104729ULL);
-    std::vector<int> membership;
-    if (opts.method == GraphClusterMethod::Louvain) {
-      membership = louvain_multilevel(g, opts.n_iterations, opts.resolution, opts.n_threads, run_seed);
-    } else if (opts.method == GraphClusterMethod::Leiden) {
-      membership = split_disconnected(g, louvain_multilevel(g, std::max(2, opts.n_iterations), opts.resolution, opts.n_threads, run_seed));
-    } else {
-      membership = random_walk_cluster(g, opts.random_walk_steps, opts.n_iterations, opts.n_threads);
-    }
-    const double mod = modularity(g, membership, opts.resolution);
-    all[static_cast<std::size_t>(run)] = mod;
-    if (best.empty() || mod > best_mod) {
-      best = std::move(membership);
-      best_mod = mod;
-      selected = run + 1;
-    }
-  }
-  GraphClusterResult out = make_result(g, best, opts, static_cast<int>(edge_list.from.size()), Backend::CPU, elapsed);
-  out.selected_run = selected;
-  out.all_modularity = std::move(all);
-  return out;
-}
-
-template <typename RunAtResolution>
-GraphClusterResult search_target_clusters(GraphClusterOptions options, RunAtResolution run_at_resolution, double elapsed_start) {
-  if (options.target_clusters < 1) {
-    return run_at_resolution(options.resolution, elapsed_start);
-  }
-  if (options.method == GraphClusterMethod::RandomWalking) {
-    GraphClusterResult out = run_at_resolution(options.resolution, elapsed_start);
-    if (out.n_communities != options.target_clusters) {
-      std::ostringstream oss;
-      oss << "random_walking produced " << out.n_communities
-          << " clusters, but target_clusters=" << options.target_clusters
-          << ". The current random-walking implementation has no resolution parameter to tune exactly.";
-      throw std::runtime_error(oss.str());
-    }
-    return out;
-  }
-
-  double delta = std::isfinite(options.target_delta) && options.target_delta > 0.0 ? options.target_delta : 0.2;
-  const int max_steps = std::max(1, options.target_max_steps);
-  GraphClusterResult best;
-  bool have_best = false;
-  int steps = 0;
-
-  auto effective_gap = [&](const GraphClusterResult& candidate) {
-    if (candidate.membership.empty() || options.target_clusters <= 0) return std::numeric_limits<double>::infinity();
-    std::unordered_map<int, int> counts;
-    counts.reserve(candidate.membership.size());
-    for (int c : candidate.membership) ++counts[c];
-    const double n = static_cast<double>(candidate.membership.size());
-    double entropy = 0.0;
-    for (const auto& kv : counts) {
-      const double p = static_cast<double>(kv.second) / n;
-      if (p > 0.0) entropy -= p * std::log(p);
-    }
-    return std::abs(std::exp(entropy) - static_cast<double>(options.target_clusters));
-  };
-
-  auto keep_best = [&](const GraphClusterResult& candidate) {
-    const double candidate_eff_gap = effective_gap(candidate);
-    const double best_eff_gap = have_best ? effective_gap(best) : std::numeric_limits<double>::infinity();
-    if (!have_best ||
-        candidate.target_gap < best.target_gap ||
-        (candidate.target_gap == best.target_gap && candidate_eff_gap < best_eff_gap - 1e-9) ||
-        (candidate.target_gap == best.target_gap && std::abs(candidate_eff_gap - best_eff_gap) <= 1e-9 &&
-         candidate.modularity > best.modularity)) {
-      best = candidate;
-      have_best = true;
-    }
-  };
-
-  auto run_candidate = [&](double resolution) {
-    const double safe_res = std::max(resolution, 1e-12);
-    GraphClusterResult out = run_at_resolution(safe_res, elapsed_start);
-    out.target_clusters = options.target_clusters;
-    out.target_gap = std::abs(out.n_communities - options.target_clusters);
-    out.target_exact = out.target_gap == 0;
-    out.selected_resolution = safe_res;
-    keep_best(out);
-    ++steps;
-    return out;
-  };
-
-  double scan_res = options.target_resolution_init - delta;
-  double low_res = std::numeric_limits<double>::quiet_NaN();
-  double high_res = std::numeric_limits<double>::quiet_NaN();
-  bool have_low = false;
-  bool have_high = false;
-
-  while (steps < max_steps) {
-    scan_res += delta;
-    GraphClusterResult out = run_candidate(scan_res);
-    if (out.n_communities <= options.target_clusters) {
-      low_res = out.selected_resolution;
-      have_low = true;
-    }
-    if (out.n_communities > options.target_clusters) {
-      high_res = out.selected_resolution;
-      have_high = true;
-      break;
-    }
-    if (out.n_communities == options.target_clusters) {
-      if (steps >= max_steps) break;
-      scan_res += delta;
-      GraphClusterResult probe = run_candidate(scan_res);
-      if (probe.n_communities <= options.target_clusters) {
-        low_res = probe.selected_resolution;
-        have_low = true;
-      } else {
-        high_res = probe.selected_resolution;
-        have_high = true;
-        break;
-      }
-    }
-  }
-
-  if (!have_low) {
-    low_res = 1e-12;
-    have_low = true;
-  }
-  if (!have_high) {
-    high_res = std::max(low_res + delta, delta);
-  }
-
-  while (steps < max_steps && high_res > low_res) {
-    const double mid = 0.5 * (low_res + high_res);
-    if (mid <= low_res || mid >= high_res) break;
-    GraphClusterResult out = run_candidate(mid);
-    if (out.n_communities <= options.target_clusters) {
-      low_res = out.selected_resolution;
-    } else {
-      high_res = out.selected_resolution;
-    }
-  }
-
-  if (have_best && best.target_exact) return best;
-  std::ostringstream oss;
-  oss << "Could not obtain exactly " << options.target_clusters
-      << " clusters after " << steps << " resolution-search steps";
-  if (have_best) {
-    oss << "; closest result had " << best.n_communities
-        << " clusters at resolution " << best.selected_resolution << ".";
-  } else {
-    oss << ".";
-  }
-  throw std::runtime_error(oss.str());
 }
 
 GraphClusterResult run_cpu_cluster(const EdgeList& edge_list, const GraphClusterOptions& options, double elapsed_start = 0.0) {
   Timer timer;
   CsrGraph g = csr_from_edges(edge_list);
   if (g.n == 0) throw std::invalid_argument("empty graph.");
-  if (options.target_clusters > g.n) throw std::invalid_argument("target_clusters cannot exceed number of graph vertices.");
-  auto run_at = [&](double resolution, double start) {
-    GraphClusterOptions opts = options;
-    opts.resolution = resolution;
-    return run_cpu_cluster_once(g, edge_list, opts, start + timer.seconds());
-  };
-  return search_target_clusters(options, run_at, elapsed_start);
-}
-
-#ifdef KODAMA_ENABLE_CUGRAPH
-std::string cugraph_error_string(cugraph_error_t* error) {
-  std::string msg = error ? cugraph_error_message(error) : "unknown cuGraph error";
-  if (error) cugraph_error_free(error);
-  return msg;
-}
-
-void check_cugraph(cugraph_error_code_t code, cugraph_error_t* error, const char* what) {
-  if (code != CUGRAPH_SUCCESS) throw std::runtime_error(std::string(what) + ": " + cugraph_error_string(error));
-  if (error) cugraph_error_free(error);
-}
-
-template <typename T>
-struct DeviceArray {
-  cugraph_type_erased_device_array_t* array = nullptr;
-  cugraph_type_erased_device_array_view_t* view = nullptr;
-  DeviceArray(const cugraph_resource_handle_t* handle, const std::vector<T>& host, cugraph_data_type_id_t dtype) {
-    cugraph_error_t* error = nullptr;
-    check_cugraph(cugraph_type_erased_device_array_create(handle, host.size(), dtype, &array, &error), error, "cuGraph device array create");
-    view = cugraph_type_erased_device_array_view(array);
-    check_cugraph(cugraph_type_erased_device_array_view_copy_from_host(handle, view, reinterpret_cast<const byte_t*>(host.data()), &error), error, "cuGraph host-to-device copy");
+  if (options.target_clusters > g.n) {
+    throw std::invalid_argument("target_clusters cannot exceed number of graph vertices.");
   }
-  ~DeviceArray() {
-    if (view) cugraph_type_erased_device_array_view_free(view);
-    if (array) cugraph_type_erased_device_array_free(array);
-  }
-};
 
-std::vector<int32_t> copy_i32_result(const cugraph_resource_handle_t* handle, cugraph_type_erased_device_array_view_t* view) {
-  std::vector<int32_t> out(cugraph_type_erased_device_array_view_size(view));
-  cugraph_error_t* error = nullptr;
-  check_cugraph(cugraph_type_erased_device_array_view_copy_to_host(handle, reinterpret_cast<byte_t*>(out.data()), view, &error), error, "cuGraph device-to-host copy");
+  GraphClusterOptions opts = options;
+  opts.n_iterations = std::max(1, opts.n_iterations);
+  opts.random_walk_steps = std::max(1, opts.random_walk_steps);
+  opts.n_threads = std::max(1, opts.n_threads);
+  std::vector<int> membership = random_walk_cluster(
+    g,
+    opts.random_walk_steps,
+    opts.n_iterations,
+    opts.n_threads
+  );
+  GraphClusterResult out = make_result(
+    g,
+    membership,
+    opts,
+    static_cast<int>(edge_list.from.size()),
+    Backend::CPU,
+    elapsed_start + timer.seconds()
+  );
+  if (opts.target_clusters > 0 && !out.target_exact) {
+    std::ostringstream oss;
+    oss << "random_walking produced " << out.n_communities
+        << " clusters, but target_clusters=" << opts.target_clusters
+        << ". Random-walk clustering has no resolution parameter to tune exactly.";
+    throw std::runtime_error(oss.str());
+  }
   return out;
 }
-
-GraphClusterResult run_cugraph_cluster(const EdgeList& edge_list, const GraphClusterOptions& options, double elapsed_start) {
-  if (options.method == GraphClusterMethod::RandomWalking) throw std::runtime_error("CUDA random_walking clustering is not implemented; use CPU.");
-  if (edge_list.from.empty()) throw std::invalid_argument("cuGraph clustering requires at least one edge.");
-  Timer timer;
-  const int m = static_cast<int>(edge_list.from.size());
-  std::vector<int32_t> src(static_cast<std::size_t>(m));
-  std::vector<int32_t> dst(static_cast<std::size_t>(m));
-  std::vector<float> w(static_cast<std::size_t>(m));
-  for (int i = 0; i < m; ++i) {
-    src[static_cast<std::size_t>(i)] = edge_list.from[static_cast<std::size_t>(i)];
-    dst[static_cast<std::size_t>(i)] = edge_list.to[static_cast<std::size_t>(i)];
-    w[static_cast<std::size_t>(i)] = static_cast<float>(edge_list.weight[static_cast<std::size_t>(i)]);
-  }
-  std::vector<int32_t> vertices(static_cast<std::size_t>(edge_list.n));
-  for (int i = 0; i < edge_list.n; ++i) vertices[static_cast<std::size_t>(i)] = i;
-  cugraph_resource_handle_t* handle = cugraph_create_resource_handle(nullptr);
-  if (!handle) throw std::runtime_error("cuGraph resource handle creation failed.");
-  try {
-    DeviceArray<int32_t> d_vertices(handle, vertices, INT32);
-    DeviceArray<int32_t> d_src(handle, src, INT32);
-    DeviceArray<int32_t> d_dst(handle, dst, INT32);
-    DeviceArray<float> d_weight(handle, w, FLOAT32);
-    cugraph_graph_properties_t props;
-    props.is_symmetric = static_cast<bool_t>(1);
-    props.is_multigraph = static_cast<bool_t>(0);
-    cugraph_graph_t* graph = nullptr;
-    cugraph_error_t* error = nullptr;
-    check_cugraph(cugraph_graph_create_sg(handle, &props, d_vertices.view, d_src.view, d_dst.view, d_weight.view,
-                                          nullptr, nullptr, static_cast<bool_t>(0), static_cast<bool_t>(0),
-                                          static_cast<bool_t>(1), static_cast<bool_t>(1), static_cast<bool_t>(0),
-                                          static_cast<bool_t>(0), &graph, &error), error, "cuGraph graph create");
-    std::vector<int32_t> best_membership;
-    double best_mod = -std::numeric_limits<double>::infinity();
-    const int runs = std::max(1, options.n_runs);
-    std::vector<double> all(static_cast<std::size_t>(runs), 0.0);
-    int selected = 1;
-    for (int run = 0; run < runs; ++run) {
-      cugraph_hierarchical_clustering_result_t* result = nullptr;
-      if (options.method == GraphClusterMethod::Louvain) {
-        check_cugraph(cugraph_louvain(handle, graph, static_cast<size_t>(std::max(1, options.n_iterations)), 1e-7,
-                                      options.resolution, static_cast<bool_t>(0), &result, &error), error, "cuGraph Louvain");
-      } else {
-        cugraph_rng_state_t* rng = nullptr;
-        check_cugraph(cugraph_rng_state_create(handle, options.seed + static_cast<std::uint64_t>(run) * 104729ULL, &rng, &error), error, "cuGraph RNG create");
-        check_cugraph(cugraph_leiden(handle, rng, graph, static_cast<size_t>(std::max(1, options.n_iterations)),
-                                     options.resolution, 0.01, static_cast<bool_t>(0), &result, &error), error, "cuGraph Leiden");
-        cugraph_rng_state_free(rng);
-      }
-      const double mod = cugraph_hierarchical_clustering_result_get_modularity(result);
-      all[static_cast<std::size_t>(run)] = mod;
-      if (best_membership.empty() || mod > best_mod) {
-        std::vector<int32_t> rv = copy_i32_result(handle, cugraph_hierarchical_clustering_result_get_vertices(result));
-        std::vector<int32_t> rc = copy_i32_result(handle, cugraph_hierarchical_clustering_result_get_clusters(result));
-        best_membership.assign(static_cast<std::size_t>(edge_list.n), 0);
-        for (std::size_t i = 0; i < rv.size(); ++i) {
-          const int v = static_cast<int>(rv[i]);
-          if (v >= 0 && v < edge_list.n) best_membership[static_cast<std::size_t>(v)] = rc[i];
-        }
-        best_mod = mod;
-        selected = run + 1;
-      }
-      cugraph_hierarchical_clustering_result_free(result);
-    }
-    cugraph_graph_free(graph);
-    cugraph_free_resource_handle(handle);
-    std::vector<int> membership(best_membership.begin(), best_membership.end());
-    membership = compact(std::move(membership));
-    CsrGraph cpu_graph = csr_from_edges(edge_list);
-    GraphClusterResult out = make_result(cpu_graph, membership, options, m, Backend::CUDA, elapsed_start + timer.seconds());
-    out.modularity = best_mod;
-    out.selected_run = selected;
-    out.all_modularity = std::move(all);
-    return out;
-  } catch (...) {
-    cugraph_free_resource_handle(handle);
-    throw;
-  }
-}
-#endif
 
 }  // namespace
 
@@ -1162,29 +770,12 @@ GraphClusterResult KODAMAGraphCluster_CPU(const NeighborGraph& graph, int sample
   return run_cpu_cluster(edges, opts, timer.seconds());
 }
 
-GraphClusterResult KODAMAGraphCluster_CUDA(const NeighborGraph& graph, int samples, const GraphClusterOptions& options) {
-  Timer timer;
-  GraphClusterOptions opts = options;
-  opts.backend = Backend::CUDA;
-  EdgeList edges = edge_list_from_graph(graph, samples, opts);
-  if (opts.target_clusters > samples) throw std::invalid_argument("target_clusters cannot exceed number of graph vertices.");
-#ifdef KODAMA_ENABLE_CUGRAPH
-  auto run_at = [&](double resolution, double start) {
-    GraphClusterOptions run_opts = opts;
-    run_opts.resolution = resolution;
-    return run_cugraph_cluster(edges, run_opts, start + timer.seconds());
-  };
-  return search_target_clusters(opts, run_at, timer.seconds());
-#else
-  (void)edges;
-  throw std::runtime_error("KODAMAGraphCluster_CUDA requires a CUDA build with RAPIDS libcugraph.");
-#endif
-}
-
 GraphClusterResult KODAMAGraphCluster(const NeighborGraph& graph, int samples, const GraphClusterOptions& options) {
-  if (options.backend == Backend::CUDA) return KODAMAGraphCluster_CUDA(graph, samples, options);
-  if (options.backend == Backend::Metal) {
-    throw std::runtime_error("Metal graph clustering is not implemented; use Backend::CPU explicitly.");
+  if (options.backend != Backend::CPU) {
+    throw std::runtime_error(
+      "Random-walk clustering is CPU-only. Construct the graph with the requested "
+      "accelerator, then call KODAMAGraphCluster_CPU explicitly."
+    );
   }
   return KODAMAGraphCluster_CPU(graph, samples, options);
 }
@@ -1197,34 +788,28 @@ GraphClusterResult KODAMAEmbeddingGraphCluster(MatrixView embedding, const Neigh
   const int samples = static_cast<int>(embedding.rows);
   if (samples < 2) throw std::invalid_argument("KODAMAEmbeddingCluster requires at least two rows.");
   GraphClusterOptions opts = options;
-  if (opts.backend == Backend::Metal) {
-    throw std::runtime_error("Metal graph clustering is not implemented; use Backend::CPU explicitly.");
+  if (opts.backend != Backend::CPU) {
+    throw std::runtime_error(
+      "Random-walk clustering is CPU-only. Construct the graph with the requested "
+      "accelerator, then call KODAMAEmbeddingGraphCluster with Backend::CPU."
+    );
   }
   EdgeList edges = edge_list_from_graph(graph, samples, opts);
   if (opts.target_clusters > 0) bridge_embedding_components(edges, embedding);
-  GraphClusterResult out;
-  if (opts.backend == Backend::CUDA) {
-    if (opts.target_clusters > samples) throw std::invalid_argument("target_clusters cannot exceed number of graph vertices.");
-#ifdef KODAMA_ENABLE_CUGRAPH
-    auto run_at = [&](double resolution, double start) {
-      GraphClusterOptions run_opts = opts;
-      run_opts.resolution = resolution;
-      return run_cugraph_cluster(edges, run_opts, start + timer.seconds());
-    };
-    out = search_target_clusters(opts, run_at, timer.seconds());
-#else
-    throw std::runtime_error("KODAMAEmbeddingCluster with CUDA clustering requires a CUDA build with RAPIDS libcugraph.");
-#endif
-  } else {
-    opts.backend = Backend::CPU;
-    out = run_cpu_cluster(edges, opts, timer.seconds());
-  }
+  GraphClusterResult out = run_cpu_cluster(edges, opts, timer.seconds());
   out.runtime_seconds = timer.seconds();
   return out;
 }
 
 GraphClusterResult KODAMAEmbeddingCluster(MatrixView embedding, const GraphClusterOptions& options) {
   Timer timer;
+  if (options.backend != Backend::CPU) {
+    throw std::runtime_error(
+      "KODAMAEmbeddingCluster provides CPU random-walk clustering only. Use "
+      "KODAMAKNNGraph_CUDA or KODAMAKNNGraph_METAL separately when accelerated "
+      "graph construction is required."
+    );
+  }
   GraphClusterOptions graph_options = options;
   NeighborGraph graph = KODAMAKNNGraph(embedding, graph_options);
   GraphClusterResult out = KODAMAEmbeddingGraphCluster(embedding, graph, options);

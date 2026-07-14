@@ -37,10 +37,10 @@ kodama_opentsne_cpp <- function(indices, distances, init = NULL, n_neighbors = 0
     .Call(`_kodamaR_kodama_opentsne_cpp`, indices, distances, init, n_neighbors, perplexity, theta, early_exaggeration_iter, n_iter, early_exaggeration, exaggeration, learning_rate, learning_rate_auto, initial_momentum, final_momentum, min_gain, max_step_norm, n_threads, seed, backend, gpu_device)
 }
 
-kodama_graph_cluster_cpp <- function(indices, distances, method = "louvain", backend = "cpu", weight = "distance", n_threads = 4L, n_runs = 1L, n_iterations = 10L, random_walk_steps = 4L, n_clusters = 0L, resolution = 1.0, resolution_init = 0.0, resolution_delta = 0.2, prune = 0.0, mutual = FALSE, seed = 1L, gpu_device = 0L) {
-    .Call(`_kodamaR_kodama_graph_cluster_cpp`, indices, distances, method, backend, weight, n_threads, n_runs, n_iterations, random_walk_steps, n_clusters, resolution, resolution_init, resolution_delta, prune, mutual, seed, gpu_device)
+kodama_graph_cluster_cpp <- function(indices, distances, weight = "distance", n_threads = 4L, n_iterations = 10L, random_walk_steps = 4L, n_clusters = 0L, prune = 0.0, mutual = FALSE) {
+    .Call(`_kodamaR_kodama_graph_cluster_cpp`, indices, distances, weight, n_threads, n_iterations, random_walk_steps, n_clusters, prune, mutual)
 }
 
-kodama_embedding_cluster_cpp <- function(embedding, method = "louvain", backend = "cpu", graph_backend = "cpu", weight = "distance", metric = "euclidean", k = 30L, n_threads = 4L, n_runs = 1L, n_iterations = 10L, random_walk_steps = 4L, n_clusters = 0L, resolution = 1.0, resolution_init = 0.0, resolution_delta = 0.2, prune = 0.0, mutual = FALSE, seed = 1L, gpu_device = 0L) {
-    .Call(`_kodamaR_kodama_embedding_cluster_cpp`, embedding, method, backend, graph_backend, weight, metric, k, n_threads, n_runs, n_iterations, random_walk_steps, n_clusters, resolution, resolution_init, resolution_delta, prune, mutual, seed, gpu_device)
+kodama_embedding_cluster_cpp <- function(embedding, graph_backend = "cpu", weight = "distance", metric = "euclidean", k = 30L, n_threads = 4L, n_iterations = 10L, random_walk_steps = 4L, n_clusters = 0L, prune = 0.0, mutual = FALSE, gpu_device = 0L) {
+    .Call(`_kodamaR_kodama_embedding_cluster_cpp`, embedding, graph_backend, weight, metric, k, n_threads, n_iterations, random_walk_steps, n_clusters, prune, mutual, gpu_device)
 }

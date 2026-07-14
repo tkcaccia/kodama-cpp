@@ -45,12 +45,6 @@ enum class GraphWeightType {
   Binary
 };
 
-enum class GraphClusterMethod {
-  Louvain,
-  Leiden,
-  RandomWalking
-};
-
 enum class GraphFeatureMode {
   LaplacianSelfTuning
 };
@@ -270,41 +264,30 @@ struct NeighborGraph {
 };
 
 struct GraphClusterOptions {
-  GraphClusterMethod method = GraphClusterMethod::Louvain;
   Backend backend = Backend::CPU;
   GraphWeightType weight_type = GraphWeightType::Distance;
   DistanceMetric metric = DistanceMetric::Euclidean;
   int k = 30;
   int n_threads = 1;
-  int n_runs = 1;
   int n_iterations = 10;
   int random_walk_steps = 4;
   int target_clusters = 0;
-  int target_max_steps = 80;
   int gpu_device = 0;
-  double resolution = 1.0;
-  double target_resolution_init = 0.0;
-  double target_delta = 0.2;
   double prune = 0.0;
   bool mutual = false;
-  std::uint64_t seed = 1;
 };
 
 struct GraphClusterResult {
   std::vector<int> membership;
   double modularity = 0.0;
   int n_communities = 0;
-  int selected_run = 1;
-  std::vector<double> all_modularity;
   int n_vertices = 0;
   int n_edges = 0;
   int target_clusters = 0;
   int target_gap = 0;
   bool target_exact = true;
-  double selected_resolution = 1.0;
   double runtime_seconds = 0.0;
   Backend backend = Backend::CPU;
-  GraphClusterMethod method = GraphClusterMethod::Louvain;
 };
 
 struct KODAMAMatrixOptions {
@@ -758,12 +741,6 @@ GraphClusterResult KODAMAGraphCluster_CPU(
   const GraphClusterOptions& options = GraphClusterOptions()
 );
 
-GraphClusterResult KODAMAGraphCluster_CUDA(
-  const NeighborGraph& graph,
-  int samples,
-  const GraphClusterOptions& options = GraphClusterOptions()
-);
-
 GraphClusterResult KODAMAGraphCluster(
   const NeighborGraph& graph,
   int samples,
@@ -787,7 +764,6 @@ const char* to_string(KNNIndexType index_type);
 const char* to_string(PLSMode mode);
 const char* to_string(CoreClassifier classifier);
 const char* to_string(GraphWeightType weight_type);
-const char* to_string(GraphClusterMethod method);
 const char* to_string(GraphFeatureMode mode);
 bool MetalAvailable();
 

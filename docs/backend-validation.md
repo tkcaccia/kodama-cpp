@@ -42,7 +42,7 @@ tuning. FAISS, cuVS, RAFT, and RMM headers and runtime libraries are absent.
 
 A clean CUDA 13.2 build on an NVIDIA GeForce RTX 5060 Ti passed both CTest
 suites. `ldd` inspection of the test executable found no FAISS, cuVS, RAFT,
-RMM, or cuGraph soname. The fresh CMake cache contained no package option,
+or RMM soname. The fresh CMake cache contained no package option,
 target, header, or library entry for those dependencies; the CUDA Toolkit was
 located inside an environment whose directory name retains a legacy
 `faissgpu-cuvs` label.

@@ -53,7 +53,7 @@ def test_public_api_cpu():
     core_pls = kodama.CorePLSLDA(x, labels, cycles=1, folds=3, ncomp=2, backend="cpu")
     graph = kodama.graph(x, k=5, backend="cpu")
     emb = kodama.visualization(graph, method="UMAP", k=5, n_epochs=3, backend="cpu")
-    clu = kodama.clustering(graph, method="louvain", backend="cpu", resolution=1.0)
+    clu = kodama.clustering(graph, n_iterations=2, random_walk_steps=2)
 
     assert knncv["predicted"].shape == (60,)
     assert pls["predicted"].shape == (60,)

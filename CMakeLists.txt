@@ -9,7 +9,6 @@ project(kodama-cpp
 option(KODAMA_BUILD_TESTS "Build kodama-cpp tests" ON)
 option(KODAMA_BUILD_EXAMPLES "Build kodama-cpp examples" ON)
 option(KODAMA_ENABLE_CUDA "Build package-owned CUDA backends" OFF)
-option(KODAMA_ENABLE_CUGRAPH "Build optional RAPIDS cuGraph clustering adapters" OFF)
 if(APPLE)
   option(KODAMA_ENABLE_METAL "Build native Apple Metal backends" ON)
   option(KODAMA_ENABLE_OPENMP "Build optional OpenMP parallel CPU loops" OFF)
@@ -126,23 +125,6 @@ if(KODAMA_ENABLE_CUDA)
   if(NOT CUDA_TOOLKIT_INCLUDE_DIR OR NOT CUDA_CUBLAS_LIBRARY OR NOT CUDA_RUNTIME_LIBRARY OR NOT CUDA_CUSOLVER_LIBRARY OR NOT CUDA_CURAND_LIBRARY OR NOT CUDA_CUFFT_LIBRARY)
     message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires CUDA headers, libcublas, libcusolver, libcurand, libcufft, and libcudart.")
   endif()
-  if(KODAMA_ENABLE_CUGRAPH)
-    find_path(CUGRAPH_INCLUDE_DIR
-      NAMES cugraph_c/community_algorithms.h
-      HINTS /usr/local/include $ENV{CONDA_PREFIX}/include
-    )
-    find_library(CUGRAPH_LIBRARY
-      NAMES cugraph_c
-      HINTS /usr/local/lib $ENV{CONDA_PREFIX}/lib
-    )
-    if(NOT CUGRAPH_INCLUDE_DIR OR NOT CUGRAPH_LIBRARY)
-      message(FATAL_ERROR "KODAMA_ENABLE_CUGRAPH=ON requires libcugraph_c and its headers.")
-    endif()
-    target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUGRAPH=1)
-    target_include_directories(kodama_cpp PRIVATE ${CUGRAPH_INCLUDE_DIR})
-    target_link_libraries(kodama_cpp PRIVATE ${CUGRAPH_LIBRARY})
-  endif()
-
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1)
   target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR})
   target_link_libraries(kodama_cpp PRIVATE ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})

@@ -34,12 +34,9 @@ Toolkit libraries.
 External runtime/build dependencies keep their own licenses:
 
 - CUDA Toolkit / cuBLAS / cuSOLVER / cuRAND / cuFFT
-- optional RAPIDS cuGraph clustering adapter
 - OpenMP implementation used by the platform
 
-No external FAISS or cuVS binary is distributed with this repository. Builds
-that explicitly enable the optional cuGraph adapter link an installation
-supplied by the build environment.
+No external FAISS or cuVS binary is distributed with this repository.
 
 Distributors of binary packages should include the corresponding dependency
 license notices required by their packaging channel.

@@ -353,8 +353,8 @@ API_ROWS = [
     ),
     (
         "Graph and clustering",
-        "makeSNNGraph equivalent, Louvain, Leiden, random walk",
-        "Neighbor graph construction and clustering by resolution or target cluster count.",
+        "makeSNNGraph equivalent and random-walk clustering",
+        "CPU, CUDA, or Metal neighbor-graph construction followed by an explicit CPU random-walk clustering kernel.",
     ),
 ]
 
@@ -537,7 +537,7 @@ INSTALLATION_ROWS = [
     ),
     (
         "C++ CUDA",
-        "Activate an environment containing the CUDA toolkit; configure with KODAMA_ENABLE_CUDA=ON and KODAMA_ENABLE_CUGRAPH=OFF; then build and run CTest. FAISS, cuVS, RAFT, RMM, and Armadillo are not required.",
+        "Activate an environment containing the CUDA toolkit; configure with KODAMA_ENABLE_CUDA=ON; then build and run CTest. FAISS, cuVS, RAFT, RMM, Armadillo, and external graph-clustering libraries are not required.",
     ),
     (
         "R wrapper",
@@ -559,7 +559,7 @@ LICENSE_DEPENDENCY_ROWS = [
     ("KODAMA, fastPLS, and fastEmbedR-derived code", "Authored by the same group and relicensed under MIT in the standalone core."),
     ("Native CPU HNSW", "Package-owned source adapted from the MIT-licensed FAISS organization; no FAISS link dependency."),
     ("Apple Metal", "Uses only Foundation, Metal, and MetalPerformanceShaders system frameworks; FAISS and Faiss-mlx source acknowledgements are retained."),
-    ("Native CUDA", "Package-owned exact/IVF KNN, k-means, and SIMPLS/LDA use CUDA Toolkit libraries without FAISS, cuVS, RAFT, RMM, or Armadillo links; cuGraph clustering remains an isolated optional adapter."),
+    ("Native CUDA", "Package-owned exact/IVF KNN, k-means, and SIMPLS/LDA use CUDA Toolkit libraries without FAISS, cuVS, RAFT, RMM, Armadillo, or external graph-clustering links."),
     ("R and Python wrappers", "Thin language bindings in separate repositories, released under licenses compatible with the core."),
 ]
 
@@ -1346,15 +1346,6 @@ REFERENCES = [
         "Nature Methods, 16, 243-245, 2019."
     ),
     (
-        "Blondel, V. D., Guillaume, J.-L., Lambiotte, R., and Lefebvre, E. Fast unfolding "
-        "of communities in large networks. Journal of Statistical Mechanics: Theory and "
-        "Experiment, 2008."
-    ),
-    (
-        "Traag, V. A., Waltman, L., and van Eck, N. J. From Louvain to Leiden: guaranteeing "
-        "well-connected communities. Scientific Reports, 9, 5233, 2019."
-    ),
-    (
         "Sonnenburg, S., Braun, M. L., Ong, C. S., Bengio, S., Bottou, L., Holmes, G., LeCun, Y., "
         "Muller, K.-R., Pereira, F., Rasmussen, C. E., Ratsch, G., Scholkopf, B., Smola, A., "
         "Vincent, P., Weston, J., and Williamson, R. C. The need for open source software in "
@@ -1744,9 +1735,9 @@ def build_architecture_figure() -> None:
 
     box((60, 555, 530, 765), green, green_line, ["CPU backend", "package-owned float32 HNSW", "label-aware SIMPLS/LDA", "optional OpenMP"])
     box((665, 555, 1135, 765), purple, purple_line, ["Apple Metal backend", "exact + IVF-Flat KNN", "MPS SIMPLS/LDA + k-means", "system frameworks only"])
-    box((1270, 555, 1740, 765), amber, amber_line, ["CUDA backend", "native exact + IVF-Flat KNN", "native k-means + SIMPLS/LDA", "CUDA Toolkit only", "optional cuGraph"])
+    box((1270, 555, 1740, 765), amber, amber_line, ["CUDA backend", "native exact + IVF-Flat KNN", "native k-means + SIMPLS/LDA", "CUDA Toolkit only"])
 
-    box((430, 830, 1370, 930), blue, blue_line, ["Graph, embedding, and clustering utilities", "KNN/SNN graph | CPU/CUDA UMAP/openTSNE | CPU/optional CUDA clustering"])
+    box((430, 830, 1370, 930), blue, blue_line, ["Graph, embedding, and clustering utilities", "CPU/CUDA/Metal graph | CPU/CUDA UMAP/openTSNE | CPU random walks"])
     box((565, 980, 1235, 1070), gray, gray_line, ["Typed outputs", "labels, accuracy traces, graphs, embeddings", "timings, memory, backend metadata"])
 
     arrow((630, 220), (700, 320), color=blue_line)
@@ -2840,22 +2831,6 @@ def build_bib() -> None:
               journal={Nature Methods},
               volume={16},
               pages={243--245},
-              year={2019}
-            }
-
-            @article{blondel2008louvain,
-              title={Fast unfolding of communities in large networks},
-              author={Blondel, Vincent D. and Guillaume, Jean-Loup and Lambiotte, Renaud and Lefebvre, Etienne},
-              journal={Journal of Statistical Mechanics: Theory and Experiment},
-              year={2008}
-            }
-
-            @article{traag2019leiden,
-              title={From Louvain to Leiden: guaranteeing well-connected communities},
-              author={Traag, Vincent A. and Waltman, Ludo and van Eck, Nees Jan},
-              journal={Scientific Reports},
-              volume={9},
-              pages={5233},
               year={2019}
             }
 

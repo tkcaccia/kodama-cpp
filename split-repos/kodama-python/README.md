@@ -25,14 +25,13 @@ python -m pip install -v . \
 When linking a static `kodama-cpp`, pass any required external libraries through
 `KODAMA_CPP_EXTRA_LIBS` or prefer a conda-forge installation of `kodama-cpp`.
 
-On Linux systems using the FAISS/CUDA conda environment, run Python with the
-same OpenMP and BLAS libraries as FAISS. The benchmark helper does this
-automatically, but an interactive shell can use:
+On Linux CUDA systems, run Python with the same CUDA Toolkit and OpenMP
+libraries used to build `kodama-cpp`. An interactive shell can use:
 
 ```sh
-export CONDA_PREFIX=/path/to/faiss-cuda-env
+export CONDA_PREFIX=/path/to/cuda-env
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
-export LD_PRELOAD="$CONDA_PREFIX/lib/libgomp.so:$CONDA_PREFIX/lib/libopenblasp-r0.3.33.so:$CONDA_PREFIX/lib/libstdc++.so.6"
+export LD_PRELOAD="$CONDA_PREFIX/lib/libgomp.so:$CONDA_PREFIX/lib/libstdc++.so.6"
 ```
 
 Check the runtime with:
@@ -60,7 +59,7 @@ kk = kodama.matrix(
 kodama.timing(kk)
 labels = kk.best_labels
 um = kodama.visualization(kk, "UMAP", k=30, backend="cuda")
-clu = kodama.clustering(um, method="leiden", n_clusters=len(set(truth)))
+clu = kodama.clustering(um, n_iterations=10, random_walk_steps=4)
 ```
 
 `kodama.matrix()` returns a `KodamaMatrixResult`, which is still a normal

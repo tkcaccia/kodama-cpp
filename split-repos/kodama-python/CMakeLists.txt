@@ -33,18 +33,6 @@ else()
   find_package(kodama-cpp CONFIG REQUIRED)
 endif()
 
-find_library(KODAMA_PY_FAISS_LIBRARY
-  NAMES faiss
-  PATHS
-    "$ENV{CONDA_PREFIX}/lib"
-    /opt/homebrew/opt/faiss/lib
-    /usr/local/lib
-    /usr/lib
-)
-if(KODAMA_PY_FAISS_LIBRARY)
-  list(APPEND KODAMA_CPP_RESOLVED_EXTRA_LIBS "${KODAMA_PY_FAISS_LIBRARY}")
-endif()
-
 if(APPLE)
   set(KODAMA_PY_OPENMP_NAMES omp gomp iomp5)
 else()
@@ -68,7 +56,6 @@ target_compile_features(_core PRIVATE cxx_std_17)
 target_link_libraries(_core PRIVATE kodama::kodama_cpp ${KODAMA_CPP_RESOLVED_EXTRA_LIBS} ${KODAMA_CPP_EXTRA_LIBS})
 if(APPLE)
   target_link_options(_core PRIVATE
-    "-Wl,-rpath,/opt/homebrew/opt/faiss/lib"
     "-Wl,-rpath,/opt/homebrew/opt/libomp/lib"
     "-Wl,-rpath,/opt/homebrew/opt/llvm/lib"
   )

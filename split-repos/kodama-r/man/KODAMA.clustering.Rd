@@ -2,35 +2,26 @@
 % Please edit documentation in R/kodama.R
 \name{KODAMA.clustering}
 \alias{KODAMA.clustering}
-\title{Cluster a graph or embedding with Louvain, Leiden, or random walk}
+\title{Cluster a graph or embedding with random walks}
 \usage{
 KODAMA.clustering(
   x,
-  method = c("louvain", "leiden", "random_walk"),
   n.clusters = 0L,
-  resolution = 1,
   weight = c("distance", "snn", "adaptive", "binary"),
   k = 30L,
   metric = c("euclidean", "cosine", "inner_product"),
-  backend = c("cpu", "cuda"),
-  graph.backend = backend,
+  graph.backend = c("cpu", "cuda"),
   n.cores = 4L,
-  n.runs = 1L,
   n.iterations = 10L,
   random.walk.steps = 4L,
-  gpu.device = 0L,
-  seed = 1L
+  gpu.device = 0L
 )
 }
 \arguments{
 \item{x}{Input embedding matrix, KODAMA result, or KNN graph list.}
 
-\item{method}{Clustering method.}
-
-\item{n.clusters}{Optional target number of clusters. A value of zero uses
-the supplied \code{resolution} without target-cluster search.}
-
-\item{resolution}{Resolution value used by Louvain/Leiden-style methods.}
+\item{n.clusters}{Optional target number of clusters. Random-walk clustering
+reports an error when it cannot produce the requested count exactly.}
 
 \item{weight}{Graph edge-weighting rule.}
 
@@ -38,22 +29,16 @@ the supplied \code{resolution} without target-cluster search.}
 
 \item{metric}{Distance or similarity metric used when \code{x} is a matrix.}
 
-\item{backend}{Execution backend for clustering.}
-
 \item{graph.backend}{Backend used to construct a graph from an embedding.}
 
 \item{n.cores}{Number of CPU worker threads requested by the wrapper.}
-
-\item{n.runs}{Number of clustering restarts.}
 
 \item{n.iterations}{Number of clustering refinement iterations.}
 
 \item{random.walk.steps}{Number of random-walk steps.}
 
-\item{gpu.device}{CUDA device id when \code{backend = "cuda"}.}
-
-\item{seed}{Integer random seed.}
+\item{gpu.device}{CUDA device id when \code{graph.backend = "cuda"}.}
 }
 \description{
-Cluster a graph or embedding with Louvain, Leiden, or random walk
+Cluster a graph or embedding with random walks
 }

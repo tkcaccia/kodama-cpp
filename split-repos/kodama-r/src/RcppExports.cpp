@@ -237,58 +237,43 @@ BEGIN_RCPP
 END_RCPP
 }
 // kodama_graph_cluster_cpp
-Rcpp::List kodama_graph_cluster_cpp(Rcpp::IntegerMatrix indices, Rcpp::NumericMatrix distances, std::string method, std::string backend, std::string weight, int n_threads, int n_runs, int n_iterations, int random_walk_steps, int n_clusters, double resolution, double resolution_init, double resolution_delta, double prune, bool mutual, int seed, int gpu_device);
-RcppExport SEXP _kodamaR_kodama_graph_cluster_cpp(SEXP indicesSEXP, SEXP distancesSEXP, SEXP methodSEXP, SEXP backendSEXP, SEXP weightSEXP, SEXP n_threadsSEXP, SEXP n_runsSEXP, SEXP n_iterationsSEXP, SEXP random_walk_stepsSEXP, SEXP n_clustersSEXP, SEXP resolutionSEXP, SEXP resolution_initSEXP, SEXP resolution_deltaSEXP, SEXP pruneSEXP, SEXP mutualSEXP, SEXP seedSEXP, SEXP gpu_deviceSEXP) {
+Rcpp::List kodama_graph_cluster_cpp(Rcpp::IntegerMatrix indices, Rcpp::NumericMatrix distances, std::string weight, int n_threads, int n_iterations, int random_walk_steps, int n_clusters, double prune, bool mutual);
+RcppExport SEXP _kodamaR_kodama_graph_cluster_cpp(SEXP indicesSEXP, SEXP distancesSEXP, SEXP weightSEXP, SEXP n_threadsSEXP, SEXP n_iterationsSEXP, SEXP random_walk_stepsSEXP, SEXP n_clustersSEXP, SEXP pruneSEXP, SEXP mutualSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< Rcpp::IntegerMatrix >::type indices(indicesSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type distances(distancesSEXP);
-    Rcpp::traits::input_parameter< std::string >::type method(methodSEXP);
-    Rcpp::traits::input_parameter< std::string >::type backend(backendSEXP);
     Rcpp::traits::input_parameter< std::string >::type weight(weightSEXP);
     Rcpp::traits::input_parameter< int >::type n_threads(n_threadsSEXP);
-    Rcpp::traits::input_parameter< int >::type n_runs(n_runsSEXP);
     Rcpp::traits::input_parameter< int >::type n_iterations(n_iterationsSEXP);
     Rcpp::traits::input_parameter< int >::type random_walk_steps(random_walk_stepsSEXP);
     Rcpp::traits::input_parameter< int >::type n_clusters(n_clustersSEXP);
-    Rcpp::traits::input_parameter< double >::type resolution(resolutionSEXP);
-    Rcpp::traits::input_parameter< double >::type resolution_init(resolution_initSEXP);
-    Rcpp::traits::input_parameter< double >::type resolution_delta(resolution_deltaSEXP);
     Rcpp::traits::input_parameter< double >::type prune(pruneSEXP);
     Rcpp::traits::input_parameter< bool >::type mutual(mutualSEXP);
-    Rcpp::traits::input_parameter< int >::type seed(seedSEXP);
-    Rcpp::traits::input_parameter< int >::type gpu_device(gpu_deviceSEXP);
-    rcpp_result_gen = Rcpp::wrap(kodama_graph_cluster_cpp(indices, distances, method, backend, weight, n_threads, n_runs, n_iterations, random_walk_steps, n_clusters, resolution, resolution_init, resolution_delta, prune, mutual, seed, gpu_device));
+    rcpp_result_gen = Rcpp::wrap(kodama_graph_cluster_cpp(indices, distances, weight, n_threads, n_iterations, random_walk_steps, n_clusters, prune, mutual));
     return rcpp_result_gen;
 END_RCPP
 }
 // kodama_embedding_cluster_cpp
-Rcpp::List kodama_embedding_cluster_cpp(Rcpp::NumericMatrix embedding, std::string method, std::string backend, std::string graph_backend, std::string weight, std::string metric, int k, int n_threads, int n_runs, int n_iterations, int random_walk_steps, int n_clusters, double resolution, double resolution_init, double resolution_delta, double prune, bool mutual, int seed, int gpu_device);
-RcppExport SEXP _kodamaR_kodama_embedding_cluster_cpp(SEXP embeddingSEXP, SEXP methodSEXP, SEXP backendSEXP, SEXP graph_backendSEXP, SEXP weightSEXP, SEXP metricSEXP, SEXP kSEXP, SEXP n_threadsSEXP, SEXP n_runsSEXP, SEXP n_iterationsSEXP, SEXP random_walk_stepsSEXP, SEXP n_clustersSEXP, SEXP resolutionSEXP, SEXP resolution_initSEXP, SEXP resolution_deltaSEXP, SEXP pruneSEXP, SEXP mutualSEXP, SEXP seedSEXP, SEXP gpu_deviceSEXP) {
+Rcpp::List kodama_embedding_cluster_cpp(Rcpp::NumericMatrix embedding, std::string graph_backend, std::string weight, std::string metric, int k, int n_threads, int n_iterations, int random_walk_steps, int n_clusters, double prune, bool mutual, int gpu_device);
+RcppExport SEXP _kodamaR_kodama_embedding_cluster_cpp(SEXP embeddingSEXP, SEXP graph_backendSEXP, SEXP weightSEXP, SEXP metricSEXP, SEXP kSEXP, SEXP n_threadsSEXP, SEXP n_iterationsSEXP, SEXP random_walk_stepsSEXP, SEXP n_clustersSEXP, SEXP pruneSEXP, SEXP mutualSEXP, SEXP gpu_deviceSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type embedding(embeddingSEXP);
-    Rcpp::traits::input_parameter< std::string >::type method(methodSEXP);
-    Rcpp::traits::input_parameter< std::string >::type backend(backendSEXP);
     Rcpp::traits::input_parameter< std::string >::type graph_backend(graph_backendSEXP);
     Rcpp::traits::input_parameter< std::string >::type weight(weightSEXP);
     Rcpp::traits::input_parameter< std::string >::type metric(metricSEXP);
     Rcpp::traits::input_parameter< int >::type k(kSEXP);
     Rcpp::traits::input_parameter< int >::type n_threads(n_threadsSEXP);
-    Rcpp::traits::input_parameter< int >::type n_runs(n_runsSEXP);
     Rcpp::traits::input_parameter< int >::type n_iterations(n_iterationsSEXP);
     Rcpp::traits::input_parameter< int >::type random_walk_steps(random_walk_stepsSEXP);
     Rcpp::traits::input_parameter< int >::type n_clusters(n_clustersSEXP);
-    Rcpp::traits::input_parameter< double >::type resolution(resolutionSEXP);
-    Rcpp::traits::input_parameter< double >::type resolution_init(resolution_initSEXP);
-    Rcpp::traits::input_parameter< double >::type resolution_delta(resolution_deltaSEXP);
     Rcpp::traits::input_parameter< double >::type prune(pruneSEXP);
     Rcpp::traits::input_parameter< bool >::type mutual(mutualSEXP);
-    Rcpp::traits::input_parameter< int >::type seed(seedSEXP);
     Rcpp::traits::input_parameter< int >::type gpu_device(gpu_deviceSEXP);
-    rcpp_result_gen = Rcpp::wrap(kodama_embedding_cluster_cpp(embedding, method, backend, graph_backend, weight, metric, k, n_threads, n_runs, n_iterations, random_walk_steps, n_clusters, resolution, resolution_init, resolution_delta, prune, mutual, seed, gpu_device));
+    rcpp_result_gen = Rcpp::wrap(kodama_embedding_cluster_cpp(embedding, graph_backend, weight, metric, k, n_threads, n_iterations, random_walk_steps, n_clusters, prune, mutual, gpu_device));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -303,8 +288,8 @@ static const R_CallMethodDef CallEntries[] = {
     {"_kodamaR_kodama_knn_graph_cpp", (DL_FUNC) &_kodamaR_kodama_knn_graph_cpp, 6},
     {"_kodamaR_kodama_umap_cpp", (DL_FUNC) &_kodamaR_kodama_umap_cpp, 14},
     {"_kodamaR_kodama_opentsne_cpp", (DL_FUNC) &_kodamaR_kodama_opentsne_cpp, 20},
-    {"_kodamaR_kodama_graph_cluster_cpp", (DL_FUNC) &_kodamaR_kodama_graph_cluster_cpp, 17},
-    {"_kodamaR_kodama_embedding_cluster_cpp", (DL_FUNC) &_kodamaR_kodama_embedding_cluster_cpp, 19},
+    {"_kodamaR_kodama_graph_cluster_cpp", (DL_FUNC) &_kodamaR_kodama_graph_cluster_cpp, 9},
+    {"_kodamaR_kodama_embedding_cluster_cpp", (DL_FUNC) &_kodamaR_kodama_embedding_cluster_cpp, 12},
     {NULL, NULL, 0}
 };
 

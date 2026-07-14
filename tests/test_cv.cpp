@@ -121,6 +121,26 @@ void check_spatial_grid_graph() {
   require(graph.indices.size() == static_cast<std::size_t>(n * k), "Spatial grid graph index size mismatch.");
   require(graph.distances.size() == graph.indices.size(), "Spatial grid graph distance size mismatch.");
 
+  kodama::NeighborGraph cluster_graph;
+  cluster_graph.neighbors = 2;
+  cluster_graph.indices = {
+    2, 3, 1, 3, 1, 2,
+    5, 6, 4, 6, 4, 5
+  };
+  cluster_graph.distances.assign(cluster_graph.indices.size(), 0.1f);
+  kodama::GraphClusterOptions cluster_options;
+  cluster_options.backend = kodama::Backend::CPU;
+  cluster_options.random_walk_steps = 2;
+  cluster_options.n_iterations = 10;
+  const kodama::GraphClusterResult clustered = kodama::KODAMAGraphCluster_CPU(
+    cluster_graph,
+    6,
+    cluster_options
+  );
+  require(clustered.membership.size() == 6, "Random-walk clustering membership size mismatch.");
+  require(clustered.n_communities == 2, "Random-walk clustering did not preserve two disconnected groups.");
+  require(clustered.backend == kodama::Backend::CPU, "Random-walk clustering did not report CPU backend.");
+
   for (int i = 0; i < 8; ++i) {
     std::vector<std::pair<float, int>> expected;
     for (int j = 0; j < n; ++j) {
@@ -147,6 +167,13 @@ void check_spatial_grid_graph() {
   for (std::size_t i = 0; i < graph.distances.size(); ++i) {
     require(std::abs(cuda_graph.distances[i] - graph.distances[i]) < 1e-5f, "CUDA spatial grid graph distances differ from CPU.");
   }
+  bool rejected_cuda_clustering = false;
+  try {
+    (void)kodama::KODAMAGraphCluster(cluster_graph, 6, cuda_options);
+  } catch (const std::runtime_error&) {
+    rejected_cuda_clustering = true;
+  }
+  require(rejected_cuda_clustering, "Random-walk clustering silently mixed CUDA and CPU backends.");
 #endif
 }
 

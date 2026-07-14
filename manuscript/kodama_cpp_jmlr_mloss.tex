@@ -156,7 +156,7 @@ Core optimization & CoreKNN, CorePLSLDA & Independent label-evolution runs that 
 KODAMA matrix & KODAMA.matrix / KODAMAMatrix & Landmark selection, splitting, M runs, optimized label vectors, KODAMA dissimilarity, and graph output. \\
 Graph-input KODAMA & KODAMA.matrix.graph / KODAMAMatrixFromGraph & Runs the same KNN or PLS-LDA KODAMA optimizer from supplied neighbor indices/distances; KNN reuses the graph directly and PLS-LDA uses self-tuning Laplacian features when the data matrix is unavailable. \\
 Visualization & KODAMA.visualization & UMAP and openTSNE embeddings from standard or KODAMA-corrected neighbor graphs. \\
-Graph and clustering & makeSNNGraph equivalent, Louvain, Leiden, random walk & Neighbor graph construction and clustering by resolution or target cluster count. \\
+Graph and clustering & makeSNNGraph equivalent and random-walk clustering & CPU, CUDA, or Metal neighbor-graph construction followed by an explicit CPU random-walk clustering kernel. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -578,7 +578,7 @@ Target & Command or check \\
 \midrule
 C++ CPU & Configure with CMake using KODAMA\_ENABLE\_CUDA=OFF and KODAMA\_ENABLE\_METAL=OFF; then build, test, and install the exported target. \\
 C++ Metal & On macOS, configure with KODAMA\_ENABLE\_METAL=ON while CUDA is off; then build and run CTest. Apple system frameworks are linked automatically. \\
-C++ CUDA & Activate an environment containing the CUDA toolkit; configure with KODAMA\_ENABLE\_CUDA=ON and KODAMA\_ENABLE\_CUGRAPH=OFF; then build and run CTest. FAISS, cuVS, RAFT, RMM, and Armadillo are not required. \\
+C++ CUDA & Activate an environment containing the CUDA toolkit; configure with KODAMA\_ENABLE\_CUDA=ON; then build and run CTest. FAISS, cuVS, RAFT, RMM, Armadillo, and external graph-clustering libraries are not required. \\
 R wrapper & Set KODAMA\_CPP\_ROOT and KODAMA\_CPP\_BUILD\_DIR, then run R CMD INSTALL kodama-r. The wrapper links the installed or selected core build. \\
 Python wrapper & Pass KODAMA\_CPP\_ROOT and KODAMA\_CPP\_BUILD\_DIR as CMake config settings to pip when installing kodama-python. \\
 Runtime check & Run ctest for the core library; in R call KODAMA.diagnostics(); in Python import kodama and run the package validation tests. \\
@@ -615,7 +615,7 @@ kodama-cpp & MIT license intended for the standalone core release. \\
 KODAMA, fastPLS, and fastEmbedR-derived code & Authored by the same group and relicensed under MIT in the standalone core. \\
 Native CPU HNSW & Package-owned source adapted from the MIT-licensed FAISS organization; no FAISS link dependency. \\
 Apple Metal & Uses only Foundation, Metal, and MetalPerformanceShaders system frameworks; FAISS and Faiss-mlx source acknowledgements are retained. \\
-Native CUDA & Package-owned exact/IVF KNN, k-means, and SIMPLS/LDA use CUDA Toolkit libraries without FAISS, cuVS, RAFT, RMM, or Armadillo links; cuGraph clustering remains an isolated optional adapter. \\
+Native CUDA & Package-owned exact/IVF KNN, k-means, and SIMPLS/LDA use CUDA Toolkit libraries without FAISS, cuVS, RAFT, RMM, Armadillo, or external graph-clustering links. \\
 R and Python wrappers & Thin language bindings in separate repositories, released under licenses compatible with the core. \\
 \bottomrule
 \end{tabularx}

@@ -37,13 +37,6 @@ kodama::GraphFeatureMode parse_graph_feature_mode(const std::string& mode) {
   throw std::invalid_argument("Unsupported graph feature mode: " + mode);
 }
 
-kodama::GraphClusterMethod parse_graph_cluster_method(const std::string& method) {
-  if (method == "louvain") return kodama::GraphClusterMethod::Louvain;
-  if (method == "leiden") return kodama::GraphClusterMethod::Leiden;
-  if (method == "random_walk" || method == "random_walking") return kodama::GraphClusterMethod::RandomWalking;
-  throw std::invalid_argument("Unsupported graph clustering method: " + method);
-}
-
 kodama::GraphWeightType parse_graph_weight_type(const std::string& weight) {
   if (weight == "snn") return kodama::GraphWeightType::SNN;
   if (weight == "distance") return kodama::GraphWeightType::Distance;
@@ -279,17 +272,13 @@ py::dict graph_cluster_to_python(const kodama::GraphClusterResult& result) {
   out["membership"] = vector_to_int_array(result.membership);
   out["modularity"] = result.modularity;
   out["n_communities"] = result.n_communities;
-  out["selected_run"] = result.selected_run;
-  out["all_modularity"] = vector_to_double_array(result.all_modularity);
   out["n_vertices"] = result.n_vertices;
   out["n_edges"] = result.n_edges;
   out["target_clusters"] = result.target_clusters;
   out["target_gap"] = result.target_gap;
   out["target_exact"] = result.target_exact;
-  out["selected_resolution"] = result.selected_resolution;
   out["runtime_seconds"] = result.runtime_seconds;
   out["backend"] = kodama::to_string(result.backend);
-  out["method"] = kodama::to_string(result.method);
   return out;
 }
 
@@ -764,61 +753,39 @@ py::array_t<float> opentsne(
 py::dict graph_clustering(
   py::array_t<int, py::array::c_style | py::array::forcecast> indices,
   py::array_t<float, py::array::c_style | py::array::forcecast> distances,
-  const std::string& method,
-  const std::string& backend,
   const std::string& weight,
   int n_threads,
-  int n_runs,
   int n_iterations,
   int random_walk_steps,
   int n_clusters,
-  double resolution,
-  double resolution_init,
-  double resolution_delta,
   double prune,
-  bool mutual,
-  int seed,
-  int gpu_device
+  bool mutual
 ) {
   kodama::GraphClusterOptions options;
-  options.method = parse_graph_cluster_method(method);
-  options.backend = parse_backend(backend);
+  options.backend = kodama::Backend::CPU;
   options.weight_type = parse_graph_weight_type(weight);
   options.n_threads = n_threads;
-  options.n_runs = n_runs;
   options.n_iterations = n_iterations;
   options.random_walk_steps = random_walk_steps;
   options.target_clusters = n_clusters;
-  options.resolution = resolution;
-  options.target_resolution_init = resolution_init;
-  options.target_delta = resolution_delta;
   options.prune = prune;
   options.mutual = mutual;
-  options.seed = static_cast<std::uint64_t>(seed);
-  options.gpu_device = gpu_device;
   const kodama::NeighborGraph g = graph_from_arrays(indices, distances);
   return graph_cluster_to_python(kodama::KODAMAGraphCluster(g, static_cast<int>(indices.shape(0)), options));
 }
 
 py::dict embedding_clustering(
   py::array_t<float, py::array::c_style | py::array::forcecast> embedding,
-  const std::string& method,
-  const std::string& backend,
   const std::string& graph_backend,
   const std::string& weight,
   const std::string& metric,
   int k,
   int n_threads,
-  int n_runs,
   int n_iterations,
   int random_walk_steps,
   int n_clusters,
-  double resolution,
-  double resolution_init,
-  double resolution_delta,
   double prune,
   bool mutual,
-  int seed,
   int gpu_device
 ) {
   auto x_view = embedding.unchecked<2>();
@@ -835,19 +802,13 @@ py::dict embedding_clustering(
   };
   const kodama::NeighborGraph g = kodama::KODAMAKNNGraph(view, graph_options);
   kodama::GraphClusterOptions cluster_options = graph_options;
-  cluster_options.method = parse_graph_cluster_method(method);
-  cluster_options.backend = parse_backend(backend);
+  cluster_options.backend = kodama::Backend::CPU;
   cluster_options.weight_type = parse_graph_weight_type(weight);
-  cluster_options.n_runs = n_runs;
   cluster_options.n_iterations = n_iterations;
   cluster_options.random_walk_steps = random_walk_steps;
   cluster_options.target_clusters = n_clusters;
-  cluster_options.resolution = resolution;
-  cluster_options.target_resolution_init = resolution_init;
-  cluster_options.target_delta = resolution_delta;
   cluster_options.prune = prune;
   cluster_options.mutual = mutual;
-  cluster_options.seed = static_cast<std::uint64_t>(seed);
   cluster_options.gpu_device = gpu_device;
   py::dict out = graph_cluster_to_python(kodama::KODAMAEmbeddingGraphCluster(view, g, cluster_options));
   out["graph"] = graph_to_python(g, static_cast<int>(x_view.shape(0)));
@@ -1033,43 +994,28 @@ PYBIND11_MODULE(_core, m) {
     &graph_clustering,
     py::arg("indices"),
     py::arg("distances"),
-    py::arg("method") = "louvain",
-    py::arg("backend") = "cpu",
     py::arg("weight") = "distance",
     py::arg("n_threads") = 4,
-    py::arg("n_runs") = 1,
     py::arg("n_iterations") = 10,
     py::arg("random_walk_steps") = 4,
     py::arg("n_clusters") = 0,
-    py::arg("resolution") = 1.0,
-    py::arg("resolution_init") = 0.0,
-    py::arg("resolution_delta") = 0.2,
     py::arg("prune") = 0.0,
-    py::arg("mutual") = false,
-    py::arg("seed") = 1,
-    py::arg("gpu_device") = 0
+    py::arg("mutual") = false
   );
   m.def(
     "embedding_clustering",
     &embedding_clustering,
     py::arg("embedding"),
-    py::arg("method") = "louvain",
-    py::arg("backend") = "cpu",
     py::arg("graph_backend") = "cpu",
     py::arg("weight") = "distance",
     py::arg("metric") = "euclidean",
     py::arg("k") = 30,
     py::arg("n_threads") = 4,
-    py::arg("n_runs") = 1,
     py::arg("n_iterations") = 10,
     py::arg("random_walk_steps") = 4,
     py::arg("n_clusters") = 0,
-    py::arg("resolution") = 1.0,
-    py::arg("resolution_init") = 0.0,
-    py::arg("resolution_delta") = 0.2,
     py::arg("prune") = 0.0,
     py::arg("mutual") = false,
-    py::arg("seed") = 1,
     py::arg("gpu_device") = 0
   );
 }

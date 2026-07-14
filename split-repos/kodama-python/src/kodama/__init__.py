@@ -364,7 +364,7 @@ def diagnostics(all_libraries=False):
     except OSError:
         linked = []
     if not all_libraries:
-        keep = ("faiss", "omp", "gomp", "blas", "openblas", "mkl", "cuda", "cublas", "cufft", "cuvs", "cugraph", "stdc")
+        keep = ("omp", "gomp", "blas", "openblas", "mkl", "cuda", "cublas", "cufft", "stdc")
         linked = [line for line in linked if any(token in line.lower() for token in keep)]
     conda = os.environ.get("CONDA_PREFIX", "")
     recommended = []
@@ -397,52 +397,36 @@ def diagnostics(all_libraries=False):
 
 def clustering(
     x,
-    method="louvain",
     n_clusters=0,
-    resolution=1.0,
     weight="distance",
     k=30,
     metric="euclidean",
-    backend="cpu",
-    graph_backend=None,
+    graph_backend="cpu",
     n_threads=4,
-    n_runs=1,
     n_iterations=10,
     random_walk_steps=4,
     gpu_device=0,
-    seed=1,
 ):
     if isinstance(x, dict) and "indices" in x and "distances" in x:
         return graph_clustering(
             x["indices"],
             x["distances"],
-            method=method,
-            backend=backend,
             weight=weight,
             n_threads=n_threads,
-            n_runs=n_runs,
             n_iterations=n_iterations,
             random_walk_steps=random_walk_steps,
             n_clusters=n_clusters,
-            resolution=resolution,
-            seed=seed,
-            gpu_device=gpu_device,
         )
     return embedding_clustering(
         np.asarray(x, dtype=np.float32),
-        method=method,
-        backend=backend,
-        graph_backend=backend if graph_backend is None else graph_backend,
+        graph_backend=graph_backend,
         weight=weight,
         metric=metric,
         k=k,
         n_threads=n_threads,
-        n_runs=n_runs,
         n_iterations=n_iterations,
         random_walk_steps=random_walk_steps,
         n_clusters=n_clusters,
-        resolution=resolution,
-        seed=seed,
         gpu_device=gpu_device,
     )
 

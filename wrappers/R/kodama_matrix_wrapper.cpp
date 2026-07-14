@@ -23,13 +23,6 @@ kodama::CoreClassifier parse_classifier(const std::string& classifier) {
   Rcpp::stop("Unsupported classifier: " + classifier);
 }
 
-kodama::GraphClusterMethod parse_graph_cluster_method(const std::string& method) {
-  if (method == "louvain") return kodama::GraphClusterMethod::Louvain;
-  if (method == "leiden") return kodama::GraphClusterMethod::Leiden;
-  if (method == "random_walking") return kodama::GraphClusterMethod::RandomWalking;
-  Rcpp::stop("Unsupported graph clustering method: " + method);
-}
-
 kodama::GraphWeightType parse_graph_weight_type(const std::string& weight) {
   if (weight == "snn") return kodama::GraphWeightType::SNN;
   if (weight == "distance") return kodama::GraphWeightType::Distance;
@@ -83,22 +76,17 @@ Rcpp::List graph_to_r(const kodama::NeighborGraph& graph, int samples) {
 
 Rcpp::List graph_cluster_result_to_r(const kodama::GraphClusterResult& result) {
   Rcpp::IntegerVector membership(result.membership.begin(), result.membership.end());
-  Rcpp::NumericVector all_modularity(result.all_modularity.begin(), result.all_modularity.end());
   return Rcpp::List::create(
     Rcpp::Named("membership") = membership,
     Rcpp::Named("modularity") = result.modularity,
     Rcpp::Named("n_communities") = result.n_communities,
-    Rcpp::Named("selected_run") = result.selected_run,
-    Rcpp::Named("all_modularity") = all_modularity,
     Rcpp::Named("n_vertices") = result.n_vertices,
     Rcpp::Named("n_edges") = result.n_edges,
     Rcpp::Named("target_clusters") = result.target_clusters,
     Rcpp::Named("target_gap") = result.target_gap,
     Rcpp::Named("target_exact") = result.target_exact,
-    Rcpp::Named("selected_resolution") = result.selected_resolution,
     Rcpp::Named("runtime_seconds") = result.runtime_seconds,
-    Rcpp::Named("backend") = kodama::to_string(result.backend),
-    Rcpp::Named("method") = kodama::to_string(result.method)
+    Rcpp::Named("backend") = kodama::to_string(result.backend)
   );
 }
 
@@ -459,38 +447,23 @@ Rcpp::List kodama_knn_graph_temp(
 Rcpp::List kodama_graph_cluster_from_knn_temp(
   Rcpp::IntegerMatrix indices,
   Rcpp::NumericMatrix distances,
-  std::string method = "louvain",
-  std::string backend = "cpu",
   std::string weight = "distance",
   int n_threads = 4,
-  int n_runs = 1,
   int n_iterations = 10,
   int random_walk_steps = 4,
   int n_clusters = 0,
-  double resolution = 1.0,
-  double resolution_init = 0.0,
-  double resolution_delta = 0.2,
   double prune = 0.0,
-  bool mutual = false,
-  int seed = 1,
-  int gpu_device = 0
+  bool mutual = false
 ) {
   kodama::GraphClusterOptions options;
-  options.method = parse_graph_cluster_method(method);
-  options.backend = parse_backend(backend);
+  options.backend = kodama::Backend::CPU;
   options.weight_type = parse_graph_weight_type(weight);
   options.n_threads = n_threads;
-  options.n_runs = n_runs;
   options.n_iterations = n_iterations;
   options.random_walk_steps = random_walk_steps;
   options.target_clusters = n_clusters;
-  options.resolution = resolution;
-  options.target_resolution_init = resolution_init;
-  options.target_delta = resolution_delta;
   options.prune = prune;
   options.mutual = mutual;
-  options.seed = static_cast<std::uint64_t>(seed);
-  options.gpu_device = gpu_device;
   kodama::NeighborGraph graph = graph_from_r(indices, distances);
   return graph_cluster_result_to_r(kodama::KODAMAGraphCluster(graph, indices.nrow(), options));
 }
@@ -498,23 +471,16 @@ Rcpp::List kodama_graph_cluster_from_knn_temp(
 // [[Rcpp::export]]
 Rcpp::List kodama_embedding_cluster_temp(
   Rcpp::NumericMatrix embedding,
-  std::string method = "louvain",
-  std::string backend = "cpu",
   std::string graph_backend = "cpu",
   std::string weight = "distance",
   std::string metric = "euclidean",
   int k = 30,
   int n_threads = 4,
-  int n_runs = 1,
   int n_iterations = 10,
   int random_walk_steps = 4,
   int n_clusters = 0,
-  double resolution = 1.0,
-  double resolution_init = 0.0,
-  double resolution_delta = 0.2,
   double prune = 0.0,
   bool mutual = false,
-  int seed = 1,
   int gpu_device = 0
 ) {
   const int n = embedding.nrow();
@@ -532,19 +498,13 @@ Rcpp::List kodama_embedding_cluster_temp(
   kodama::NeighborGraph graph = kodama::KODAMAKNNGraph(kodama::MatrixView{x.data(), static_cast<std::size_t>(n), static_cast<std::size_t>(p)}, graph_options);
 
   kodama::GraphClusterOptions cluster_options = graph_options;
-  cluster_options.method = parse_graph_cluster_method(method);
-  cluster_options.backend = parse_backend(backend);
+  cluster_options.backend = kodama::Backend::CPU;
   cluster_options.weight_type = parse_graph_weight_type(weight);
-  cluster_options.n_runs = n_runs;
   cluster_options.n_iterations = n_iterations;
   cluster_options.random_walk_steps = random_walk_steps;
   cluster_options.target_clusters = n_clusters;
-  cluster_options.resolution = resolution;
-  cluster_options.target_resolution_init = resolution_init;
-  cluster_options.target_delta = resolution_delta;
   cluster_options.prune = prune;
   cluster_options.mutual = mutual;
-  cluster_options.seed = static_cast<std::uint64_t>(seed);
   Rcpp::List out = graph_cluster_result_to_r(
     kodama::KODAMAEmbeddingGraphCluster(
       kodama::MatrixView{x.data(), static_cast<std::size_t>(n), static_cast<std::size_t>(p)},
