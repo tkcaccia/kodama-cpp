@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.18)
 
 project(kodama-cpp
   VERSION 0.1.0
-  DESCRIPTION "Standalone C++ kernels for high-performance KODAMA-related algorithms"
+  DESCRIPTION "Standalone float32 KODAMA kernels for CPU, CUDA, and Apple Metal"
   LANGUAGES CXX
 )
 

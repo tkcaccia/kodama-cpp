@@ -44,11 +44,11 @@ int main() {
   pls.cv.folds = 5;
   pls.cv.seed = 7;
   pls.max_components = 4;
-  kodama::PLSCVResult pres = kodama::PLSDACV(view, y, constrain, pls);
+  kodama::PLSCVResult pres = kodama::PLSLDACV(view, y, constrain, pls);
 
   std::cout << "KNNCV accuracy: " << kres.global_accuracy
             << " runtime: " << kres.runtime_seconds << " sec\n";
-  std::cout << "PLSDACV accuracy: " << pres.global_accuracy
+  std::cout << "PLSLDACV accuracy: " << pres.global_accuracy
             << " selected components: " << pres.selected_components
             << " runtime: " << pres.runtime_seconds << " sec\n";
   return (kres.global_accuracy > 0.8 && pres.global_accuracy > 0.8) ? 0 : 1;

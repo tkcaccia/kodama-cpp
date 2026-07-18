@@ -2,6 +2,39 @@
 
 Thin R wrapper for the standalone `kodama-cpp` C++/CUDA library.
 
+> **Current installation path:** this release candidate is distributed inside
+> [`tkcaccia/kodama-cpp`](https://github.com/tkcaccia/kodama-cpp), under
+> `split-repos/kodama-r`. It is not yet available from CRAN or Bioconductor.
+
+## Quick Install From The Kodama-Cpp Checkout
+
+From the root of a cloned `kodama-cpp` repository:
+
+```sh
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKODAMA_ENABLE_CUDA=OFF \
+  -DKODAMA_ENABLE_METAL=OFF
+cmake --build build -j
+
+Rscript -e 'install.packages("Rcpp", repos = "https://cloud.r-project.org")'
+
+KODAMA_CPP_ROOT="$PWD" \
+KODAMA_CPP_BUILD_DIR="$PWD/build" \
+R CMD INSTALL split-repos/kodama-r
+```
+
+Then verify the installation with:
+
+```r
+library(kodamaR)
+KODAMA.diagnostics()
+help(package = "kodamaR")
+```
+
+The sections below explain CPU, CUDA, and development-check workflows in more
+detail.
+
 `kodama-r` does not reimplement the KODAMA mathematics in R. It converts R
 matrices and vectors to the C++ ABI, calls the compiled `kodama-cpp` library,
 and returns R-friendly lists, matrices, and S3 objects. The numerical kernels
