@@ -1,10 +1,17 @@
 /*
+ * SPDX-FileCopyrightText: Meta Platforms, Inc. and affiliates
+ * SPDX-FileCopyrightText: 2024 Sydney Bach, The Solace Project
+ * SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+ * SPDX-License-Identifier: MIT AND Apache-2.0
+ *
  * Native float32 Metal primitives adapted from fastEmbedR and fastPLS.
  *
  * The top-k organization is informed by FAISS 1.14.3 (MIT) and the
  * fastEmbedR native Metal backend. MPS matrix multiplication follows the
- * fastPLS Metal backend. Modifications and standalone adaptation are
- * Copyright (c) 2026 Stefano Caccia and distributed under the MIT License.
+ * fastPLS Metal backend. Portions inherited from the Faiss-mlx fused
+ * list-scan/top-k organization remain under Apache-2.0; FAISS-derived and
+ * kodama-cpp portions remain under MIT. This file is a modified standalone
+ * adaptation. See THIRD_PARTY_NOTICES.md and licenses/.
  */
 
 #include "metal_backend.hpp"

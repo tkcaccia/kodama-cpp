@@ -1,0 +1,5 @@
+"dataset","implementation","classifier","backend","n_cores","variant","splitting","graph_correction","job_id"
+"MetRef","kodama-cpp","knn","cuda",4,"reference",100,TRUE,"MetRef__kodama-cpp__knn__cuda__c4__reference"
+"MetRef","kodama-cpp","knn","cuda",4,"no_graph_correction",100,FALSE,"MetRef__kodama-cpp__knn__cuda__c4__no_graph_correction"
+"MetRef","kodama-cpp","knn","cuda",4,"splitting_300",300,TRUE,"MetRef__kodama-cpp__knn__cuda__c4__splitting_300"
+"MetRef","kodama-cpp","pls_lda","cuda",4,"reference",100,TRUE,"MetRef__kodama-cpp__pls_lda__cuda__c4__reference"

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <algorithm>
@@ -299,6 +302,140 @@ inline void search_spatial_grid_exact(
       if (lower > kth) break;
     }
   }
+}
+
+inline void add_grid_cell_nearest_query(
+  const float* base,
+  const float* query,
+  const SpatialGridIndex& grid,
+  int query_row,
+  int ix,
+  int iy,
+  int iz,
+  GridCandidate& best
+) {
+  if (ix < 0 || iy < 0 || ix >= grid.bins || iy >= grid.bins) return;
+  if (grid.dims == 3 && (iz < 0 || iz >= grid.bins)) return;
+  const int cell = grid.dims == 3 ?
+    grid_cell_id_3d(ix, iy, iz, grid.bins) :
+    grid_cell_id_2d(ix, iy, grid.bins);
+  const int start = grid.offsets[static_cast<std::size_t>(cell)];
+  const int end = grid.offsets[static_cast<std::size_t>(cell + 1)];
+  const std::size_t query_base = static_cast<std::size_t>(query_row) * grid.dims;
+  for (int position = start; position < end; ++position) {
+    const int candidate = grid.rows[static_cast<std::size_t>(position)];
+    const std::size_t candidate_base = static_cast<std::size_t>(candidate) * grid.dims;
+    const float dx = query[query_base] - base[candidate_base];
+    const float dy = query[query_base + 1] - base[candidate_base + 1];
+    float distance = dx * dx + dy * dy;
+    if (grid.dims == 3) {
+      const float dz = query[query_base + 2] - base[candidate_base + 2];
+      distance += dz * dz;
+    }
+    if (grid_candidate_better(distance, candidate, best)) {
+      best = GridCandidate{distance, candidate};
+    }
+  }
+}
+
+inline GridCandidate search_spatial_grid_nearest_query(
+  const float* base,
+  const float* query,
+  const SpatialGridIndex& grid,
+  int query_row
+) {
+  const std::size_t query_base = static_cast<std::size_t>(query_row) * grid.dims;
+  const float qx = query[query_base];
+  const float qy = query[query_base + 1];
+  const float qz = grid.dims == 3 ? query[query_base + 2] : 0.0f;
+  const int cx = grid_coord(qx, grid.min_x, grid.cell_x, grid.bins);
+  const int cy = grid_coord(qy, grid.min_y, grid.cell_y, grid.bins);
+  const int cz = grid.dims == 3 ? grid_coord(qz, grid.min_z, grid.cell_z, grid.bins) : 0;
+  GridCandidate best;
+
+  for (int radius = 0; radius <= grid.bins; ++radius) {
+    const int raw_x0 = cx - radius;
+    const int raw_x1 = cx + radius;
+    const int raw_y0 = cy - radius;
+    const int raw_y1 = cy + radius;
+    const int raw_z0 = cz - radius;
+    const int raw_z1 = cz + radius;
+    if (grid.dims == 2) {
+      if (radius == 0) {
+        add_grid_cell_nearest_query(base, query, grid, query_row, cx, cy, 0, best);
+      } else {
+        for (int ix = raw_x0; ix <= raw_x1; ++ix) {
+          add_grid_cell_nearest_query(base, query, grid, query_row, ix, raw_y0, 0, best);
+          if (raw_y1 != raw_y0) {
+            add_grid_cell_nearest_query(base, query, grid, query_row, ix, raw_y1, 0, best);
+          }
+        }
+        for (int iy = raw_y0 + 1; iy <= raw_y1 - 1; ++iy) {
+          add_grid_cell_nearest_query(base, query, grid, query_row, raw_x0, iy, 0, best);
+          if (raw_x1 != raw_x0) {
+            add_grid_cell_nearest_query(base, query, grid, query_row, raw_x1, iy, 0, best);
+          }
+        }
+      }
+    } else {
+      for (int iz = raw_z0; iz <= raw_z1; ++iz) {
+        for (int iy = raw_y0; iy <= raw_y1; ++iy) {
+          for (int ix = raw_x0; ix <= raw_x1; ++ix) {
+            if (radius > 0 && ix != raw_x0 && ix != raw_x1 &&
+                iy != raw_y0 && iy != raw_y1 && iz != raw_z0 && iz != raw_z1) {
+              continue;
+            }
+            add_grid_cell_nearest_query(base, query, grid, query_row, ix, iy, iz, best);
+          }
+        }
+      }
+    }
+
+    if (best.index >= 0) {
+      const int x0 = std::max(0, raw_x0);
+      const int x1 = std::min(grid.bins - 1, raw_x1);
+      const int y0 = std::max(0, raw_y0);
+      const int y1 = std::min(grid.bins - 1, raw_y1);
+      const int z0 = grid.dims == 3 ? std::max(0, raw_z0) : 0;
+      const int z1 = grid.dims == 3 ? std::min(grid.bins - 1, raw_z1) : 0;
+      if (grid_lower_bound_outside(qx, qy, qz, grid, x0, x1, y0, y1, z0, z1) > best.distance) {
+        break;
+      }
+    }
+  }
+  return best;
+}
+
+inline NeighborGraph spatial_grid_query_nearest(
+  const float* base,
+  int base_rows,
+  const float* query,
+  int query_rows,
+  int dims,
+  int n_threads
+) {
+  if (base == nullptr || query == nullptr || base_rows < 1 || query_rows < 1 ||
+      (dims != 2 && dims != 3)) {
+    throw std::invalid_argument("Spatial grid query supports non-empty 2D/3D matrices.");
+  }
+  const int bins = spatial_grid_bins_per_dim(base_rows, 1, dims);
+  const SpatialGridIndex grid = build_spatial_grid_index(base, base_rows, dims, bins);
+  NeighborGraph graph;
+  graph.neighbors = 1;
+  graph.indices.assign(static_cast<std::size_t>(query_rows), -1);
+  graph.distances.assign(static_cast<std::size_t>(query_rows), std::numeric_limits<float>::infinity());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(n_threads > 0 ? n_threads : 1)
+#else
+  (void)n_threads;
+#endif
+  for (int row = 0; row < query_rows; ++row) {
+    const GridCandidate best = search_spatial_grid_nearest_query(base, query, grid, row);
+    graph.indices[static_cast<std::size_t>(row)] = best.index;
+    graph.distances[static_cast<std::size_t>(row)] =
+      std::sqrt(std::max(0.0f, best.distance));
+  }
+  return graph;
 }
 
 inline NeighborGraph spatial_grid_self_knn(

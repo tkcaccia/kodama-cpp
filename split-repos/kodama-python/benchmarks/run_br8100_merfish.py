@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 import argparse
 import csv
 import time

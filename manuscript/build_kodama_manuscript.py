@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,10 +17,16 @@ from docx.shared import Inches, Pt, RGBColor
 ROOT = Path(__file__).resolve().parent
 MANUSCRIPT = ROOT / "kodama_cpp_jmlr_manuscript.docx"
 SELF_REVIEW = ROOT / "kodama_cpp_jmlr_self_review.docx"
-TEX = ROOT / "kodama_cpp_jmlr_mloss.tex"
+TEX = ROOT / "kodama_cpp_jmlr_technical_supplement.tex"
 BIB = ROOT / "kodama_cpp_refs.bib"
 ARCH_FIGURE = ROOT / "kodama_cpp_architecture.png"
 SENSITIVITY_FIGURE = ROOT / "kodama_m_tcycle_sensitivity.png"
+ENSEMBLE_CONVERGENCE_FIGURE = ROOT / "jmlr_pilot_20260716" / "ensemble_convergence.png"
+NONSPATIAL_PANEL_FIGURE = (
+    ROOT
+    / "jmlr_nonspatial_panel_20260718"
+    / "nonspatial_visualization_validation.png"
+)
 
 
 TOKENS = {
@@ -36,24 +45,57 @@ TOKENS = {
 }
 
 
+AUTHORS = [
+    ("Moussa Kassim", "1,2"),
+    ("Martin Ocharo", "1,2"),
+    ("Alessia Vignoli", "3,4"),
+    ("Leonardo Tenori", "3,4"),
+    ("Stefano Cacciatore", "1,2"),
+]
+
+AFFILIATIONS = [
+    (
+        "1",
+        "Bioinformatics Unit, International Center for Genetic Engineering and Biotechnology, "
+        "Cape Town 7925, South Africa.",
+    ),
+    (
+        "2",
+        "Department of Integrative Biomedical Sciences, Institute of Infectious Disease & Molecular "
+        "Medicine (IDM), University of Cape Town, Cape Town 7925, South Africa.",
+    ),
+    (
+        "3",
+        'Department of Chemistry "Ugo Schiff", University of Florence, Sesto Fiorentino, Italy.',
+    ),
+    (
+        "4",
+        "Magnetic Resonance Center (CERM), University of Florence, Sesto Fiorentino, Italy.",
+    ),
+]
+
+CORRESPONDING_AUTHOR = "Stefano Cacciatore, stefano.cacciatore@icgeb.org"
+
+
 ABSTRACT = (
-    "KODAMA searches for latent structure by maximizing the cross-validated predictability "
-    "of an evolving label vector. We present kodama-cpp, a standalone C++17 library with CPU, "
-    "CUDA, and Apple Metal backends that "
-    "moves this accuracy-maximization core out of the R package layer while preserving the "
-    "methodological contract established by the original KODAMA literature. The library exposes "
-    "typed KNN and PLS-LDA optimization paths, KNN and PLS-LDA cross-validation kernels, KODAMA "
-    "matrix construction from either data matrices or supplied KNN graphs, graph construction, "
-    "embedding helpers, and clustering utilities. Its "
-    "implementation uses float32 numerical matrices and workspaces, a package-owned CPU HNSW "
-    "search, package-owned CUDA exact/IVF search and k-means, native Metal exact and IVF search, label-aware "
-    "SIMPLS PLS-LDA, reusable fold "
-    "buffers, and independent M-cycle execution. The result is a wrapper-independent numerical "
-    "backend intended to support reproducible R and Python interfaces, with validation reported "
-    "separately for the internal cross-validation objective, external label agreement, runtime, "
-    "and visualization quality. We also document the current validation boundary: the graph-input "
-    "interface is release-validated as an optional entry point, while performance and quality claims "
-    "are restricted to measurements reported explicitly in the benchmark tables."
+    "KODAMA searches for latent structure by maximizing the cross-validated predictability of an "
+    "evolving label vector. We present kodama-cpp, a standalone C++17 implementation that preserves "
+    "this objective while reformulating its numerical execution for multicore CPU, NVIDIA CUDA, and "
+    "Apple Metal systems. The novelty is not a replacement objective: it is an accelerator-native "
+    "software design in which one typed core owns float32 data, fold assignments, evolving labels, "
+    "classifier workspaces, and graph outputs instead of repeatedly crossing an R-package boundary. "
+    "The CUDA backend provides package-owned exact and recall-tuned IVF-Flat nearest-neighbor search, "
+    "GPU k-means, label-aware SIMPLS cross-products, reusable device workspaces, and latent-space LDA. "
+    "The Metal backend provides native exact and IVF-Flat search, GPU k-means, and MPS-assisted SIMPLS "
+    "projection while retaining the same KNN and PLS-LDA contracts. KODAMA runs remain independent, "
+    "requested feasible PLS component counts are evaluated directly, and unavailable accelerators "
+    "raise errors rather than silently executing a CPU substitute. The resulting library exposes "
+    "KNN and PLS-LDA cross-validation, label optimization, KODAMA matrix construction from data or "
+    "supplied neighbor graphs, float32 randomized PCA, and visualization primitives through "
+    "wrapper-independent APIs. We "
+    "validate mathematical parity, backend identity, runtime, memory behavior, and external-label "
+    "diagnostics separately so that acceleration claims are not conflated with the internal "
+    "cross-validation objective."
 )
 
 
@@ -81,14 +123,30 @@ SECTIONS = [
                 "separate KODAMA.matrix and KODAMA.visualization functions."
             ),
             (
-                "kodama-cpp addresses this problem by moving the KODAMA numerical core into a "
-                "standalone C++17 library with CPU, CUDA, and Apple Metal backends. The library "
-                "currently focuses on two classifier "
-                "families for the KODAMA optimization layer, KNN and PLS-LDA, because they provide "
-                "complementary inductive biases: local neighborhood consistency and low-rank "
-                "linear discrimination in a latent component space. The implementation is "
-                "designed so R and Python wrappers can call the same backend without reimplementing "
-                "the mathematics."
+                "The repeated classifier fits inside KODAMA create a systems problem that is not "
+                "resolved by translating individual R expressions into C++. Neighbor indices, fold "
+                "matrices, class encodings, latent projections, and evolving labels must be reused "
+                "across many cross-validation calls without changing the accepted label trajectory. "
+                "A useful accelerator implementation must therefore preserve the mathematical state "
+                "machine while changing where that state lives and how it moves."
+            ),
+            (
+                "kodama-cpp addresses this problem with a standalone C++17 core and explicit CPU, "
+                "CUDA, and Apple Metal backends. It currently supports two classifier families in "
+                "the KODAMA optimization layer: KNN for local neighborhood consistency and PLS-LDA "
+                "for low-rank linear discrimination. R and Python wrappers call the same typed API, "
+                "so fold construction, proposals, acceptance decisions, and result metadata are not "
+                "reimplemented by each language interface."
+            ),
+            (
+                "The principal software novelty has four parts. First, analysis matrices and repeated "
+                "workspaces are float32-native. Second, nearest-neighbor search, k-means initialization, "
+                "randomized PCA, SIMPLS, and LDA have backend-specific implementations rather than "
+                "hidden CPU fallbacks. "
+                "Third, KODAMA-specific invariants such as independent M runs, one CV evaluation per "
+                "proposal cycle, constrained groups, and requested PLS component counts remain shared. "
+                "Fourth, backend identity, timings, memory, search parameters, and prediction diagnostics "
+                "are returned as data, making heterogeneous execution testable from thin wrappers."
             ),
             (
                 "We deliberately frame this contribution as a software-methods paper, not as a "
@@ -137,22 +195,25 @@ SECTIONS = [
         [
             (
                 "The core library exposes C++ functions rather than wrapper-specific entry points. "
-                "A MatrixView accepts double or float inputs; internally, the analysis matrix is "
-                "stored in float32 buffers to match GPU kernels and reduce memory traffic. The "
-                "public API is grouped into cross-validation kernels, core label optimization, "
-                "KODAMA matrix construction, graph/embedding utilities, and clustering routines."
+                "A MatrixView accepts double or float inputs, but all analysis paths convert to and "
+                "retain float32 matrices and workspaces. The core owns fold assignments, compact class "
+                "encodings, current and best label vectors, classifier buffers, and typed result "
+                "metadata. The public API is grouped into cross-validation kernels, core label "
+                "optimization, KODAMA matrix construction, PCA, graph construction, and embedding utilities."
             ),
             (
-                "KNN kernels have strict backend-specific implementations. The dependency-free CPU "
-                "path uses a package-owned float32 HNSW implementation adapted from the MIT-licensed "
-                "FAISS organization. CUDA remains opt-in, but its exact search, recall-tuned IVF-Flat "
-                "search, k-means, and label-aware SIMPLS/LDA are package-owned float32 code requiring "
-                "only CUDA Toolkit libraries. Apple Metal uses only "
-                "system frameworks and provides exact and "
-                "recall-tuned IVF-Flat search. All paths implement the same voting objective. In the "
-                "KODAMA optimizer, neighbor work is organized so the "
-                "search structure can be reused where the mathematics permits. This is the main "
-                "difference from repeatedly launching wrapper-level nearest-neighbor searches."
+                "Backend selection is strict and observable. CPU, CUDA, and Metal entry points report "
+                "the backend that actually executed, and an unavailable accelerator raises an error. "
+                "This rule is essential for reproducible benchmarking because a nominal GPU call that "
+                "silently falls back to CPU would preserve outputs while invalidating performance claims."
+            ),
+            (
+                "KNN kernels have backend-specific implementations under one voting contract. The "
+                "dependency-light CPU path uses a package-owned float32 HNSW implementation. CUDA "
+                "provides package-owned exact and recall-tuned IVF-Flat search plus GPU k-means using "
+                "CUDA Toolkit libraries. Apple Metal provides native exact and recall-tuned IVF-Flat "
+                "search plus GPU k-means using Metal compute kernels. Neighbor structures are reused "
+                "where the mathematics permits, avoiding repeated wrapper-level index construction."
             ),
             (
                 "PLS-LDA uses a SIMPLS strategy following the fastPLS implementation rather than "
@@ -163,6 +224,22 @@ SECTIONS = [
                 "mathematically feasible, rather than being replaced by an internal model-selection "
                 "shortcut. The library exposes no PLS-cKNN classifier; KODAMA optimization is limited "
                 "to KNN and PLS-LDA."
+            ),
+            (
+                "The library also exposes float32 randomized PCA as a preprocessing and embedding-"
+                "initialization primitive. A Gaussian range sketch, backend-specific automatic "
+                "oversampling and power-iteration policy, orthonormal basis, and compact eigensolve "
+                "produce scores, loadings, singular values, and explained variance. CPU, CUDA, and "
+                "Metal entry points share this contract. The implementation follows the current "
+                "fastEmbedR/fastPLS strategy but is standalone and does not link either package, "
+                "Armadillo, Eigen, or RAFT."
+            ),
+            (
+                "UMAP and openTSNE are direct standalone ports of the pinned current fastEmbedR "
+                "implementation. UMAP builds binary or fuzzy graphs directly in float32 CSR form, "
+                "including the smooth-kNN bandwidth calculation and epochs-per-sample schedule; "
+                "openTSNE uses the matching sparse affinities and exact or FFT-grid repulsion. "
+                "The CUDA path reuses pooled workspaces, and neither path links fastEmbedR or R."
             ),
             (
                 "For graph inputs, where neighbor indices and distances are supplied by the caller, "
@@ -212,10 +289,12 @@ SECTIONS = [
                 "complete R workflow and uses R-package dependencies for data handling, nearest "
                 "neighbors, and visualization. kodama-cpp owns the numerical kernels and exposes "
                 "them through C++ types so that R and Python wrappers can share one backend. This "
-                "makes the comparison with the previous version a compatibility question: the "
-                "objective and output contract should match, while implementation details such as "
-                "float32 storage, package-owned CPU/CUDA/Metal search, CUDA kernels, and wrapper-independent graph "
-                "objects are new."
+                "makes the comparison with the previous version a compatibility question: held-out "
+                "label predictability remains the central signal and the output roles can be mapped, "
+                "while exact trajectories need not match because the current standard adds grouped "
+                "adaptive proposals, transition-driven coarsening, and a disclosed degeneracy guard. "
+                "Float32 storage, package-owned CPU/CUDA/Metal search, accelerator kernels, and "
+                "wrapper-independent graph objects are additional implementation changes."
             ),
         ],
     ),
@@ -240,9 +319,10 @@ SECTIONS = [
                 "attribute a speedup to the part of the implementation that produced it."
             ),
             (
-                "The evaluation also separates optimization from validation. The label vector is "
-                "chosen by internal cross-validation accuracy, but this score is not interpreted "
-                "as external biological, chemical, or semantic truth. When reference labels are "
+                "The evaluation also separates optimization from validation. Held-out CV accuracy is "
+                "the internal classifier signal, while the current standard ranks proposals with the "
+                "disclosed label-only acceptance score. Neither quantity is interpreted as external "
+                "biological, chemical, or semantic truth. When reference labels are "
                 "available, they are held outside the optimizer and reported after the fact. This "
                 "distinction follows the broader cautionary literature on model selection, feature "
                 "selection bias, and circular analysis."
@@ -262,11 +342,13 @@ SECTIONS = [
         "6. Availability and reproducibility",
         [
             (
-                "kodama-cpp is intended for release under the MIT License in the public "
-                "tkcaccia/kodama-cpp GitHub repository. The recommended project split is a "
-                "standalone C++17 core repository, an R wrapper repository, and a Python wrapper "
-                "repository. This keeps wrapper code thin and makes the numerical library reusable "
-                "outside either language ecosystem."
+                "kodama-cpp is intended for release in the public tkcaccia/kodama-cpp GitHub "
+                "repository. Original project code is licensed under MIT, while identified "
+                "compatible third-party portions retain their upstream terms. In particular, the "
+                "Metal backend is marked MIT AND Apache-2.0 because its fastEmbedR lineage retains "
+                "the Faiss-mlx fused list-scan/top-k organization under Apache-2.0. The recommended "
+                "project split is a standalone C++17 core repository, an R wrapper repository, and "
+                "a Python wrapper repository."
             ),
             (
                 "Reproducibility is supported through CMake builds, CPU, CUDA, and Metal tests, wrapper "
@@ -274,6 +356,15 @@ SECTIONS = [
                 "The C++ core does not depend on R data readers; wrapper packages are responsible "
                 "for translating host-language objects into contiguous matrices before calling the "
                 "library."
+            ),
+            (
+                "A versioned provenance audit maps every shipped source-like file to an SPDX license "
+                "identifier and records pinned KODAMA, fastPLS, fastEmbedR, faissR, FAISS, Faiss-mlx, "
+                "and cuVS snapshots. Stefano Cacciatore confirmed that tkcaccia is his historical Git "
+                "identity and separately authorized MIT distribution of the KODAMA and "
+                "fastPLS-derived portions whose copyright he owns. The audit preserves publication "
+                "coauthor credit, third-party notices, and full license texts, and is enforced by a "
+                "release-time source-header and retained-license checksum test."
             ),
         ],
     ),
@@ -303,24 +394,134 @@ SECTIONS = [
 
 CONTRIBUTION_ROWS = [
     (
-        "Formalization",
-        "States KODAMA as cross-validated label predictability, with M independent runs and a derived graph or dissimilarity.",
+        "Mathematical continuity",
+        "Preserves cross-validated label predictability, independent M runs, constrained proposals, and the derived KODAMA graph or dissimilarity.",
     ),
     (
         "Standalone implementation",
-        "Moves the numerical core into a C++17 library so R and Python wrappers share CPU, CUDA, and Metal implementations.",
+        "Moves data ownership and label evolution into a C++17 library so R and Python wrappers share one implementation.",
     ),
     (
-        "Classifier-specific kernels",
-        "Provides clean KNN and PLS-LDA optimization paths instead of wrapper-level branching.",
+        "Native CUDA backend",
+        "Combines exact/IVF-Flat KNN, k-means, label-aware SIMPLS, latent LDA, and reusable device workspaces without FAISS, cuVS, or RAFT runtime links.",
     ),
     (
-        "GPU-ready numerics",
-        "Uses float32 numerical workspaces, CUDA and Metal nearest-neighbor search, and label-aware SIMPLS PLS-LDA.",
+        "Native Metal backend",
+        "Implements exact/IVF-Flat KNN and k-means with Metal kernels and accelerates SIMPLS projections with Metal Performance Shaders.",
     ),
     (
-        "Reproducible API",
-        "Returns typed predictions, accuracies, labels, graphs, timings, memory, and backend parameters.",
+        "KODAMA-specific reuse",
+        "Caches fold data, compacts active labels, reuses neighbor structures, and keeps M runs independent without changing the objective.",
+    ),
+    (
+        "Testable backend contract",
+        "Returns typed predictions, labels, graphs, timings, memory, search parameters, and actual backend identity, with no silent fallback.",
+    ),
+]
+
+
+IMPLEMENTATION_NOVELTY_PARAGRAPHS = [
+    (
+        "kodama-cpp is an algorithm-preserving systems redesign rather than a new KODAMA objective. "
+        "The original R implementation remains the reference for accuracy maximization and the "
+        "ensemble construction. The new contribution is that numerical state previously recreated "
+        "across wrapper calls is represented once in typed C++ objects and reused across folds, "
+        "proposal cycles, and independent runs."
+    ),
+    (
+        "This distinction matters because the runtime of KODAMA is the product of several nested "
+        "operations: M independent searches, Tcycle proposal steps, cross-validation folds, and a "
+        "classifier fit or vote inside each fold. Accelerating only one matrix multiplication leaves "
+        "allocation, format conversion, index construction, and host-device traffic in the dominant "
+        "loop. The implementation therefore optimizes the lifecycle of the complete CV state while "
+        "retaining one objective evaluation per proposal."
+    ),
+    (
+        "The backends share mathematical invariants but not source-level execution strategies. KNN "
+        "uses the same metric and voting rules with different search engines. PLS-LDA uses the same "
+        "SIMPLS deflation and latent LDA model while each accelerator maps the dominant operations to "
+        "its own memory and matrix-compute model. This separation avoids benchmark-specific branches "
+        "inside the classifier and makes CPU/accelerator parity an explicit test target."
+    ),
+]
+
+
+CUDA_BACKEND_PARAGRAPHS = [
+    (
+        "The CUDA path is package-owned and uses only CUDA Toolkit libraries. Input matrices are "
+        "materialized as contiguous float32 buffers. Exact KNN evaluates the requested metric "
+        "directly, whereas IVF-Flat builds GPU k-means centroids and inverted lists and selects "
+        "nprobe from an exact pilot query when recall tuning is enabled. The selected nlist, nprobe, "
+        "pilot recall, and device id are returned with the result. Exact Lloyd assignment uses a "
+        "bounded 256 MiB score workspace per independent M lane and batches rows when necessary; "
+        "every row still evaluates every centroid with the same distance and tie rules."
+    ),
+    (
+        "For PLS-LDA, class labels are encoded compactly and the centered X'Y cross-product is formed "
+        "from class sums on the GPU, avoiding a dense n-by-K one-hot response. Float32 SIMPLS uses "
+        "reusable thread-local device workspaces that grow to the required capacity. Separate CUDA "
+        "kernels compute latent projections, class sums, covariance terms, and LDA scores, while "
+        "fold caches retain train/validation layouts and reusable Gram information."
+    ),
+    (
+        "The CUDA backend reduces allocation and transfer costs but the present release does not "
+        "claim that the complete M-run ensemble is permanently device resident. Independent runs "
+        "are scheduled without changing their seeds or proposal trajectories, and small control "
+        "decisions remain host orchestrated. Fully batched resident M execution is therefore treated "
+        "as future engineering work, not as evidence used in the current speedup claims."
+    ),
+]
+
+
+METAL_BACKEND_PARAGRAPHS = [
+    (
+        "The Apple backend is implemented in Objective-C++ on Metal rather than emulating CUDA. A "
+        "persistent Metal state owns the device, command queue, and compute pipelines. Native kernels "
+        "implement exact KNN, projected IVF-Flat search, Lloyd k-means assignment and centroid "
+        "updates, and the buffer operations needed by KODAMA initialization and graph construction."
+    ),
+    (
+        "The Metal PLS-LDA path uses float32 class-label cross-products and the same SIMPLS component "
+        "limit as CPU and CUDA. Metal Performance Shaders execute the dominant Xw and X't matrix "
+        "products through MPSMatrixMultiplication. The comparatively small response-space power "
+        "iterations and SIMPLS deflation updates remain host operations. This division is stated "
+        "explicitly because a native Metal backend does not imply that every scalar operation is a "
+        "GPU kernel."
+    ),
+    (
+        "Metal is a first-class backend contract: it has named KNNCV, PLSLDACV, CoreKNN, CorePLSLDA, "
+        "and KODAMAMatrix entry points, reports Metal in result metadata, and is covered by dedicated "
+        "parity tests. Unsupported Metal operations fail explicitly instead of being relabeled CPU "
+        "execution. This makes Apple GPU results auditable in the same manner as CUDA results."
+    ),
+]
+
+
+BACKEND_CONTRACT_ROWS = [
+    (
+        "Internal precision",
+        "Contiguous float32 host/device matrices and reusable CUDA buffers.",
+        "Float32 shared MTLBuffers and MPSMatrix objects.",
+    ),
+    (
+        "KNN",
+        "Exact or recall-tuned IVF-Flat with GPU k-means and returned search metadata.",
+        "Exact or recall-tuned IVF-Flat with native Metal k-means.",
+    ),
+    (
+        "PLS-LDA",
+        "GPU label cross-products, SIMPLS workspace, projection, class summaries, and LDA scoring.",
+        "Label-aware cross-product with MPS-accelerated X projections and shared SIMPLS/LDA semantics.",
+    ),
+    (
+        "KODAMA evolution",
+        "Same folds, constrained proposals, acceptance score, requested feasible components, and independent M runs.",
+        "Same folds, constrained proposals, acceptance score, requested feasible components, and independent M runs.",
+    ),
+    (
+        "Failure semantics",
+        "Unavailable CUDA entry points throw; no CPU fallback is labeled CUDA.",
+        "Unavailable Metal entry points throw; no CPU fallback is labeled Metal.",
     ),
 ]
 
@@ -347,9 +548,14 @@ API_ROWS = [
         "Runs the same KNN or PLS-LDA KODAMA optimizer from supplied neighbor indices/distances; KNN reuses the graph directly and PLS-LDA uses self-tuning Laplacian features when the data matrix is unavailable.",
     ),
     (
+        "Principal components",
+        "PCA / KODAMA.pca",
+        "Float32 randomized PCA scores, loadings, singular values, explained variance, preprocessing vectors, backend identity, and runtime on CPU, CUDA, or Metal.",
+    ),
+    (
         "Visualization",
         "KODAMA.visualization",
-        "UMAP and openTSNE embeddings from standard or KODAMA-corrected neighbor graphs.",
+        "Current fastEmbedR UMAP and openTSNE ports from standard or KODAMA-corrected neighbor graphs; direct float32 CSR construction and binary/fuzzy UMAP graph modes are explicit.",
     ),
     (
         "Graph and clustering",
@@ -416,7 +622,12 @@ COMPATIBILITY_ROWS = [
     (
         "Objective",
         "KODAMA maximizes cross-validated accuracy of an evolving label vector.",
-        "Same objective; exposed through CoreKNN and CorePLSLDA.",
+        "Held-out label predictability remains the classifier signal and raw accuracy is reported; the standard search ranks proposals with a disclosed label-only degeneracy guard.",
+    ),
+    (
+        "Search dynamics",
+        "The historical core evolves labels through its published stochastic accuracy-maximization procedure.",
+        "Grouped adaptive moves and transition-driven coarsening are explicit search extensions; they use CV predictions but never reference labels.",
     ),
     (
         "Independent runs",
@@ -521,7 +732,7 @@ VALIDATION_ROWS = [
     ),
     (
         "Release",
-        "CMake install targets, wrapper build scripts, benchmark drivers, and third-party license notices are present; the GitHub commit hash and release tag identify the reviewed software snapshot.",
+        "CMake install targets, wrapper build scripts, benchmark drivers, SPDX source headers, a pinned provenance matrix, retained third-party license texts, and a checksum-backed license audit are present. The final clean tag, commit hash, archive digest, and DOI are required by RELEASE_CHECKLIST.md and will be inserted only after they are created.",
     ),
 ]
 
@@ -555,118 +766,134 @@ INSTALLATION_ROWS = [
 
 
 LICENSE_DEPENDENCY_ROWS = [
-    ("kodama-cpp", "MIT license intended for the standalone core release."),
-    ("KODAMA, fastPLS, and fastEmbedR-derived code", "Authored by the same group and relicensed under MIT in the standalone core."),
-    ("Native CPU HNSW", "Package-owned source adapted from the MIT-licensed FAISS organization; no FAISS link dependency."),
-    ("Apple Metal", "Uses only Foundation, Metal, and MetalPerformanceShaders system frameworks; FAISS and Faiss-mlx source acknowledgements are retained."),
+    ("kodama-cpp project code", "MIT, with SPDX copyright assigned to Stefano Cacciatore; historical Git identity tkcaccia."),
+    ("KODAMA-derived code", "Public origin GPL (>= 2); local portions whose copyright Stefano Cacciatore owns are separately authorized under MIT. KODAMA coauthors remain credited."),
+    ("fastPLS-derived code", "Public origin GPL-3; local SIMPLS/LDA portions whose copyright Stefano Cacciatore owns are separately authorized under MIT. fastPLS coauthors remain credited."),
+    ("fastEmbedR and faissR", "MIT snapshots pinned for randomized-PCA policy, UMAP/openTSNE, HNSW, Metal, and exact 2D/3D grid-KNN lineage."),
+    ("Native CPU HNSW", "Direct FAISS-derived organization under MIT; Meta and Stefano Cacciatore notices and the complete FAISS license are retained."),
+    ("Apple Metal", "MIT AND Apache-2.0 for the combined file; Meta, Faiss-mlx, and modification notices plus both full licenses are retained."),
     ("Native CUDA", "Package-owned exact/IVF KNN, k-means, and SIMPLS/LDA use CUDA Toolkit libraries without FAISS, cuVS, RAFT, RMM, Armadillo, or external graph-clustering links."),
-    ("R and Python wrappers", "Thin language bindings in separate repositories, released under licenses compatible with the core."),
+    ("Audit enforcement", "All tracked source-like files carry SPDX identifiers; official license texts are SHA-256 checked by tools/check_license_headers.sh."),
 ]
 
 
 WRAPPER_VALIDATION_ROWS = [
-    ("C++ core, local CPU", "Dependency-free build passed 2/2 configured tests on macOS."),
-    ("C++ core, Apple Metal", "Native Metal build passed 3/3 configured tests; a clean external CMake consumer linked the installed package and selected Metal."),
-    ("C++ core, CUDA", "A fresh CUDA 13.2 build without FAISS, cuVS, RAFT, RMM, or Armadillo succeeded on chiamaka and CTest passed 2/2. The linked-soname audit found none of the removed dependencies, and the CMake cache contained no corresponding package option, target, header, or library entry; only the CUDA Toolkit environment directory retained a legacy faissgpu-cuvs label."),
-    ("R wrapper, local CPU", "R CMD build followed by R CMD check --as-cran --no-manual --no-vignettes passed on the source tarball with only the expected new-submission NOTE under LC_ALL=C."),
+    ("C++ core, local CPU", "Dependency-free release-candidate build passed 4/4 configured tests on macOS, including the source/license audit and frozen public-API snapshot."),
+    ("C++ core, Apple Metal", "Native Metal release-candidate build passed 5/5 configured tests, including the source/license audit and frozen public-API snapshot; a clean external CMake consumer linked the installed package and selected Metal."),
+    ("C++ core, CUDA", "A fresh CUDA 13.2 release-candidate build without FAISS, cuVS, RAFT, RMM, or Armadillo succeeded on chiamaka and CTest passed 4/4, including the source/license audit, core tests, frozen public-API test, and float32 install-consumer smoke test. The linked-soname audit found none of the removed dependencies, and the CMake cache contained no corresponding package option, target, header, or library entry; only the CUDA Toolkit environment directory retained a legacy faissgpu-cuvs label."),
+    ("R wrapper, local CPU", "R CMD build followed by R CMD check --as-cran --no-manual passed on the source tarball in a UTF-8 locale with only the expected new-submission NOTE."),
     ("Python wrapper, local CPU", "Temporary virtual-environment install against the local CPU build passed pytest: 4/4 tests."),
 ]
 
 
 TCYCLE_SENSITIVITY_ROWS = [
     (
-        "Benchmark A",
+        "MetRef",
         "KNN",
-        "0.900 -> 0.906",
-        "0.844 -> 0.897",
-        "4 -> 3",
-        "23.4 -> 23.7",
+        "0.9924 -> 1.0000",
+        "0.8847 -> 0.8809",
+        "7 -> 9",
+        "3.116 -> 3.115",
     ),
     (
-        "Benchmark A",
+        "MetRef",
         "PLS-LDA",
-        "0.898 -> 0.911",
-        "0.683 -> 0.838",
-        "9 -> 4",
-        "113.7 -> 527.9",
+        "0.9786 -> 1.0000",
+        "0.9504 -> 0.9924",
+        "34 -> 24",
+        "119.790 -> 584.089",
     ),
     (
-        "Benchmark B",
+        "USPS",
         "KNN",
-        "0.773 -> 0.863",
-        "0.701 -> 0.809",
-        "23 -> 9",
-        "47.0 -> 51.7",
+        "0.9662 -> 0.9997",
+        "0.9414 -> 0.9925",
+        "61 -> 32",
+        "15.336 -> 15.828",
     ),
     (
-        "Benchmark B",
+        "USPS",
         "PLS-LDA",
-        "0.482 -> 0.872",
-        "0.465 -> 0.829",
-        "67 -> 5",
-        "143.9 -> 596.7",
+        "0.9383 -> 0.9612",
+        "0.9220 -> 0.9520",
+        "88.5 -> 71",
+        "139.135 -> 636.650",
     ),
 ]
 
 
 M_SENSITIVITY_ROWS = [
     (
-        "Benchmark A",
+        "MetRef",
         "KNN",
-        "0.906 / 0.905 / 0.906",
-        "0.897 / 0.897 / 0.897",
-        "0.385 / 0.382 / 0.385",
-        "5.3 / 12.2 / 23.7",
+        "1.0000 / 1.0000 / 1.0000",
+        "0.9229 / 0.8931 / 0.8809",
+        "0.0517 / 0.0517 / 0.0517",
+        "0.464 / 1.235 / 3.115",
     ),
     (
-        "Benchmark A",
+        "MetRef",
         "PLS-LDA",
-        "0.907 / 0.910 / 0.911",
-        "0.895 / 0.845 / 0.838",
-        "0.377 / 0.378 / 0.381",
-        "102.1 / 265.9 / 527.9",
+        "0.9985 / 1.0000 / 1.0000",
+        "0.9901 / 0.9939 / 0.9924",
+        "0.8257 / 0.8439 / 0.7700",
+        "113.381 / 277.456 / 584.089",
     ),
     (
-        "Benchmark B",
+        "USPS",
         "KNN",
-        "0.832 / 0.863 / 0.863",
-        "0.809 / 0.809 / 0.809",
-        "0.413 / 0.352 / 0.352",
-        "15.7 / 26.2 / 51.7",
+        "0.9976 / 0.9976 / 0.9997",
+        "0.9947 / 0.9925 / 0.9925",
+        "0.3370 / 0.3370 / 0.3139",
+        "3.431 / 8.227 / 15.828",
     ),
     (
-        "Benchmark B",
+        "USPS",
         "PLS-LDA",
-        "0.871 / 0.872 / 0.872",
-        "0.812 / 0.815 / 0.829",
-        "0.268 / 0.319 / 0.319",
-        "116.3 / 301.0 / 596.7",
+        "0.9639 / 0.9602 / 0.9612",
+        "0.9534 / 0.9503 / 0.9520",
+        "0.1098 / 0.1080 / 0.1156",
+        "123.851 / 319.838 / 636.650",
     ),
+]
+
+
+ENSEMBLE_CONVERGENCE_ROWS = [
+    ("MetRef", "KNN", "0.1377 / 0.0783 / 0.0407", "0.9888"),
+    ("MetRef", "PLS-LDA", "0.0588 / 0.0453 / 0.0180", "0.9988"),
+    ("USPS", "KNN", "0.1011 / 0.0617 / 0.0319", "0.9955"),
+    ("USPS", "PLS-LDA", "0.1191 / 0.0803 / 0.0380", "0.9926"),
 ]
 
 
 PARAMETER_SENSITIVITY_PARAGRAPHS = [
     (
-        "Because KODAMA has two nested stochastic controls, M and Tcycle cannot be justified by visual quality alone. Tcycle controls the depth of label-vector evolution inside one run, whereas M controls how many independent local optima enter the final ensemble. The current release-validation experiment uses two benchmark datasets and both KODAMA classifiers: fixing M = 100 while varying Tcycle in {20, 50, 100}, and fixing Tcycle = 100 while varying M in {20, 50, 100}. The experiment used landmarks = 100000, splitting = 100, ncomp = 50, and knn.k = 30."
+        "Because KODAMA has two nested stochastic controls, M and Tcycle cannot be justified by visual quality alone. Tcycle controls the depth of label-vector evolution inside one run, whereas M controls how many independent local optima enter the final ensemble. The named release-validation experiment uses MetRef and USPS with both KODAMA classifiers: fixing M = 100 while varying Tcycle in {20, 50, 100}, and fixing Tcycle = 100 while varying M in {20, 50, 100}. It uses landmarks = 100000 subject to the historical 75% rule when n is no larger than landmarks, the default splitting rule, ncomp = 50, knn.k = 30, and a recorded seed."
     ),
     (
-        "The Tcycle sweep supports Tcycle = 100 as the final-analysis setting. On the harder benchmark, the PLS-LDA path changed from a fragmented state at Tcycle = 20, with median 67 classes and best CV accuracy 0.482, to median 5 classes and best CV accuracy 0.872 at Tcycle = 100. The KNN path also improved on the same benchmark, from best CV accuracy 0.773 to 0.863 and from median 23 classes to 9. The easier benchmark showed smaller best-accuracy changes, but still showed improved median accuracy and reduced fragmentation for PLS-LDA."
+        "The Tcycle sweep reports best and median cross-validated accuracy, adjusted Rand index against reference labels used only after optimization, active-class count, and runtime. On USPS, increasing Tcycle from 20 to 100 raised best/median CV accuracy from 0.9662/0.9414 to 0.9997/0.9925 for KNN and from 0.9383/0.9220 to 0.9612/0.9520 for PLS-LDA; median class counts fell from 61 to 32 and from 88.5 to 71. On MetRef, PLS-LDA likewise improved its median CV accuracy from 0.9504 to 0.9924 and reduced median classes from 34 to 24, whereas KNN changed little and remained over-coarsened. Tcycle = 100 is therefore retained as a conservative search-depth setting, not as a claim of universal optimality; the MetRef PLS-LDA selected-run ARI was highest at Tcycle = 50."
     ),
     (
-        "The M sweep gives a different interpretation. Increasing M mostly improves the probability of seeing a good independent solution and stabilizes the ensemble; it is not expected to monotonically improve every single-run diagnostic. In these experiments, M = 50 was already close to M = 100 for several best-accuracy values, but M = 100 either tied or improved the best CV accuracy and provided the conservative ensemble size used for final figures. Smaller M remains appropriate for interactive exploration, while M = 100 is the reproducible benchmark setting."
+        "The M sweep has a different interpretation. Increasing M raises the number of independent solutions entering the final agreement graph; it is not a search-depth parameter and is not expected to improve the externally scored best run monotonically. Each edge weight is the fraction of runs assigning its two samples to the same label. Its Bernoulli worst-case Monte Carlo standard error is 1/(2 sqrt(M)): 0.1118 at M = 20, 0.0707 at M = 50, and 0.0500 at M = 100. Empirically, the graph-weight RMSE relative to the M = 100 ensemble fell between M = 20 and M = 50 for every dataset/classifier pair, reaching 0.0180-0.0407 at M = 50 with correlations of 0.9888-0.9988. M = 100 is retained to bound ensemble uncertainty, while the nonmonotone selected-run ARI is reported rather than used to tune M."
     ),
 ]
 
 
+RELEASE_SENSITIVITY_READY = all(
+    not row[0].startswith("Benchmark")
+    for row in TCYCLE_SENSITIVITY_ROWS + M_SENSITIVITY_ROWS
+)
+
+
 PILOT_EXPERIMENT_PARAGRAPHS = [
     (
-        "The benchmark run used copied float32 RData datasets spanning n = 873 to 5,220,347 samples and p = 11 to 16,384 variables. The CUDA machine first rebuilt the project and reran the CTest suite; both configured tests passed. The broad kernel and core tables retain the earlier release-validation snapshot for continuity, whereas the native-CUDA table reports the dependency-distilled search implementation introduced afterward."
+        "The benchmark run used copied float32 RData datasets spanning n = 873 to 5,220,347 samples and p = 11 to 16,384 variables. The CUDA machine first rebuilt the release candidate with CUDA 13.2 and reran CTest; all four configured tests passed. The broad kernel and core tables retain the earlier release-validation snapshot for continuity, whereas the native-CUDA table reports the dependency-distilled search implementation introduced afterward."
     ),
     (
         "The current package-owned CUDA IVF-Flat path was checked on MNIST70k and MetRef with five-fold cosine KNNCV and k = 10. On MNIST70k it produced accuracy 0.973857 in 4.233 s with nlist = 237 and maximum nprobe = 32, compared with 0.973029 in 4.753 s for the recorded former FAISS/cuVS row. On MetRef it produced 0.816724 in 0.195 s, compared with 0.814433 in 0.297 s. These are implementation spot checks rather than repeated-run performance estimates."
     ),
     (
-        "The KODAMA.matrix MetRef validation shows why cross-validated accuracy is reported together with label-quality diagnostics. The KNN optimizer reached very high CV accuracy, but the best label vectors collapsed to few classes and had low ARI. The PLS-LDA optimizer had lower CV accuracy but much stronger external-label agreement. We therefore report CV accuracy, number of active classes, ARI or another label-agreement statistic when available, and the downstream embedding compactness as complementary diagnostics."
+        "The M = 100, Tcycle = 100 MetRef validation shows why cross-validated accuracy is reported together with label-quality diagnostics. Both optimizers reached best CV accuracy 1.000, but KNN selected only three classes and had ARI 0.052. PLS-LDA selected 21 classes against 22 reference classes, attained ARI 0.770, and increased truth-label UMAP silhouette from 0.129 for the classic graph to 0.783 for the KODAMA graph. These reference labels were never supplied to optimization. We therefore report CV accuracy, active classes, external-label agreement when available, and downstream compactness as complementary rather than interchangeable diagnostics."
     ),
     (
         "The dependency-distilled CUDA build links CUDA Toolkit libraries but no FAISS, cuVS, RAFT, or RMM soname. Binary wrappers therefore need to locate the CUDA runtime selected at build time, but do not need to provision the removed search libraries."
@@ -675,9 +902,9 @@ PILOT_EXPERIMENT_PARAGRAPHS = [
 
 
 BENCHMARK_PROTOCOL_ROWS = [
-    ("Date", "2026-07-14 UTC for native-CUDA validation; earlier broad benchmark snapshot dated 2026-07-06 UTC"),
+    ("Date", "2026-07-18 UTC for release-candidate CUDA visualization validation; M/Tcycle validation dated 2026-07-16 UTC; earlier broad kernel snapshot dated 2026-07-06 UTC"),
     ("GPU", "NVIDIA GeForce RTX 5060 Ti, 16 GB device memory, driver 595.71.05"),
-    ("Build validation", "Fresh CUDA 13.2 build succeeded; CTest passed 2/2 configured tests in 1.77 s"),
+    ("Build validation", "Fresh CUDA 13.2 build succeeded; CTest passed 4/4 configured tests in 1.91 s"),
     ("Runtime", "CUDA Toolkit only for native search/PLS paths; no FAISS, cuVS, RAFT, RMM, or Armadillo link"),
     ("Data format", "RData lists exported to contiguous float32 row-major matrices"),
     ("CPU setting", "Single-thread CPU kernels unless otherwise stated"),
@@ -762,6 +989,11 @@ EVALUATION_GUARDRAIL_ROWS = [
 
 
 ABLATION_MATRIX_ROWS = [
+    (
+        "Search evolution",
+        "Raw-accuracy proposals versus the standard grouped/guarded search",
+        "Separates the current search extension from backend acceleration and from the unchanged CV classifiers.",
+    ),
     (
         "Classifier",
         "KNN versus PLS-LDA",
@@ -855,8 +1087,37 @@ KODAMA_BACKEND_COMPARISON_ROWS = [
 
 
 PILOT_MATRIX_ROWS = [
-    ("KNN", "6.849", "3.019", "0.990840/0.979389", "0.123581/0.046694", "3", "2-28"),
-    ("PLS-LDA", "23.795", "23.748", "0.975573/0.946565", "0.795916/0.681493", "35", "21-42"),
+    ("KNN", "3.115", "2.646", "1.0000/0.8809", "0.0517/0.0613", "9", "2-52"),
+    ("PLS-LDA", "584.089", "584.074", "1.0000/0.9924", "0.7700/0.7048", "24", "15-34"),
+]
+
+
+HISTORICAL_KNN_PARAGRAPHS = [
+    (
+        "A legacy KNN-compatible predecessor experiment used MetRef, KNN, M = 100, Tcycle = 100, "
+        "655 effective landmarks under the historical 75% rule, splitting = 50, k = 30, "
+        "graph k = 100, and seed 1234. Splitting = 50 matches the internal k-means "
+        "initialization in KODAMA R 2.4.1. This legacy release is used because it exposes the "
+        "selectable KNN path needed for a KNN-to-KNN comparison; it is not presented as the "
+        "current CRAN release. PLS is excluded because the historical PLS-DA decoder and current "
+        "SIMPLS plus latent-space LDA are different classifiers."
+    ),
+    (
+        "The current grouped and guarded proposals extend the historical stochastic search, "
+        "so this is a matched-settings predecessor and systems comparison rather than label-trajectory "
+        "parity. Current single-core execution was 1.58 times slower than KODAMA R 2.4.1 on this "
+        "small case, whereas four-core execution was 2.59 times faster and CUDA was 258.6 times "
+        "faster. Every row reached best raw CV accuracy 1.000; the different median scores and label "
+        "diagnostics are reported rather than interpreted as backend equivalence."
+    ),
+]
+
+
+HISTORICAL_KNN_ROWS = [
+    ("KODAMA R 2.4.1", "CPU", "1", "610.543", "1.00x", "1.000/0.961", "0.000/0.054", "2/6"),
+    ("kodama-cpp", "CPU", "1", "965.348", "0.63x", "1.000/0.874", "0.045/0.071", "2/8.5"),
+    ("kodama-cpp", "CPU", "4", "235.547", "2.59x", "1.000/0.874", "0.045/0.071", "2/8.5"),
+    ("kodama-cpp", "CUDA", "4", "2.361", "258.6x", "1.000/0.882", "0.052/0.069", "3/8.5"),
 ]
 
 
@@ -871,23 +1132,52 @@ VISUALIZATION_COMPARISON_PARAGRAPHS = [
         "a single favorable small dataset."
     ),
     (
-        "The current CPU visualization validation used KNN KODAMA with M = 4 and Tcycle = 20 on MetRef, "
-        "COIL20, and a 3,000-sample USPS subset. It is a harness validation rather than a general "
-        "claim that KODAMA improves every embedding: KODAMA KNN achieved high CV accuracy on all three datasets, but "
-        "the KODAMA-corrected layouts did not uniformly improve truth-label silhouette at these "
-        "short settings. This result supports the manuscript policy of reporting CV accuracy, "
-        "label agreement, active classes, and classic-vs-KODAMA visualization metrics together."
+        "The release-validation panel used CUDA with M = 100, Tcycle = 100, landmarks = 100000 "
+        "subject to the historical 75% rule, KNN predictor k = 30, graph k = 100, embedding k = 30, "
+        "openTSNE perplexity = 30, and seed 1234. It evaluated MetRef, PBMC3K PCA50, OptDigits, USPS, "
+        "and Macosko2015 retina with both KNN and PLS-LDA. Reference labels were withheld from "
+        "optimization and used "
+        "only for the reported ARI, silhouette, purity, and compactness diagnostics."
+    ),
+    (
+        "The result is deliberately mixed. PLS-LDA increased truth-label silhouette on both embeddings "
+        "for MetRef (UMAP 0.105 to 0.815; openTSNE 0.067 to 0.530) and PBMC3K PCA50 "
+        "(0.410 to 0.484; 0.349 to 0.402), but reduced it on OptDigits, USPS, and Macosko2015 retina. "
+        "KNN reduced silhouette on all five datasets despite best CV accuracy between 0.9927 and "
+        "1.0000. Thus a highly "
+        "predictable optimized label vector is not sufficient evidence of improved external-label "
+        "recovery or visualization, and no universal visualization-improvement claim is made."
+    ),
+    (
+        "Complete KODAMA.matrix wall time ranged from 2.967 to 97.295 seconds for KNN and from "
+        "486.707 to 708.579 seconds for PLS-LDA. The paired embeddings themselves required less than "
+        "0.88 seconds each in this panel, so the reported timing distinction correctly attributes the "
+        "dominant cost to label optimization rather than to UMAP or openTSNE."
     ),
 ]
 
 
 VISUALIZATION_COMPARISON_ROWS = [
-    ("MetRef", "UMAP", "0.051", "-0.157", "0.533/0.439", "0.052", "3", "0.916"),
-    ("MetRef", "openTSNE", "0.002", "-0.028", "0.579/0.499", "0.052", "3", "0.916"),
-    ("COIL20", "UMAP", "0.494", "0.229", "0.824/0.764", "0.461", "20", "59.469"),
-    ("COIL20", "openTSNE", "0.268", "0.168", "0.803/0.780", "0.461", "20", "59.469"),
-    ("USPS subset", "UMAP", "0.189", "0.011", "0.660/0.573", "0.239", "23", "23.741"),
-    ("USPS subset", "openTSNE", "0.148", "0.040", "0.662/0.609", "0.239", "23", "23.741"),
+    ("MetRef", "KNN", "UMAP", "0.105 -> 0.016", "-0.090", "0.590 -> 0.575", "0.049 / 3", "3.381"),
+    ("MetRef", "KNN", "openTSNE", "0.067 -> 0.018", "-0.049", "0.616 -> 0.608", "0.049 / 3", "3.381"),
+    ("MetRef", "PLS-LDA", "UMAP", "0.105 -> 0.815", "+0.709", "0.590 -> 0.966", "0.879 / 28", "589.633"),
+    ("MetRef", "PLS-LDA", "openTSNE", "0.067 -> 0.530", "+0.463", "0.616 -> 0.904", "0.879 / 28", "589.633"),
+    ("PBMC3K PCA50", "KNN", "UMAP", "0.410 -> 0.387", "-0.023", "0.830 -> 0.796", "0.374 / 3", "2.967"),
+    ("PBMC3K PCA50", "KNN", "openTSNE", "0.349 -> 0.336", "-0.013", "0.826 -> 0.805", "0.374 / 3", "2.967"),
+    ("PBMC3K PCA50", "PLS-LDA", "UMAP", "0.410 -> 0.484", "+0.075", "0.830 -> 0.820", "0.594 / 11", "486.707"),
+    ("PBMC3K PCA50", "PLS-LDA", "openTSNE", "0.349 -> 0.402", "+0.053", "0.826 -> 0.825", "0.594 / 11", "486.707"),
+    ("OptDigits", "KNN", "UMAP", "0.700 -> 0.600", "-0.100", "0.974 -> 0.949", "0.603 / 28", "3.920"),
+    ("OptDigits", "KNN", "openTSNE", "0.563 -> 0.446", "-0.117", "0.972 -> 0.959", "0.603 / 28", "3.920"),
+    ("OptDigits", "PLS-LDA", "UMAP", "0.700 -> 0.548", "-0.153", "0.974 -> 0.944", "0.350 / 47", "496.673"),
+    ("OptDigits", "PLS-LDA", "openTSNE", "0.563 -> 0.470", "-0.094", "0.972 -> 0.960", "0.350 / 47", "496.673"),
+    ("USPS", "KNN", "UMAP", "0.153 -> 0.071", "-0.081", "0.698 -> 0.651", "0.300 / 34", "19.141"),
+    ("USPS", "KNN", "openTSNE", "0.212 -> 0.090", "-0.121", "0.711 -> 0.672", "0.300 / 34", "19.141"),
+    ("USPS", "PLS-LDA", "UMAP", "0.153 -> 0.082", "-0.071", "0.698 -> 0.598", "0.109 / 70", "663.782"),
+    ("USPS", "PLS-LDA", "openTSNE", "0.212 -> 0.081", "-0.131", "0.711 -> 0.643", "0.109 / 70", "663.782"),
+    ("Macosko retina", "KNN", "UMAP", "0.469 -> 0.183", "-0.286", "0.965 -> 0.953", "0.171 / 73", "97.295"),
+    ("Macosko retina", "KNN", "openTSNE", "0.171 -> -0.022", "-0.193", "0.962 -> 0.959", "0.171 / 73", "97.295"),
+    ("Macosko retina", "PLS-LDA", "UMAP", "0.469 -> 0.176", "-0.293", "0.965 -> 0.953", "0.410 / 30", "708.579"),
+    ("Macosko retina", "PLS-LDA", "openTSNE", "0.171 -> 0.060", "-0.111", "0.962 -> 0.958", "0.410 / 30", "708.579"),
 ]
 
 
@@ -1193,9 +1483,9 @@ IMPLEMENTATION_EVIDENCE_ROWS = [
     ),
     (
         "CUDA nearest-neighbor search",
-        "src/native_cuda_backend.cu implements package-owned float32 exact KNN, signed-hash IVF-Flat, GPU k-means, resident inverted lists, and exact-pilot recall tuning; KNNCV_CUDA and CoreKNN call it directly.",
-        "CUDA tests explicitly exercise exact and IVF index types, tuning metadata, constrained folds, float32 CoreKNN, and end-to-end KODAMAMatrix_CUDA initialization. A clean build and ldd audit exclude FAISS/cuVS/RAFT/RMM.",
-        "Native IVF spot checks produced 0.973857 in 4.233 s on MNIST70k and 0.816724 in 0.195 s on MetRef, both above the recorded former FAISS/cuVS accuracy rows.",
+        "src/native_cuda_backend.cu implements package-owned float32 exact KNN, signed-hash IVF-Flat, GPU k-means, resident inverted lists, exact-pilot recall tuning, and bounded row-batched exact k-means assignment; KNNCV_CUDA and CoreKNN call it directly.",
+        "CUDA tests explicitly exercise exact and IVF index types, tuning metadata, constrained folds, float32 CoreKNN, and end-to-end KODAMAMatrix_CUDA initialization. A clean build and ldd audit exclude FAISS/cuVS/RAFT/RMM; the 44,808-sample release run activates the bounded assignment path across four lanes.",
+        "Native IVF spot checks produced 0.973857 in 4.233 s on MNIST70k and 0.816724 in 0.195 s on MetRef. Macosko2015 retina completed M=100/Tcycle=100 in 97.295 s for KNN and 708.579 s for PLS-LDA on a 16 GiB GPU.",
     ),
     (
         "Label-aware SIMPLS PLS-LDA",
@@ -1221,33 +1511,43 @@ IMPLEMENTATION_EVIDENCE_ROWS = [
         "R and Python wrapper tests exercise matrix_graph with KNN and PLS-LDA, and C++ tests cover graph construction, clustering, and visualization outputs.",
         "Graph-input is presented as an optional API. The manuscript separately states that graph-only PLS-LDA should not be interpreted as equivalent to data-input PLS-LDA without matched benchmark evidence.",
     ),
+    (
+        "Float32 randomized PCA",
+        "src/pca.cpp supplies package-owned float32 preprocessing, sketching, QR, compact eigensolve, orientation, and variance reporting; src/pca_cuda.cu and the Metal matrix-multiply adapter execute dominant products on the selected accelerator.",
+        "tests/test_cv.cpp checks dimensions, finite values, centered scores, orthonormal loadings, ordered singular values, determinism, float/double input parity, and CUDA agreement; tests/test_metal.cpp checks Metal agreement; R and Python tests exercise the public wrappers.",
+        "PCA is an auxiliary public primitive rather than part of the KODAMA objective. Performance claims will be reported separately from KODAMA.matrix timings when a matched PCA benchmark is archived.",
+    ),
 ]
 
 
 NOVELTY_ROWS = [
     (
-        "Standalone core",
-        "Moves KODAMA computation from R orchestration into an R/Python-independent C++17 library with CPU, CUDA, and Metal backends.",
+        "State ownership",
+        "Moves folds, labels, classifier workspaces, and graph outputs from repeated R-level calls into reusable C++ objects.",
     ),
     (
-        "Classifier-specific paths",
-        "Keeps KNN and PLS-LDA implementations separate so each can reuse the right buffers and data structures.",
+        "Backend-native classifiers",
+        "Keeps KNN and PLS-LDA mathematically shared but implements their dominant operations separately for CPU, CUDA, and Metal.",
     ),
     (
         "Float32 execution",
-        "Stores analysis matrices and GPU workspaces in single precision while accepting double inputs from wrappers.",
+        "Uses float32 analysis matrices and accelerator workspaces end to end while accepting wrapper-provided double inputs at the boundary.",
     ),
     (
         "Label-aware SIMPLS",
-        "Computes PLS-LDA cross-products from labels directly and evaluates the requested feasible component count.",
+        "Computes PLS-LDA response cross-products from compact labels instead of dense one-hot matrices and evaluates the requested feasible component count.",
     ),
     (
-        "High-recall neighbor search",
-        "Provides package-owned CPU HNSW, package-owned CUDA exact/IVF search, and native Metal exact/IVF search.",
+        "Accelerated search",
+        "Provides package-owned CPU HNSW, CUDA exact/recall-tuned IVF-Flat search, and Metal exact/recall-tuned IVF-Flat search.",
     ),
     (
-        "Independent M cycles",
-        "Keeps KODAMA runs independent so backend schedulers can parallelize them without changing the objective.",
+        "Reproducible heterogeneity",
+        "Keeps M runs independent and reports actual backend and search metadata so acceleration can be tested without altering the objective.",
+    ),
+    (
+        "Search evolution",
+        "Makes grouped adaptive proposals, transition-driven class moves, and the label-only degeneracy guard explicit and separately reports their raw CV accuracy and acceptance score.",
     ),
 ]
 
@@ -1487,7 +1787,15 @@ def apply_compact_memo_styles(doc: Document) -> None:
         style.paragraph_format.space_after = Pt(3)
 
 
-def add_title(doc: Document, title: str, subtitle: str, authors: str) -> None:
+def add_title(
+    doc: Document,
+    title: str,
+    subtitle: str,
+    authors: str,
+    author_records=None,
+    affiliations=None,
+    corresponding_author: str | None = None,
+) -> None:
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(3)
     run = p.add_run(title)
@@ -1500,9 +1808,39 @@ def add_title(doc: Document, title: str, subtitle: str, authors: str) -> None:
     run.italic = True
 
     p = doc.add_paragraph()
-    p.paragraph_format.space_after = Pt(12)
-    run = p.add_run(authors)
-    set_run_font(run, 10, False, TOKENS["muted"])
+    p.paragraph_format.space_after = Pt(4 if affiliations else 12)
+    if author_records:
+        for index, (name, markers) in enumerate(author_records):
+            if index:
+                separator = ", and " if index == len(author_records) - 1 else ", "
+                run = p.add_run(separator)
+                set_run_font(run, 10, False, TOKENS["muted"])
+            run = p.add_run(name)
+            set_run_font(run, 10, False, TOKENS["muted"])
+            run = p.add_run(markers)
+            set_run_font(run, 8, False, TOKENS["muted"])
+            run.font.superscript = True
+    else:
+        run = p.add_run(authors)
+        set_run_font(run, 10, False, TOKENS["muted"])
+
+    if affiliations:
+        for marker, affiliation in affiliations:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(1)
+            p.paragraph_format.line_spacing = 1.0
+            run = p.add_run(marker)
+            set_run_font(run, 7.5, False, TOKENS["muted"])
+            run.font.superscript = True
+            run = p.add_run(" " + affiliation)
+            set_run_font(run, 8.5, False, TOKENS["muted"])
+
+    if corresponding_author:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(2)
+        p.paragraph_format.space_after = Pt(10)
+        run = p.add_run("Corresponding author: " + corresponding_author)
+        set_run_font(run, 8.5, False, TOKENS["muted"])
 
 
 def add_callout(doc: Document, label: str, text: str) -> None:
@@ -1643,6 +1981,13 @@ def add_table(doc: Document, headers, rows, widths, font_size=8.5) -> None:
         cells = table.add_row().cells
         for idx, text in enumerate(row):
             cells[idx].text = text
+    header_properties = table.rows[0]._tr.get_or_add_trPr()
+    table_header = OxmlElement("w:tblHeader")
+    table_header.set(qn("w:val"), "true")
+    header_properties.append(table_header)
+    # Rows are appended after the initial width pass, so apply the row-level
+    # no-split property again once the table is complete.
+    set_table_width(table, widths)
     format_table_text(table, font_size=font_size)
 
 
@@ -1730,14 +2075,14 @@ def build_architecture_figure() -> None:
         (480, 320, 1320, 500),
         gray,
         gray_line,
-        ["kodama-cpp C++17 core", "MatrixView + typed options/results", "KNNCV | PLSLDACV | CoreKNN | CorePLSLDA | KODAMA.matrix"],
+        ["kodama-cpp C++17 core", "MatrixView + typed options/results", "KNNCV | PLSLDACV | CoreKNN | CorePLSLDA | KODAMA.matrix | PCA"],
     )
 
-    box((60, 555, 530, 765), green, green_line, ["CPU backend", "package-owned float32 HNSW", "label-aware SIMPLS/LDA", "optional OpenMP"])
-    box((665, 555, 1135, 765), purple, purple_line, ["Apple Metal backend", "exact + IVF-Flat KNN", "MPS SIMPLS/LDA + k-means", "system frameworks only"])
-    box((1270, 555, 1740, 765), amber, amber_line, ["CUDA backend", "native exact + IVF-Flat KNN", "native k-means + SIMPLS/LDA", "CUDA Toolkit only"])
+    box((60, 555, 530, 765), green, green_line, ["CPU backend", "package-owned float32 HNSW", "SIMPLS/LDA + randomized PCA", "optional OpenMP"])
+    box((665, 555, 1135, 765), purple, purple_line, ["Apple Metal backend", "exact + IVF-Flat KNN", "MPS SIMPLS/LDA + PCA", "system frameworks only"])
+    box((1270, 555, 1740, 765), amber, amber_line, ["CUDA backend", "native exact + IVF-Flat KNN", "k-means + SIMPLS/LDA + PCA", "CUDA Toolkit only"])
 
-    box((430, 830, 1370, 930), blue, blue_line, ["Graph, embedding, and clustering utilities", "CPU/CUDA/Metal graph | CPU/CUDA UMAP/openTSNE | CPU random walks"])
+    box((430, 830, 1370, 930), blue, blue_line, ["Graph, PCA, embedding, and clustering utilities", "CPU/CUDA/Metal PCA + graph | CPU/CUDA UMAP/openTSNE | CPU random walks"])
     box((565, 980, 1235, 1070), gray, gray_line, ["Typed outputs", "labels, accuracy traces, graphs, embeddings", "timings, memory, backend metadata"])
 
     arrow((630, 220), (700, 320), color=blue_line)
@@ -1760,9 +2105,12 @@ def build_docx() -> None:
     apply_styles(doc)
     add_title(
         doc,
-        "kodama-cpp: A Portable C++ Library for KODAMA Cross-Validated Accuracy Maximization",
+        "kodama-cpp: Cross-Validated Accuracy Maximization on CPU, CUDA, and Apple Metal",
         "Manuscript for the Journal of Machine Learning Research Machine Learning Open Source Software track",
-        "Stefano Cacciatore and contributors",
+        "",
+        author_records=AUTHORS,
+        affiliations=AFFILIATIONS,
+        corresponding_author=CORRESPONDING_AUTHOR,
     )
 
     doc.add_heading("Abstract", level=1)
@@ -1813,6 +2161,23 @@ def build_docx() -> None:
                 "CPU, CUDA, and Apple Metal backends, graph utilities, and typed outputs; R and Python remain thin wrappers."
             )
             set_run_font(run, 9.2, False, TOKENS["muted"])
+            doc.add_heading("Implementation novelty", level=2)
+            for paragraph in IMPLEMENTATION_NOVELTY_PARAGRAPHS:
+                doc.add_paragraph(paragraph)
+            doc.add_heading("CUDA backend", level=2)
+            for paragraph in CUDA_BACKEND_PARAGRAPHS:
+                doc.add_paragraph(paragraph)
+            doc.add_heading("Apple Metal backend", level=2)
+            for paragraph in METAL_BACKEND_PARAGRAPHS:
+                doc.add_paragraph(paragraph)
+            doc.add_heading("Shared accelerator contract", level=2)
+            add_table(
+                doc,
+                ("Invariant", "CUDA realization", "Metal realization"),
+                BACKEND_CONTRACT_ROWS,
+                [1.25, 2.6, 2.6],
+                font_size=7.5,
+            )
             doc.add_heading("Public API summary", level=2)
             add_table(doc, ("Layer", "Public API", "Purpose"), API_ROWS, [1.35, 1.75, 3.35])
             doc.add_heading("Computational scaling", level=2)
@@ -1822,6 +2187,8 @@ def build_docx() -> None:
         if heading == "4. Relationship to public KODAMA literature":
             doc.add_heading("Compatibility with the R implementation", level=2)
             add_table(doc, ("Aspect", "Public R/literature contract", "kodama-cpp"), COMPATIBILITY_ROWS, [1.25, 2.65, 2.55])
+            doc.add_heading("Implementation novelty relative to the R package", level=2)
+            add_table(doc, ("Innovation", "What changes in kodama-cpp"), NOVELTY_ROWS, [1.65, 4.8], font_size=8.2)
             doc.add_heading("Relationship to semi-supervised learning and cluster validation", level=2)
             for paragraph in RELATED_WORK_PARAGRAPHS:
                 doc.add_paragraph(paragraph)
@@ -1835,7 +2202,6 @@ def build_docx() -> None:
         if heading == "6. Availability and reproducibility":
             doc.add_heading("Installation paths", level=2)
             add_table(doc, ("Target", "Command or check"), INSTALLATION_ROWS, [1.1, 5.35], font_size=7.4)
-            doc.add_page_break()
             doc.add_heading("Wrapper validation", level=2)
             add_table(doc, ("Target", "Validation result"), WRAPPER_VALIDATION_ROWS, [1.5, 4.95], font_size=8.0)
             doc.add_heading("License and dependency notes", level=2)
@@ -1850,7 +2216,6 @@ def build_docx() -> None:
                 [1.8, 1.25, 1.25, 1.25],
                 font_size=7.6,
             )
-            doc.add_page_break()
             doc.add_heading("Evaluation guardrails and ablations", level=2)
             add_table(
                 doc,
@@ -1912,6 +2277,16 @@ def build_docx() -> None:
                 [0.75, 0.75, 0.65, 0.65, 0.65, 0.55, 0.55, 1.0],
                 font_size=6.9,
             )
+            doc.add_heading("Legacy KNN-compatible predecessor comparison", level=3)
+            for paragraph in HISTORICAL_KNN_PARAGRAPHS:
+                doc.add_paragraph(paragraph)
+            add_table(
+                doc,
+                ("Implementation", "Backend", "Workers", "Seconds", "Speedup vs legacy R", "Best/median CV", "Selected/median ARI", "Selected/median classes"),
+                HISTORICAL_KNN_ROWS,
+                [1.15, 0.65, 0.55, 0.7, 0.8, 1.0, 1.05, 1.05],
+                font_size=6.8,
+            )
             doc.add_heading("KODAMA.matrix MetRef validation benchmark", level=3)
             add_table(
                 doc,
@@ -1925,45 +2300,87 @@ def build_docx() -> None:
                 doc.add_paragraph(paragraph)
             add_table(
                 doc,
-                ("Dataset", "Embedding", "Sil. classic", "Sil. KODAMA", "Purity classic/KODAMA", "ARI", "Classes", "KODAMA s"),
+                ("Dataset", "Classifier", "Embedding", "Sil. classic -> KODAMA", "Delta sil.", "Purity classic -> KODAMA", "ARI / classes", "KODAMA s"),
                 VISUALIZATION_COMPARISON_ROWS,
-                [0.8, 0.75, 0.72, 0.75, 1.35, 0.55, 0.55, 0.65],
-                font_size=6.8,
+                [0.82, 0.72, 0.72, 1.22, 0.62, 1.25, 0.8, 0.7],
+                font_size=6.5,
             )
-            doc.add_page_break()
-            doc.add_heading("Sensitivity of M and Tcycle", level=2)
-            for paragraph in PARAMETER_SENSITIVITY_PARAGRAPHS:
-                doc.add_paragraph(paragraph)
-            add_table(
-                doc,
-                ("Dataset", "Classifier", "Best acc T20 -> T100", "Median acc T20 -> T100", "Median classes", "Seconds"),
-                TCYCLE_SENSITIVITY_ROWS,
-                [0.8, 0.8, 1.25, 1.35, 1.0, 0.9],
-                font_size=7.6,
-            )
-            add_table(
-                doc,
-                ("Dataset", "Classifier", "Best acc M20/M50/M100", "Median acc M20/M50/M100", "Best-run ARI", "Seconds"),
-                M_SENSITIVITY_ROWS,
-                [0.8, 0.8, 1.4, 1.4, 1.1, 1.0],
-                font_size=7.4,
-            )
-            if SENSITIVITY_FIGURE.exists():
+            if NONSPATIAL_PANEL_FIGURE.exists():
                 p = doc.add_paragraph()
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 p.paragraph_format.space_before = Pt(6)
                 p.paragraph_format.space_after = Pt(4)
-                p.add_run().add_picture(str(SENSITIVITY_FIGURE), width=Inches(6.45))
+                p.add_run().add_picture(str(NONSPATIAL_PANEL_FIGURE), width=Inches(6.45))
                 caption = doc.add_paragraph()
                 caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 caption.paragraph_format.space_after = Pt(8)
                 run = caption.add_run(
-                    "Figure 2. Sensitivity of KODAMA quality and runtime to Tcycle and M. "
-                    "Tcycle = 100 is supported by convergence of the label-vector search; "
-                    "M = 100 is used as a conservative independent-run ensemble size."
+                    "Figure 2. Fixed M = 100 and Tcycle = 100 nonspatial visualization validation. "
+                    "Panels A and B compare truth-label silhouette; panel C reports complete KODAMA.matrix "
+                    "wall time on a logarithmic scale; panel D reports selected-run ARI. Reference labels "
+                    "were used only after optimization."
                 )
                 set_run_font(run, 9.0, False, TOKENS["muted"])
-            doc.add_page_break()
+            doc.add_heading("Sensitivity of M and Tcycle", level=2)
+            for paragraph in PARAMETER_SENSITIVITY_PARAGRAPHS:
+                doc.add_paragraph(paragraph)
+            if RELEASE_SENSITIVITY_READY:
+                add_table(
+                    doc,
+                    ("Dataset", "Classifier", "Best acc T20 -> T100", "Median acc T20 -> T100", "Median classes T20 -> T100", "Seconds"),
+                    TCYCLE_SENSITIVITY_ROWS,
+                    [0.8, 0.8, 1.25, 1.35, 1.0, 0.9],
+                    font_size=7.6,
+                )
+                separator = doc.add_paragraph()
+                separator.paragraph_format.space_after = Pt(3)
+                add_table(
+                    doc,
+                    ("Dataset", "Classifier", "Best acc M20/M50/M100", "Median acc M20/M50/M100", "Selected ARI", "Seconds"),
+                    M_SENSITIVITY_ROWS,
+                    [0.8, 0.8, 1.4, 1.4, 1.1, 1.0],
+                    font_size=7.4,
+                )
+                if SENSITIVITY_FIGURE.exists():
+                    p = doc.add_paragraph()
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p.paragraph_format.space_before = Pt(6)
+                    p.paragraph_format.space_after = Pt(4)
+                    p.add_run().add_picture(str(SENSITIVITY_FIGURE), width=Inches(6.45))
+                    caption = doc.add_paragraph()
+                    caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    caption.paragraph_format.space_after = Pt(8)
+                    run = caption.add_run(
+                        "Figure 3. Sensitivity of KODAMA quality and runtime to Tcycle and M on named nonspatial datasets."
+                    )
+                    set_run_font(run, 9.0, False, TOKENS["muted"])
+                doc.add_heading("Agreement-graph convergence", level=3)
+                add_table(
+                    doc,
+                    ("Dataset", "Classifier", "RMSE to M100 at M10/M20/M50", "Correlation at M50"),
+                    ENSEMBLE_CONVERGENCE_ROWS,
+                    [0.9, 0.9, 2.5, 1.25],
+                    font_size=7.5,
+                )
+                if ENSEMBLE_CONVERGENCE_FIGURE.exists():
+                    p = doc.add_paragraph()
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p.paragraph_format.space_before = Pt(6)
+                    p.paragraph_format.space_after = Pt(4)
+                    p.add_run().add_picture(str(ENSEMBLE_CONVERGENCE_FIGURE), width=Inches(6.45))
+                    caption = doc.add_paragraph()
+                    caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    caption.paragraph_format.space_after = Pt(8)
+                    run = caption.add_run(
+                        "Figure 4. Convergence of edge-agreement weights as independent KODAMA runs are added. "
+                        "RMSE is measured against the M = 100 ensemble; the right panel shows the Bernoulli "
+                        "worst-case Monte Carlo standard error."
+                    )
+                    set_run_font(run, 9.0, False, TOKENS["muted"])
+            else:
+                doc.add_paragraph(
+                    "Named nonspatial release results are pending. Preliminary anonymized development rows are deliberately excluded from this submission draft."
+                )
             doc.add_heading("Implementation claims and evidence", level=2)
             add_table(
                 doc,
@@ -2039,11 +2456,13 @@ def build_self_review() -> None:
     add_numbered(
         doc,
         [
-            "Extend the benchmark table with the larger wrapper-level comparison against the R implementation.",
-            "Freeze the public API and cite a versioned release, commit hash, and archival DOI.",
-            "Freeze the completed license and provenance audit in the versioned release artifacts.",
-            "Convert the final source into the official JMLR LaTeX style and keep the MLOSS page budget in mind.",
-            "Run the final ablation matrix across the selected release datasets before making broad claims about visualization improvement.",
+            "Legacy KNN comparison: a matched MetRef benchmark reports the KNN-capable KODAMA 2.4.1 release and current single-core CPU, four-core CPU, and CUDA paths. It is explicitly labeled as a legacy KNN-to-KNN comparison, not as the current CRAN baseline. A separate comparison with current CRAN KODAMA 3.3 remains necessary and must disclose that its automatic PLS-DA path is not classifier-parity with latent-space PLS-LDA.",
+            "Continuous integration and coverage: the manually executed CPU, CUDA, Metal, R, and Python checks are substantial, but the repository does not yet contain a cross-platform CI workflow or a measured source-coverage report. Both remain release work under the JMLR MLOSS review criteria.",
+            "User documentation: installation and wrapper references are present, but the standalone C++ and Python interfaces still need one compact end-to-end tutorial and a browsable generated API site.",
+            "Public API and release identity: version 0.1.0, semantic-versioning policy, wrapper versions, and a compile-link API snapshot test are complete. The final tag, commit, source archive, and DOI remain external release actions and are not fabricated.",
+            "Licensing and provenance: pinned origins, SPDX identifiers, retained license texts, checksums, and the Metal Apache-2.0 exception are frozen in release documents. The residual coauthor-contribution confirmation is stated explicitly.",
+            "MLOSS format: the official-style main paper now occupies four description pages plus references; the detailed manuscript is retained as a technical supplement.",
+            "Visualization evidence: a fixed CUDA M=100/Tcycle=100 panel now reports both classifiers, both embeddings, runtime, ARI, active classes, silhouette, and local purity on five named nonspatial datasets. Its positive and negative outcomes, including the 44,808-sample scale case, are retained. Matched backend and historical-wrapper matrices remain required before broad empirical claims.",
         ],
     )
     doc.add_heading("Revisions Applied", level=1)
@@ -2057,9 +2476,11 @@ def build_self_review() -> None:
             "Expanded the mathematical description into a reproducible KODAMA.matrix procedure, including M runs, Tcycle, landmark selection, splitting, constrained groups, proposal rules, temperature acceptance, and KODAMA graph correction.",
             "Added KODAMA pseudocode that makes the initial CV evaluation, one-CV-per-cycle proposal loop, acceptance rule, projection step, and final graph reweighting explicit.",
             "Added a focused single-run pseudocode block showing one independent M run as the stochastic unit repeated by the ensemble.",
+            "Completed a pinned licensing and provenance audit with per-file SPDX identifiers, retained third-party notices and license checksums, explicit KODAMA/fastPLS relicensing scope, and the MIT/Apache-2.0 Metal exception.",
             "Added a public-literature comparison against the original KODAMA paper, the Bioinformatics R-package paper, and the documented R interface.",
             "Added a related-work section positioning KODAMA relative to semi-supervised graph learning, pseudo-labeling, weak supervision, clustering stability, prediction strength, UMAP, t-SNE, and open-source ML reproducibility.",
             "Added a compact architecture figure showing R/Python wrappers, the C++17 core, CPU, CUDA, and Metal backends, graph/embedding/clustering utilities, and typed outputs.",
+            "Reframed the implementation contribution around backend-native state ownership and added separate CUDA and Apple Metal subsections with explicit host/device boundaries, reusable workspaces, strict backend identity, and a shared parity contract.",
             "Added implementation details on float32 storage, label-aware SIMPLS, package-owned CPU/CUDA/Metal neighbor search, independent M cycles, typed outputs, and release validation.",
             "Replaced the installed FAISS/cuVS CUDA search path with package-owned exact/IVF KNN and k-means, and added clean-build, CTest, soname-audit, MNIST70k, and MetRef evidence.",
             "Added an implementation-evidence matrix linking each claim to source files, tests, and measured benchmark rows.",
@@ -2067,8 +2488,17 @@ def build_self_review() -> None:
             "Added an ablation matrix specifying the required classifier, graph-correction, M/Tcycle, landmark/splitting, backend, and wrapper-parity comparisons.",
             "Added exact benchmark protocol, dataset coverage, and installation commands for the C++ core plus R and Python wrappers.",
             "Added an explicit distinction between raw CV accuracy, proposal acceptance score, and external diagnostics.",
+            "Added a frozen 0.1.0 public API contract, version header, compile-link API test, changelog, contribution guide, prior-version delta, release checklist, and clean-tag archive script.",
+            "Separated the submission into an official four-page MLOSS paper plus references and a detailed technical supplement.",
+            "Added a track-specific cover-letter draft and a reviewer-comment response matrix with all author-only and external release fields left explicit.",
+            "Added resumable release-validation, nonspatial M/Tcycle sensitivity, historical-R, backend, and six-panel UMAP/openTSNE benchmark drivers.",
             "Inserted completed current-validation results from the CUDA workstation: CV kernel speedups, CoreKNN/CorePLSLDA optimization medians, and the MetRef KODAMA.matrix validation benchmark.",
-            "Added a reproducible M/Tcycle sensitivity experiment on two representative benchmarks for KNN and PLS-LDA, including quantitative tables and a curve figure.",
+            "Completed the named MetRef/USPS M/Tcycle sensitivity experiment on CUDA and inserted the numerical tables and curve figure.",
+            "Added an agreement-graph convergence analysis showing why M controls Monte Carlo precision rather than single-run optimization quality; reported empirical RMSE/correlation and the 1/(2 sqrt(M)) worst-case standard-error bound.",
+            "Updated the end-to-end MetRef evidence to M=100/Tcycle=100 and reported the KNN collapse alongside the much stronger PLS-LDA external-label and visualization diagnostics.",
+            "Replaced the obsolete short-run visualization preview with a reproducible five-dataset CUDA panel at M=100/Tcycle=100, archived its complete CSV and six-panel plots, and added a balanced silhouette/runtime/ARI figure that retains negative results.",
+            "Bounded each independent CUDA k-means assignment workspace at 256 MiB and row-batched exact centroid scoring, allowing the 44,808-sample nonspatial panel to complete with four concurrent M lanes on a 16 GiB GPU.",
+            "Completed the matched MetRef legacy KNN comparison: current single-core, four-core, and CUDA wall times are reported against KODAMA R 2.4.1, with explicit disclosure that it is not the current CRAN release and that proposal trajectories differ.",
             "Removed draft-status boxes and footer language from the manuscript.",
         ],
     )
@@ -2076,10 +2506,25 @@ def build_self_review() -> None:
     add_bullets(
         doc,
         [
-            "Run the larger wrapper-level comparison against the historical R implementation.",
-            "Prepare the cover letter for the MLOSS track.",
-            "Archive the reviewed software version.",
+            "Extend the completed five-dataset visualization panel to additional data domains and run the remaining matched backend and release-ablation matrices on the release hardware.",
+            "Add Linux and macOS continuous-integration jobs for the standalone core and wrappers, retain accelerator validation as a separately documented hardware job, and publish a measured line/branch coverage report.",
+            "Publish a compact C++/R/Python end-to-end tutorial and generated API documentation at a stable project URL.",
+            "Create and push the clean v0.1.0 tag, archive it, record the SHA-256 digest, and deposit it for an archival DOI.",
+            "Obtain coauthor consent; complete funding, competing-interest, action-editor, reviewer, and current user-community fields in the cover letter; and confirm that no adapted KODAMA or fastPLS code was supplied outside the inspected Git history, or retain the relevant permission.",
         ],
+    )
+    doc.add_heading("Reviewer Recommendation", level=1)
+    doc.add_paragraph(
+        "Recommendation: promising JMLR MLOSS submission after the listed release-engineering actions. "
+        "The four-page paper is focused, the KODAMA search is reproducible from the text, the heterogeneous "
+        "architecture is a non-trivial software contribution, and limitations and negative results are stated "
+        "with unusual clarity. Additional theory is not the priority."
+    )
+    doc.add_paragraph(
+        "The principal desk-review risks are the absence of committed cross-platform CI and measured coverage, "
+        "the lack of a stable hosted tutorial/API site, and incomplete tag, DOI, community-metric, and author "
+        "declarations. Broader benchmarks strengthen impact, but these software-quality items are at least as "
+        "important under the published MLOSS criteria."
     )
     doc.save(SELF_REVIEW)
 
@@ -2096,6 +2541,8 @@ def tex_escape(text: str) -> str:
         "}": r"\}",
         "^": r"\textasciicircum{}",
         "~": r"\textasciitilde{}",
+        ">": r"\textgreater{}",
+        "<": r"\textless{}",
     }
     out = text
     for key, value in replacements.items():
@@ -2113,20 +2560,43 @@ def build_tex() -> None:
     body.append(r"\usepackage{graphicx}")
     body.append(r"\usepackage{url}")
     body.append("")
-    body.append(r"\jmlrheading{1}{2026}{1-XX}{1/26}{7/26}{26-0000}{Stefano Cacciatore and contributors}")
-    body.append(r"\ShortHeadings{kodama-cpp}{Cacciatore et al.}")
+    body.append(r"\jmlrheading{1}{2026}{1-XX}{1/26}{7/26}{26-0000}{Kassim et al.}")
+    body.append(r"\ShortHeadings{kodama-cpp}{Kassim et al.}")
     body.append(r"\firstpageno{1}")
     body.append("")
     body.append(r"\begin{document}")
-    body.append(r"\title{kodama-cpp: A Portable C++ Library for KODAMA Cross-Validated Accuracy Maximization}")
-    body.append(r"\author{\name Stefano Cacciatore \email stefano.cacciatore@icgeb.org \\ \addr Bioinformatics Unit, International Centre for Genetic Engineering and Biotechnology}")
+    body.append(r"\title{kodama-cpp: Cross-Validated Accuracy Maximization on CPU, CUDA, and Apple Metal}")
+    author_parts = [
+        r"\name " + tex_escape(name) + r"$^{" + markers + r"}$"
+        for name, markers in AUTHORS
+    ]
+    author_names = (
+        ", ".join(author_parts[:3])
+        + r" \\ "
+        + author_parts[3]
+        + r" \and "
+        + author_parts[4]
+    )
+    body.append(r"\author{" + author_names + r" \\")
+    for marker, affiliation in AFFILIATIONS:
+        affiliation_tex = tex_escape(affiliation).replace('"Ugo Schiff"', r"``Ugo Schiff''")
+        if marker == "2":
+            affiliation_tex = affiliation_tex.replace(
+                "Sciences, Institute",
+                r"Sciences, \\ \addr Institute",
+            ).replace(
+                "(IDM), University",
+                r"(IDM), \\ \addr University",
+            )
+        body.append(r"\addr $^{" + marker + r"}$ " + affiliation_tex + r" \\")
+    body.append(r"\email Corresponding author: " + tex_escape(CORRESPONDING_AUTHOR) + "}")
     body.append(r"\editor{To be assigned}")
     body.append(r"\maketitle")
     body.append(r"\begin{abstract}")
     body.append(tex_escape(ABSTRACT))
     body.append(r"\end{abstract}")
     body.append(r"\begin{keywords}")
-    body.append("KODAMA, unsupervised learning, cross-validation, CUDA, Metal, C++ library, nearest neighbors, PLS-LDA")
+    body.append("KODAMA, unsupervised learning, cross-validation, heterogeneous computing, CUDA, Metal, C++ library, nearest neighbors, PLS-LDA")
     body.append(r"\end{keywords}")
     body.append("")
     for heading, paragraphs in SECTIONS:
@@ -2199,6 +2669,32 @@ def build_tex() -> None:
             body.append(r"\caption{Architecture of kodama-cpp. The C++17 core owns the numerical kernels, CPU, CUDA, and Apple Metal backends, graph utilities, and typed outputs; R and Python remain thin wrappers.}")
             body.append(r"\end{figure}")
             body.append("")
+            body.append(r"\subsection{Implementation novelty}")
+            for paragraph in IMPLEMENTATION_NOVELTY_PARAGRAPHS:
+                body.append(tex_escape(paragraph))
+                body.append("")
+            body.append(r"\subsection{CUDA backend}")
+            for paragraph in CUDA_BACKEND_PARAGRAPHS:
+                body.append(tex_escape(paragraph))
+                body.append("")
+            body.append(r"\subsection{Apple Metal backend}")
+            for paragraph in METAL_BACKEND_PARAGRAPHS:
+                body.append(tex_escape(paragraph))
+                body.append("")
+            body.append(r"\subsection{Shared accelerator contract}")
+            body.append(r"\begin{table}[h]")
+            body.append(r"\caption{Backend-specific execution under a shared KODAMA contract.}")
+            body.append(r"\small")
+            body.append(r"\begin{tabularx}{\linewidth}{p{0.18\linewidth}X X}")
+            body.append(r"\toprule")
+            body.append(r"Invariant & CUDA realization & Metal realization \\")
+            body.append(r"\midrule")
+            for invariant, cuda_impl, metal_impl in BACKEND_CONTRACT_ROWS:
+                body.append(f"{tex_escape(invariant)} & {tex_escape(cuda_impl)} & {tex_escape(metal_impl)} \\\\")
+            body.append(r"\bottomrule")
+            body.append(r"\end{tabularx}")
+            body.append(r"\end{table}")
+            body.append("")
             body.append(r"\begin{table}[h]")
             body.append(r"\caption{Public API groups in kodama-cpp.}")
             body.append(r"\small")
@@ -2250,6 +2746,20 @@ def build_tex() -> None:
             body.append(r"\midrule")
             for aspect, prior, current in COMPATIBILITY_ROWS:
                 body.append(f"{tex_escape(aspect)} & {tex_escape(prior)} & {tex_escape(current)} \\\\")
+            body.append(r"\bottomrule")
+            body.append(r"\end{tabularx}")
+            body.append(r"\end{table}")
+            body.append("")
+            body.append(r"\subsection{Implementation novelty relative to the R package}")
+            body.append(r"\begin{table}[h]")
+            body.append(r"\caption{Implementation innovations in kodama-cpp.}")
+            body.append(r"\small")
+            body.append(r"\begin{tabularx}{\linewidth}{p{0.24\linewidth}X}")
+            body.append(r"\toprule")
+            body.append(r"Innovation & What changes in kodama-cpp \\")
+            body.append(r"\midrule")
+            for innovation, detail in NOVELTY_ROWS:
+                body.append(f"{tex_escape(innovation)} & {tex_escape(detail)} \\\\")
             body.append(r"\bottomrule")
             body.append(r"\end{tabularx}")
             body.append(r"\end{table}")
@@ -2472,8 +2982,31 @@ def build_tex() -> None:
             body.append(r"}")
             body.append(r"\end{table}")
             body.append("")
+            body.append(r"\subsubsection{Legacy KNN-compatible predecessor comparison}")
+            for paragraph in HISTORICAL_KNN_PARAGRAPHS:
+                body.append(tex_escape(paragraph))
+                body.append("")
             body.append(r"\begin{table}[h]")
-            body.append(r"\caption{KODAMA.matrix CUDA validation on MetRef with M = 20 and Tcycle = 20.}")
+            body.append(r"\caption{Legacy KNN-compatible MetRef comparison at M = 100 and Tcycle = 100. Speedup is relative to KODAMA R 2.4.1; this is not the current CRAN release.}")
+            body.append(r"\small")
+            body.append(r"\resizebox{\linewidth}{!}{%")
+            body.append(r"\begin{tabular}{llllllll}")
+            body.append(r"\toprule")
+            body.append(r"Implementation & Backend & Workers & Seconds & Speedup & CV best/median & ARI selected/median & Classes selected/median \\")
+            body.append(r"\midrule")
+            for implementation, backend, workers, seconds, speedup, cv_pair, ari_pair, classes_pair in HISTORICAL_KNN_ROWS:
+                body.append(
+                    f"{tex_escape(implementation)} & {tex_escape(backend)} & {tex_escape(workers)} & "
+                    f"{tex_escape(seconds)} & {tex_escape(speedup)} & {tex_escape(cv_pair)} & "
+                    f"{tex_escape(ari_pair)} & {tex_escape(classes_pair)} \\\\"
+                )
+            body.append(r"\bottomrule")
+            body.append(r"\end{tabular}%")
+            body.append(r"}")
+            body.append(r"\end{table}")
+            body.append("")
+            body.append(r"\begin{table}[h]")
+            body.append(r"\caption{KODAMA.matrix CUDA validation on MetRef with M = 100 and Tcycle = 100.}")
             body.append(r"\small")
             body.append(r"\resizebox{\linewidth}{!}{%")
             body.append(r"\begin{tabular}{lllllll}")
@@ -2496,70 +3029,107 @@ def build_tex() -> None:
                 body.append(tex_escape(paragraph))
                 body.append("")
             body.append(r"\begin{table}[h]")
-            body.append(r"\caption{Local CPU preview comparing standard UMAP/openTSNE with KODAMA-KNN corrected graphs. Silhouette and purity are computed against external labels; ARI and class count refer to the best KODAMA label vector.}")
+            body.append(r"\caption{CUDA M=100, Tcycle=100 comparison of standard UMAP/openTSNE with KODAMA-corrected graphs. Silhouette and purity are computed against external labels used only after optimization; ARI and class count refer to the CV-selected KODAMA label vector.}")
             body.append(r"\small")
             body.append(r"\resizebox{\linewidth}{!}{%")
             body.append(r"\begin{tabular}{llllllll}")
             body.append(r"\toprule")
-            body.append(r"Dataset & Embedding & Sil. classic & Sil. KODAMA & Purity & ARI & Classes & KODAMA s \\")
+            body.append(r"Dataset & Classifier & Embedding & Sil. classic $\to$ KODAMA & $\Delta$ sil. & Purity classic $\to$ KODAMA & ARI/classes & KODAMA s \\")
             body.append(r"\midrule")
-            for dataset, embedding, sil_classic, sil_kodama, purity, ari, classes, seconds in VISUALIZATION_COMPARISON_ROWS:
+            for dataset, classifier, embedding, silhouette, delta, purity, ari_classes, seconds in VISUALIZATION_COMPARISON_ROWS:
                 body.append(
-                    f"{tex_escape(dataset)} & {tex_escape(embedding)} & {tex_escape(sil_classic)} & "
-                    f"{tex_escape(sil_kodama)} & {tex_escape(purity)} & {tex_escape(ari)} & "
-                    f"{tex_escape(classes)} & {tex_escape(seconds)} \\\\"
+                    f"{tex_escape(dataset)} & {tex_escape(classifier)} & {tex_escape(embedding)} & "
+                    f"{tex_escape(silhouette)} & {tex_escape(delta)} & {tex_escape(purity)} & "
+                    f"{tex_escape(ari_classes)} & {tex_escape(seconds)} \\\\"
                 )
             body.append(r"\bottomrule")
             body.append(r"\end{tabular}%")
             body.append(r"}")
             body.append(r"\end{table}")
             body.append("")
+            if NONSPATIAL_PANEL_FIGURE.exists():
+                body.append(r"\begin{figure}[h]")
+                body.append(r"\centering")
+                body.append(r"\includegraphics[width=\linewidth]{jmlr_nonspatial_panel_20260718/nonspatial_visualization_validation.png}")
+                body.append(r"\caption{Fixed M = 100 and Tcycle = 100 nonspatial visualization validation. Panels A and B compare truth-label silhouette; panel C reports complete KODAMA.matrix wall time on a logarithmic scale; panel D reports selected-run ARI. Reference labels were used only after optimization.}")
+                body.append(r"\end{figure}")
+                body.append("")
             body.append(r"\subsection{Sensitivity of M and Tcycle}")
             for paragraph in PARAMETER_SENSITIVITY_PARAGRAPHS:
                 body.append(tex_escape(paragraph))
                 body.append("")
-            body.append(r"\begin{table}[h]")
-            body.append(r"\caption{Tcycle sensitivity at fixed M = 100. Accuracy entries show Tcycle = 20 to Tcycle = 100.}")
-            body.append(r"\small")
-            body.append(r"\resizebox{\linewidth}{!}{%")
-            body.append(r"\begin{tabular}{llllll}")
-            body.append(r"\toprule")
-            body.append(r"Dataset & Classifier & Best acc & Median acc & Median classes & Seconds \\")
-            body.append(r"\midrule")
-            for dataset, classifier, best_acc, median_acc, median_classes, seconds in TCYCLE_SENSITIVITY_ROWS:
-                body.append(
-                    f"{tex_escape(dataset)} & {tex_escape(classifier)} & {tex_escape(best_acc)} & "
-                    f"{tex_escape(median_acc)} & {tex_escape(median_classes)} & {tex_escape(seconds)} \\\\"
-                )
-            body.append(r"\bottomrule")
-            body.append(r"\end{tabular}%")
-            body.append(r"}")
-            body.append(r"\end{table}")
-            body.append("")
-            body.append(r"\begin{table}[h]")
-            body.append(r"\caption{M sensitivity at fixed Tcycle = 100. Entries show M = 20 / 50 / 100.}")
-            body.append(r"\small")
-            body.append(r"\resizebox{\linewidth}{!}{%")
-            body.append(r"\begin{tabular}{llllll}")
-            body.append(r"\toprule")
-            body.append(r"Dataset & Classifier & Best acc & Median acc & Best-run ARI & Seconds \\")
-            body.append(r"\midrule")
-            for dataset, classifier, best_acc, median_acc, best_ari, seconds in M_SENSITIVITY_ROWS:
-                body.append(
-                    f"{tex_escape(dataset)} & {tex_escape(classifier)} & {tex_escape(best_acc)} & "
-                    f"{tex_escape(median_acc)} & {tex_escape(best_ari)} & {tex_escape(seconds)} \\\\"
-                )
-            body.append(r"\bottomrule")
-            body.append(r"\end{tabular}%")
-            body.append(r"}")
-            body.append(r"\end{table}")
-            body.append("")
-            body.append(r"\begin{figure}[h]")
-            body.append(r"\centering")
-            body.append(r"\includegraphics[width=\linewidth]{kodama_m_tcycle_sensitivity.png}")
-            body.append(r"\caption{Sensitivity of KODAMA quality and runtime to Tcycle and M. Tcycle = 100 is supported by convergence of the label-vector search; M = 100 is used as a conservative independent-run ensemble size.}")
-            body.append(r"\end{figure}")
-            body.append("")
+            if RELEASE_SENSITIVITY_READY:
+                body.append(r"\begin{table}[h]")
+                body.append(r"\caption{Tcycle sensitivity at fixed M = 100. Accuracy entries show Tcycle = 20 to Tcycle = 100.}")
+                body.append(r"\small")
+                body.append(r"\resizebox{\linewidth}{!}{%")
+                body.append(r"\begin{tabular}{llllll}")
+                body.append(r"\toprule")
+                body.append(r"Dataset & Classifier & Best acc & Median acc & Median classes & Seconds \\")
+                body.append(r"\midrule")
+                for dataset, classifier, best_acc, median_acc, median_classes, seconds in TCYCLE_SENSITIVITY_ROWS:
+                    body.append(
+                        f"{tex_escape(dataset)} & {tex_escape(classifier)} & {tex_escape(best_acc)} & "
+                        f"{tex_escape(median_acc)} & {tex_escape(median_classes)} & {tex_escape(seconds)} \\\\"
+                    )
+                body.append(r"\bottomrule")
+                body.append(r"\end{tabular}%")
+                body.append(r"}")
+                body.append(r"\end{table}")
+                body.append("")
+                body.append(r"\begin{table}[h]")
+                body.append(r"\caption{M sensitivity at fixed Tcycle = 100. Entries show M = 20 / 50 / 100.}")
+                body.append(r"\small")
+                body.append(r"\resizebox{\linewidth}{!}{%")
+                body.append(r"\begin{tabular}{llllll}")
+                body.append(r"\toprule")
+                body.append(r"Dataset & Classifier & Best acc & Median acc & Selected ARI & Seconds \\")
+                body.append(r"\midrule")
+                for dataset, classifier, best_acc, median_acc, best_ari, seconds in M_SENSITIVITY_ROWS:
+                    body.append(
+                        f"{tex_escape(dataset)} & {tex_escape(classifier)} & {tex_escape(best_acc)} & "
+                        f"{tex_escape(median_acc)} & {tex_escape(best_ari)} & {tex_escape(seconds)} \\\\"
+                    )
+                body.append(r"\bottomrule")
+                body.append(r"\end{tabular}%")
+                body.append(r"}")
+                body.append(r"\end{table}")
+                body.append("")
+                if SENSITIVITY_FIGURE.exists():
+                    body.append(r"\begin{figure}[h]")
+                    body.append(r"\centering")
+                    body.append(r"\includegraphics[width=\linewidth]{kodama_m_tcycle_sensitivity.png}")
+                    body.append(r"\caption{Sensitivity of KODAMA quality and runtime to Tcycle and M on named nonspatial datasets.}")
+                    body.append(r"\end{figure}")
+                    body.append("")
+                body.append(r"\begin{table}[h]")
+                body.append(r"\caption{Convergence of agreement-graph edge weights. RMSE entries show M = 10 / 20 / 50 relative to M = 100.}")
+                body.append(r"\small")
+                body.append(r"\begin{tabular}{llll}")
+                body.append(r"\toprule")
+                body.append(r"Dataset & Classifier & RMSE to M100 & Correlation at M50 \\")
+                body.append(r"\midrule")
+                for dataset, classifier, rmse, correlation in ENSEMBLE_CONVERGENCE_ROWS:
+                    body.append(
+                        f"{tex_escape(dataset)} & {tex_escape(classifier)} & {tex_escape(rmse)} & "
+                        f"{tex_escape(correlation)} \\\\"
+                    )
+                body.append(r"\bottomrule")
+                body.append(r"\end{tabular}")
+                body.append(r"\end{table}")
+                body.append("")
+                if ENSEMBLE_CONVERGENCE_FIGURE.exists():
+                    body.append(r"\begin{figure}[h]")
+                    body.append(r"\centering")
+                    body.append(r"\includegraphics[width=\linewidth]{jmlr_pilot_20260716/ensemble_convergence.png}")
+                    body.append(r"\caption{Convergence of edge-agreement weights as independent KODAMA runs are added. RMSE is measured against M = 100; the right panel shows the Bernoulli worst-case Monte Carlo standard error.}")
+                    body.append(r"\end{figure}")
+                    body.append("")
+            else:
+                body.append(tex_escape(
+                    "Named nonspatial release results are pending. Preliminary anonymized development rows are deliberately excluded from this submission draft."
+                ))
+                body.append("")
             evidence_chunks = (
                 IMPLEMENTATION_EVIDENCE_ROWS[:4],
                 IMPLEMENTATION_EVIDENCE_ROWS[4:],

@@ -1,9 +1,9 @@
 # kodama-python
 
-Thin Python wrapper for the standalone `kodama-cpp` C++/CUDA library.
+Thin Python wrapper for the standalone `kodama-cpp` C++/CUDA/Metal library.
 
-The Python package exposes `kodama.matrix()` and keeps all numerical work in
-the C++/CUDA core.
+The Python package exposes KODAMA optimization, float32 PCA, graph utilities,
+and UMAP/openTSNE while keeping numerical work in the standalone C++ core.
 
 ## Development Install
 
@@ -46,6 +46,9 @@ kodama.diagnostics()
 ```python
 import kodama
 
+pc = kodama.PCA(x, ncomp=20, backend="cpu")
+pc["scores"].shape
+
 kk = kodama.matrix(
     x,
     spatial=spatial,
@@ -58,7 +61,13 @@ kk = kodama.matrix(
 
 kodama.timing(kk)
 labels = kk.best_labels
-um = kodama.visualization(kk, "UMAP", k=30, backend="cuda")
+um = kodama.visualization(
+    kk,
+    "UMAP",
+    k=30,
+    backend="cuda",
+    graph_mode="binary",
+)
 clu = kodama.clustering(um, n_iterations=10, random_walk_steps=4)
 ```
 

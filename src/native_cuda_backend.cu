@@ -1,11 +1,17 @@
 /*
+ * SPDX-FileCopyrightText: Meta Platforms, Inc. and affiliates
+ * SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+ * SPDX-License-Identifier: MIT
+ *
  * Package-owned float32 CUDA nearest-neighbor and k-means primitives.
  *
- * The exact/IVF-Flat organization is distilled from the public algorithmic
- * structure of FAISS 1.14.3 (MIT) and RAPIDS cuVS (Apache-2.0), and from the
- * native Metal implementation in fastEmbedR. No FAISS, cuVS, RAFT, or RMM
- * source is copied or linked. This standalone adaptation is
- * Copyright (c) 2026 Stefano Caccia and distributed under the MIT License.
+ * The exact/IVF-Flat organization is informed by FAISS 1.14.3 (MIT), RAPIDS
+ * cuVS (Apache-2.0), and the native Metal implementation in fastEmbedR. The
+ * k-means initialization, seed convention, Lloyd iteration semantics, and
+ * empty-cluster repair are adapted from FAISS 1.14.3 clustering and random
+ * utilities. No FAISS, cuVS, RAFT, or RMM binary is linked, and no cuVS source
+ * is included. This standalone adaptation is distributed under the MIT
+ * License; retain the FAISS notice and license with redistributed derivatives.
  */
 
 #include "native_cuda_backend.hpp"
@@ -35,6 +41,8 @@ constexpr int kMaximumCudaK = 256;
 constexpr int kMaximumCudaProbe = 256;
 constexpr int kMaximumCudaLists = 4096;
 constexpr int kCudaProjectionDimension = 128;
+// Each independent M lane reuses this bounded exact-assignment workspace.
+constexpr std::size_t kKMeansScoreWorkspaceBytes = 256ull * 1024ull * 1024ull;
 
 void cuda_check(cudaError_t status, const char* context) {
   if (status == cudaSuccess) return;
@@ -304,14 +312,16 @@ __global__ void assign_kmeans_kernel(
   const float* centroid_norms,
   int* assignments,
   unsigned int* changed,
-  int rows,
+  int first_row,
+  int batch_rows,
   int clusters
 ) {
-  const int row = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (row >= rows) return;
+  const int batch_row = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (batch_row >= batch_rows) return;
+  const int row = first_row + batch_row;
   float best_distance = CUDART_INF_F;
   int best_cluster = -1;
-  const float* row_dot = dot_products + static_cast<std::size_t>(row) * clusters;
+  const float* row_dot = dot_products + static_cast<std::size_t>(batch_row) * clusters;
   for (int cluster = 0; cluster < clusters; ++cluster) {
     const float distance = fmaxf(0.0f, data_norms[row] + centroid_norms[cluster] - 2.0f * row_dot[cluster]);
     if (better_pair(distance, cluster, best_distance, best_cluster)) {
@@ -509,6 +519,67 @@ int blocks_for(std::size_t items, int threads = 256) {
   return static_cast<int>((items + static_cast<std::size_t>(threads) - 1) / static_cast<std::size_t>(threads));
 }
 
+int kmeans_score_batch_rows(int rows, int clusters) {
+  const std::size_t workspace_items = kKMeansScoreWorkspaceBytes / sizeof(float);
+  const std::size_t rows_per_batch = std::max<std::size_t>(
+    1,
+    workspace_items / static_cast<std::size_t>(clusters)
+  );
+  return static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(rows), rows_per_batch));
+}
+
+void assign_kmeans_rows(
+  cublasHandle_t handle,
+  const float* device_data,
+  const float* device_centroids,
+  const float* device_data_norms,
+  const float* device_centroid_norms,
+  float* device_scores,
+  int* device_assignments,
+  unsigned int* device_changed,
+  int rows,
+  int dimensions,
+  int clusters,
+  int batch_rows
+) {
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  cuda_check(cudaMemset(device_changed, 0, sizeof(unsigned int)), "cudaMemset k-means changed");
+  for (int first_row = 0; first_row < rows; first_row += batch_rows) {
+    const int current_rows = std::min(batch_rows, rows - first_row);
+    cublas_check(
+      cublasSgemm(
+        handle,
+        CUBLAS_OP_T,
+        CUBLAS_OP_N,
+        clusters,
+        current_rows,
+        dimensions,
+        &alpha,
+        device_centroids,
+        dimensions,
+        device_data + static_cast<std::size_t>(first_row) * dimensions,
+        dimensions,
+        &beta,
+        device_scores,
+        clusters
+      ),
+      "native CUDA k-means batched matrix product"
+    );
+    assign_kmeans_kernel<<<blocks_for(static_cast<std::size_t>(current_rows)), 256>>>(
+      device_scores,
+      device_data_norms,
+      device_centroid_norms,
+      device_assignments,
+      device_changed,
+      first_row,
+      current_rows,
+      clusters
+    );
+    cuda_check(cudaGetLastError(), "native CUDA k-means batched assignment");
+  }
+}
+
 struct KMeansOutput {
   std::vector<float> centroids;
   std::vector<int> assignments;
@@ -529,7 +600,8 @@ KMeansOutput run_kmeans_device(
   max_iterations = std::max(1, max_iterations);
   const std::size_t data_items = static_cast<std::size_t>(rows) * dimensions;
   const std::size_t centroid_items = static_cast<std::size_t>(clusters) * dimensions;
-  const std::size_t score_items = static_cast<std::size_t>(rows) * clusters;
+  const int score_batch_rows = kmeans_score_batch_rows(rows, clusters);
+  const std::size_t score_items = static_cast<std::size_t>(score_batch_rows) * clusters;
 
   std::vector<int> initial_indices(static_cast<std::size_t>(rows));
   std::iota(initial_indices.begin(), initial_indices.end(), 0);
@@ -565,8 +637,6 @@ KMeansOutput run_kmeans_device(
   cuda_check(cudaGetLastError(), "native CUDA k-means row norms");
 
   CublasHandle handle;
-  const float alpha = 1.0f;
-  const float beta = 0.0f;
   for (int iteration = 0; iteration < max_iterations; ++iteration) {
     row_norms_kernel<<<blocks_for(static_cast<std::size_t>(clusters)), 256>>>(
       device_centroids.get(),
@@ -575,36 +645,20 @@ KMeansOutput run_kmeans_device(
       dimensions
     );
     cuda_check(cudaGetLastError(), "native CUDA k-means centroid norms");
-    cublas_check(
-      cublasSgemm(
-        handle.get(),
-        CUBLAS_OP_T,
-        CUBLAS_OP_N,
-        clusters,
-        rows,
-        dimensions,
-        &alpha,
-        device_centroids.get(),
-        dimensions,
-        device_data,
-        dimensions,
-        &beta,
-        device_scores.get(),
-        clusters
-      ),
-      "native CUDA k-means matrix product"
-    );
-    cuda_check(cudaMemset(device_changed.get(), 0, sizeof(unsigned int)), "cudaMemset k-means changed");
-    assign_kmeans_kernel<<<blocks_for(static_cast<std::size_t>(rows)), 256>>>(
-      device_scores.get(),
+    assign_kmeans_rows(
+      handle.get(),
+      device_data,
+      device_centroids.get(),
       device_data_norms.get(),
       device_centroid_norms.get(),
+      device_scores.get(),
       device_assignments.get(),
       device_changed.get(),
       rows,
-      clusters
+      dimensions,
+      clusters,
+      score_batch_rows
     );
-    cuda_check(cudaGetLastError(), "native CUDA k-means assignment");
 
     unsigned int changed = 0;
     device_changed.copy_to_host(&changed, 1);
@@ -643,6 +697,274 @@ KMeansOutput run_kmeans_device(
   device_centroids.copy_to_host(output.centroids.data(), output.centroids.size());
   device_assignments.copy_to_host(output.assignments.data(), output.assignments.size());
   return output;
+}
+
+class FaissCompatibleRandom {
+ public:
+  explicit FaissCompatibleRandom(std::uint64_t seed)
+      : generator_(static_cast<std::uint32_t>(seed)) {}
+
+  int integer(int maximum) {
+    return static_cast<int>(generator_() % static_cast<std::uint32_t>(maximum));
+  }
+
+  float uniform() {
+    return static_cast<float>(generator_()) /
+      static_cast<float>(std::mt19937::max());
+  }
+
+ private:
+  std::mt19937 generator_;
+};
+
+std::vector<int> faiss_compatible_permutation(int rows, std::uint64_t seed) {
+  std::vector<int> permutation(static_cast<std::size_t>(rows));
+  std::iota(permutation.begin(), permutation.end(), 0);
+  FaissCompatibleRandom generator(seed);
+  for (int row = 0; row + 1 < rows; ++row) {
+    const int replacement = row + generator.integer(rows - row);
+    std::swap(
+      permutation[static_cast<std::size_t>(row)],
+      permutation[static_cast<std::size_t>(replacement)]
+    );
+  }
+  return permutation;
+}
+
+class FloatFenwickTree {
+ public:
+  explicit FloatFenwickTree(const std::vector<float>& values)
+      : tree_(values.size() + 1, 0.0f), values_(values) {
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      add(index, values[index]);
+    }
+  }
+
+  float total() const {
+    float sum = 0.0f;
+    for (std::size_t index = tree_.size() - 1; index > 0; index -= index & (~index + 1)) {
+      sum += tree_[index];
+    }
+    return sum;
+  }
+
+  void set(std::size_t index, float value) {
+    const float delta = value - values_[index];
+    values_[index] = value;
+    add(index, delta);
+  }
+
+  int select(float target) const {
+    std::size_t index = 0;
+    float prefix = 0.0f;
+    std::size_t step = 1;
+    while ((step << 1) < tree_.size()) step <<= 1;
+    for (; step > 0; step >>= 1) {
+      const std::size_t next = index + step;
+      if (next < tree_.size() && prefix + tree_[next] <= target) {
+        index = next;
+        prefix += tree_[next];
+      }
+    }
+    return index < values_.size() ? static_cast<int>(index) : -1;
+  }
+
+ private:
+  void add(std::size_t index, float delta) {
+    for (++index; index < tree_.size(); index += index & (~index + 1)) {
+      tree_[index] += delta;
+    }
+  }
+
+  std::vector<float> tree_;
+  std::vector<float> values_;
+};
+
+void faiss_compatible_split_empty_clusters(
+  int rows,
+  int dimensions,
+  int clusters,
+  std::vector<float>& cluster_sizes,
+  std::vector<float>& centroids
+) {
+  if (rows <= clusters) return;
+  constexpr float epsilon = 1.0f / 1024.0f;
+  FaissCompatibleRandom generator(1234u);
+  std::vector<float> donor_weights(static_cast<std::size_t>(clusters), 0.0f);
+  for (int cluster = 0; cluster < clusters; ++cluster) {
+    donor_weights[static_cast<std::size_t>(cluster)] = std::max(
+      0.0f,
+      cluster_sizes[static_cast<std::size_t>(cluster)] - 1.0f
+    );
+  }
+  FloatFenwickTree donor_tree(donor_weights);
+  for (int empty = 0; empty < clusters; ++empty) {
+    if (cluster_sizes[static_cast<std::size_t>(empty)] != 0.0f) continue;
+
+    const float total_weight = donor_tree.total();
+    int donor = -1;
+    if (total_weight > 0.0f) {
+      const float target = generator.uniform() * total_weight;
+      donor = donor_tree.select(target);
+    }
+    if (donor < 0) {
+      donor = 0;
+      for (int cluster = 1; cluster < clusters; ++cluster) {
+        if (cluster_sizes[static_cast<std::size_t>(cluster)] >
+            cluster_sizes[static_cast<std::size_t>(donor)]) {
+          donor = cluster;
+        }
+      }
+    }
+
+    float* empty_centroid = centroids.data() +
+      static_cast<std::size_t>(empty) * dimensions;
+    float* donor_centroid = centroids.data() +
+      static_cast<std::size_t>(donor) * dimensions;
+    std::copy_n(donor_centroid, dimensions, empty_centroid);
+    for (int dimension = 0; dimension < dimensions; ++dimension) {
+      if ((dimension & 1) == 0) {
+        empty_centroid[dimension] *= 1.0f + epsilon;
+        donor_centroid[dimension] *= 1.0f - epsilon;
+      } else {
+        empty_centroid[dimension] *= 1.0f - epsilon;
+        donor_centroid[dimension] *= 1.0f + epsilon;
+      }
+    }
+    cluster_sizes[static_cast<std::size_t>(empty)] =
+      cluster_sizes[static_cast<std::size_t>(donor)] / 2.0f;
+    cluster_sizes[static_cast<std::size_t>(donor)] -=
+      cluster_sizes[static_cast<std::size_t>(empty)];
+    donor_tree.set(
+      static_cast<std::size_t>(empty),
+      std::max(0.0f, cluster_sizes[static_cast<std::size_t>(empty)] - 1.0f)
+    );
+    donor_tree.set(
+      static_cast<std::size_t>(donor),
+      std::max(0.0f, cluster_sizes[static_cast<std::size_t>(donor)] - 1.0f)
+    );
+  }
+}
+
+KMeansOutput run_faiss_compatible_kmeans_device(
+  const std::vector<float>& data,
+  int rows,
+  int dimensions,
+  int clusters,
+  int max_iterations,
+  std::uint64_t seed
+) {
+  if (rows < 1 || dimensions < 1 || clusters < 1 || clusters > rows) {
+    throw std::invalid_argument("Invalid FAISS-compatible CUDA k-means dimensions.");
+  }
+  max_iterations = std::max(1, max_iterations);
+  const std::size_t data_items = static_cast<std::size_t>(rows) * dimensions;
+  const std::size_t centroid_items = static_cast<std::size_t>(clusters) * dimensions;
+  const int score_batch_rows = kmeans_score_batch_rows(rows, clusters);
+  const std::size_t score_items = static_cast<std::size_t>(score_batch_rows) * clusters;
+
+  const std::vector<int> initial_indices =
+    faiss_compatible_permutation(rows, seed + 1u);
+  std::vector<float> centroids(centroid_items, 0.0f);
+  for (int cluster = 0; cluster < clusters; ++cluster) {
+    std::copy_n(
+      data.data() + static_cast<std::size_t>(initial_indices[static_cast<std::size_t>(cluster)]) * dimensions,
+      dimensions,
+      centroids.data() + static_cast<std::size_t>(cluster) * dimensions
+    );
+  }
+
+  CudaBuffer<float> device_data(data_items);
+  CudaBuffer<float> device_centroids(centroid_items);
+  CudaBuffer<int> device_assignments(static_cast<std::size_t>(rows));
+  CudaBuffer<float> device_data_norms(static_cast<std::size_t>(rows));
+  CudaBuffer<float> device_centroid_norms(static_cast<std::size_t>(clusters));
+  CudaBuffer<float> device_scores(score_items);
+  CudaBuffer<unsigned int> device_changed(1);
+  device_data.copy_from_host(data.data(), data.size());
+  device_centroids.copy_from_host(centroids.data(), centroids.size());
+  cuda_check(
+    cudaMemset(device_assignments.get(), 0xff, static_cast<std::size_t>(rows) * sizeof(int)),
+    "cudaMemset FAISS-compatible k-means assignments"
+  );
+  row_norms_kernel<<<blocks_for(static_cast<std::size_t>(rows)), 256>>>(
+    device_data.get(),
+    device_data_norms.get(),
+    rows,
+    dimensions
+  );
+  cuda_check(cudaGetLastError(), "FAISS-compatible CUDA k-means row norms");
+
+  CublasHandle handle;
+  std::vector<int> assignments(static_cast<std::size_t>(rows), -1);
+  std::vector<float> cluster_sizes(static_cast<std::size_t>(clusters), 0.0f);
+
+  auto assign = [&]() {
+    row_norms_kernel<<<blocks_for(static_cast<std::size_t>(clusters)), 256>>>(
+      device_centroids.get(),
+      device_centroid_norms.get(),
+      clusters,
+      dimensions
+    );
+    cuda_check(cudaGetLastError(), "FAISS-compatible CUDA k-means centroid norms");
+    assign_kmeans_rows(
+      handle.get(),
+      device_data.get(),
+      device_centroids.get(),
+      device_data_norms.get(),
+      device_centroid_norms.get(),
+      device_scores.get(),
+      device_assignments.get(),
+      device_changed.get(),
+      rows,
+      dimensions,
+      clusters,
+      score_batch_rows
+    );
+    device_assignments.copy_to_host(assignments.data(), assignments.size());
+    unsigned int changed = 0;
+    device_changed.copy_to_host(&changed, 1);
+    return changed;
+  };
+
+  for (int iteration = 0; iteration < max_iterations; ++iteration) {
+    const unsigned int changed = assign();
+    std::fill(centroids.begin(), centroids.end(), 0.0f);
+    std::fill(cluster_sizes.begin(), cluster_sizes.end(), 0.0f);
+    for (int row = 0; row < rows; ++row) {
+      const int cluster = assignments[static_cast<std::size_t>(row)];
+      if (cluster < 0 || cluster >= clusters) {
+        throw std::runtime_error("FAISS-compatible CUDA k-means returned an invalid assignment.");
+      }
+      cluster_sizes[static_cast<std::size_t>(cluster)] += 1.0f;
+      float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * dimensions;
+      const float* point = data.data() + static_cast<std::size_t>(row) * dimensions;
+      for (int dimension = 0; dimension < dimensions; ++dimension) {
+        centroid[dimension] += point[dimension];
+      }
+    }
+    for (int cluster = 0; cluster < clusters; ++cluster) {
+      const float size = cluster_sizes[static_cast<std::size_t>(cluster)];
+      if (size == 0.0f) continue;
+      const float scale = 1.0f / size;
+      float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * dimensions;
+      for (int dimension = 0; dimension < dimensions; ++dimension) {
+        centroid[dimension] *= scale;
+      }
+    }
+    faiss_compatible_split_empty_clusters(
+      rows,
+      dimensions,
+      clusters,
+      cluster_sizes,
+      centroids
+    );
+    device_centroids.copy_from_host(centroids.data(), centroids.size());
+    if (changed == 0) break;
+  }
+
+  assign();
+  return KMeansOutput{std::move(centroids), std::move(assignments)};
 }
 
 std::vector<int> normalized_exclusions(const std::vector<int>& input, int query_rows) {
@@ -1120,10 +1442,8 @@ std::vector<int> native_cuda_kmeans_labels(
     throw std::invalid_argument("Invalid native CUDA k-means input.");
   }
   CudaDeviceScope device_scope(device);
-  CudaBuffer<float> device_data(data.size());
-  device_data.copy_from_host(data.data(), data.size());
-  KMeansOutput output = run_kmeans_device(
-    device_data.get(),
+  KMeansOutput output = run_faiss_compatible_kmeans_device(
+    data,
     rows,
     dimensions,
     clusters,

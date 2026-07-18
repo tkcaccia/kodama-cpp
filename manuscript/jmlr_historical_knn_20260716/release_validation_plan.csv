@@ -1,0 +1,5 @@
+"dataset","implementation","classifier","backend","n_cores","variant","splitting","graph_correction","job_id"
+"MetRef","historical-r-2.4.1","knn","cpu",1,"historical_reference",50,TRUE,"MetRef__historical-r-2.4.1__knn__cpu__c1__historical_reference"
+"MetRef","kodama-cpp","knn","cpu",1,"historical_comparison_cpu1",50,TRUE,"MetRef__kodama-cpp__knn__cpu__c1__historical_comparison_cpu1"
+"MetRef","kodama-cpp","knn","cpu",4,"historical_comparison_cpu4",50,TRUE,"MetRef__kodama-cpp__knn__cpu__c4__historical_comparison_cpu4"
+"MetRef","kodama-cpp","knn","cuda",4,"historical_comparison_cuda",50,TRUE,"MetRef__kodama-cpp__knn__cuda__c4__historical_comparison_cuda"

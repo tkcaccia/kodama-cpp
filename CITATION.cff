@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use kodama-cpp, please cite the software and the KODAMA method papers."
+title: "kodama-cpp: Cross-Validated Accuracy Maximization on CPU, CUDA, and Apple Metal"
+type: software
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/tkcaccia/kodama-cpp"
+url: "https://github.com/tkcaccia/kodama-cpp"
+authors:
+  - given-names: Moussa
+    family-names: Kassim
+    affiliation: "International Center for Genetic Engineering and Biotechnology and University of Cape Town"
+  - given-names: Martin
+    family-names: Ocharo
+    affiliation: "International Center for Genetic Engineering and Biotechnology and University of Cape Town"
+  - given-names: Alessia
+    family-names: Vignoli
+    affiliation: "University of Florence and CERM"
+  - given-names: Leonardo
+    family-names: Tenori
+    affiliation: "University of Florence and CERM"
+    orcid: "https://orcid.org/0000-0001-6438-059X"
+  - given-names: Stefano
+    family-names: Cacciatore
+    affiliation: "International Center for Genetic Engineering and Biotechnology and University of Cape Town"
+    email: "stefano.cacciatore@icgeb.org"
+    orcid: "https://orcid.org/0000-0001-7052-7156"

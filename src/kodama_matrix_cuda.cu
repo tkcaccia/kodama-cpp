@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #include "kodama_matrix_cuda.hpp"
 #include "spatial_grid_knn.hpp"
 

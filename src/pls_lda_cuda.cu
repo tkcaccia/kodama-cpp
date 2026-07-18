@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #include <algorithm>
 #include <cstddef>
 #include <cuda_runtime.h>

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 @PACKAGE_INIT@
 
 if(@KODAMA_CONFIG_NEEDS_OPENMP@)

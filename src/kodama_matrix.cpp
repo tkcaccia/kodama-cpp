@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #include "common.hpp"
 #include "metal_backend.hpp"
 #include "native_cuda_backend.hpp"
@@ -348,7 +351,7 @@ std::vector<int> kmeans_labels(
       p,
       k,
       std::max(1, max_iter),
-      rng(),
+      rng() & 0x7fffffffULL,
       gpu_device
     );
   }
@@ -654,7 +657,14 @@ void repair_singleton_spatial_clusters(
   for (std::size_t i = 0; i < query_rows.size(); ++i) {
     std::copy_n(spatial.data() + static_cast<std::size_t>(query_rows[i]) * dims, dims, query.data() + i * dims);
   }
-  NeighborGraph nearest = hnsw_graph(base, query, n_keep, static_cast<int>(query_rows.size()), dims, 1, DistanceMetric::Euclidean, n_threads);
+  NeighborGraph nearest = detail::spatial_grid_query_nearest(
+    base.data(),
+    n_keep,
+    query.data(),
+    static_cast<int>(query_rows.size()),
+    dims,
+    n_threads
+  );
   for (std::size_t i = 0; i < query_rows.size(); ++i) {
     const int local = nearest.indices[i];
     if (local >= 0) clusters[static_cast<std::size_t>(query_rows[i])] = clusters[static_cast<std::size_t>(base_rows[static_cast<std::size_t>(local)])];

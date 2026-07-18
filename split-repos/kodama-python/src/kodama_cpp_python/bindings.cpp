@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #include <cstdint>
 #include <algorithm>
 #include <string>
@@ -23,7 +26,14 @@ kodama::DistanceMetric parse_metric(const std::string& metric) {
 kodama::Backend parse_backend(const std::string& backend) {
   if (backend == "cpu") return kodama::Backend::CPU;
   if (backend == "cuda") return kodama::Backend::CUDA;
+  if (backend == "metal") return kodama::Backend::Metal;
   throw std::invalid_argument("Unsupported backend: " + backend);
+}
+
+kodama::UMAPGraphMode parse_umap_graph_mode(const std::string& mode) {
+  if (mode == "binary") return kodama::UMAPGraphMode::Binary;
+  if (mode == "fuzzy") return kodama::UMAPGraphMode::Fuzzy;
+  throw std::invalid_argument("Unsupported UMAP graph mode: " + mode);
 }
 
 kodama::CoreClassifier parse_classifier(const std::string& classifier) {
@@ -72,6 +82,30 @@ py::array_t<int> vector_to_int_array(const std::vector<int>& values) {
   py::array_t<int> out(static_cast<py::ssize_t>(values.size()));
   auto view = out.mutable_unchecked<1>();
   for (py::ssize_t i = 0; i < view.shape(0); ++i) view(i) = values[static_cast<std::size_t>(i)];
+  return out;
+}
+
+py::array_t<float> vector_to_float_array(const std::vector<float>& values) {
+  py::array_t<float> out(static_cast<py::ssize_t>(values.size()));
+  auto view = out.mutable_unchecked<1>();
+  for (py::ssize_t i = 0; i < view.shape(0); ++i) {
+    view(i) = values[static_cast<std::size_t>(i)];
+  }
+  return out;
+}
+
+py::array_t<float> matrix_to_float_array(
+  const std::vector<float>& values,
+  const int rows,
+  const int cols
+) {
+  py::array_t<float> out({rows, cols});
+  auto view = out.mutable_unchecked<2>();
+  for (int row = 0; row < rows; ++row) {
+    for (int col = 0; col < cols; ++col) {
+      view(row, col) = values[static_cast<std::size_t>(row) * cols + col];
+    }
+  }
   return out;
 }
 
@@ -264,6 +298,29 @@ py::array_t<float> embedding_to_python(const kodama::EmbeddingResult& result) {
       view(i, j) = result.embedding[static_cast<std::size_t>(i) * static_cast<std::size_t>(result.components) + static_cast<std::size_t>(j)];
     }
   }
+  return out;
+}
+
+py::dict pca_to_python(const kodama::PCAResult& result) {
+  py::dict out;
+  out["scores"] = matrix_to_float_array(result.scores, result.samples, result.components);
+  out["loadings"] = matrix_to_float_array(result.loadings, result.variables, result.components);
+  out["singular_values"] = vector_to_float_array(result.singular_values);
+  out["sdev"] = vector_to_float_array(result.sdev);
+  out["variance"] = vector_to_float_array(result.variance);
+  out["variance_explained"] = vector_to_float_array(result.variance_explained);
+  out["cumulative_variance_explained"] = vector_to_float_array(
+    result.cumulative_variance_explained
+  );
+  out["total_variance"] = result.total_variance;
+  out["center"] = vector_to_float_array(result.center);
+  out["scale"] = vector_to_float_array(result.scale);
+  out["ncomp"] = result.components;
+  out["oversample"] = result.oversample;
+  out["power"] = result.power_iterations;
+  out["backend"] = kodama::to_string(result.backend);
+  out["precision"] = "float32";
+  out["runtime_seconds"] = result.runtime_seconds;
   return out;
 }
 
@@ -650,6 +707,39 @@ py::dict knn_graph(
   );
 }
 
+py::dict pca(
+  py::array_t<float, py::array::c_style | py::array::forcecast> data,
+  const int ncomp,
+  const bool center,
+  const bool scale,
+  const std::string& backend,
+  const int seed,
+  const int n_threads,
+  const int gpu_device,
+  const int oversample,
+  const int power
+) {
+  auto view = data.unchecked<2>();
+  kodama::PCAOptions options;
+  options.n_components = ncomp;
+  options.center = center;
+  options.scale = scale;
+  options.backend = parse_backend(backend);
+  options.seed = static_cast<std::uint64_t>(seed);
+  options.n_threads = n_threads;
+  options.gpu_device = gpu_device;
+  options.oversample = oversample;
+  options.power_iterations = power;
+  return pca_to_python(kodama::PCA(
+    kodama::MatrixView{
+      static_cast<const float*>(data.request().ptr),
+      static_cast<std::size_t>(view.shape(0)),
+      static_cast<std::size_t>(view.shape(1))
+    },
+    options
+  ));
+}
+
 py::array_t<float> umap(
   py::array_t<int, py::array::c_style | py::array::forcecast> indices,
   py::array_t<float, py::array::c_style | py::array::forcecast> distances,
@@ -664,7 +754,8 @@ py::array_t<float> umap(
   int n_threads,
   int seed,
   const std::string& backend,
-  int gpu_device
+  int gpu_device,
+  const std::string& graph_mode
 ) {
   kodama::UMAPOptions options;
   options.n_neighbors = n_neighbors;
@@ -677,6 +768,7 @@ py::array_t<float> umap(
   options.n_threads = n_threads;
   options.seed = seed;
   options.gpu_device = gpu_device;
+  options.graph_mode = parse_umap_graph_mode(graph_mode);
   if (!init.is_none()) {
     py::array_t<float, py::array::c_style | py::array::forcecast> init_array(init);
     auto view = init_array.unchecked<2>();
@@ -948,6 +1040,20 @@ PYBIND11_MODULE(_core, m) {
     py::arg("gpu_device") = 0
   );
   m.def(
+    "pca",
+    &pca,
+    py::arg("data"),
+    py::arg("ncomp") = 2,
+    py::arg("center") = true,
+    py::arg("scale") = false,
+    py::arg("backend") = "cpu",
+    py::arg("seed") = 4,
+    py::arg("n_threads") = 1,
+    py::arg("gpu_device") = 0,
+    py::arg("oversample") = -1,
+    py::arg("power") = -1
+  );
+  m.def(
     "umap",
     &umap,
     py::arg("indices"),
@@ -963,7 +1069,8 @@ PYBIND11_MODULE(_core, m) {
     py::arg("n_threads") = 1,
     py::arg("seed") = 1234,
     py::arg("backend") = "cpu",
-    py::arg("gpu_device") = 0
+    py::arg("gpu_device") = 0,
+    py::arg("graph_mode") = "binary"
   );
   m.def(
     "opentsne",

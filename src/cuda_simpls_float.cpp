@@ -1,5 +1,9 @@
-// Adapted from tkcaccia/fastPLS CUDA SIMPLS and relicensed for
-// kodama-cpp under MIT by the copyright holder.
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+//
+// Adapted from tkcaccia/fastPLS CUDA SIMPLS and relicensed for kodama-cpp
+// under MIT by Stefano Cacciatore, the developer and sole code committer of
+// the inspected fastPLS source history.
 // Float32 label-aware CUDA SIMPLS for KODAMA PLS cross-validation.
 
 #include <algorithm>

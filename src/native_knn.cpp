@@ -1,9 +1,10 @@
 /*
+ * SPDX-FileCopyrightText: Meta Platforms, Inc. and affiliates
+ * SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+ * SPDX-License-Identifier: MIT
+ *
  * Compact HNSW implementation distilled from the algorithmic organization in
  * FAISS 1.14.3, commit 0ca9df4792b173d573044ee14ca0704780176e82.
- *
- * Copyright (c) Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2026 Stefano Caccia.
  *
  * Licensed under the MIT License. The FAISS copyright and MIT license must be
  * retained with redistributed derivatives of this file.

@@ -16,6 +16,7 @@ KODAMA.visualization(
   n.epochs = 200L,
   n.iter = 500L,
   perplexity = 30,
+  graph.mode = c("binary", "fuzzy"),
   seed = 4L,
   ...
 )
@@ -42,6 +43,9 @@ KODAMA.visualization(
 \item{n.iter}{Number of openTSNE optimization iterations.}
 
 \item{perplexity}{openTSNE perplexity.}
+
+\item{graph.mode}{UMAP graph weighting mode. \code{"binary"} matches the current
+fastEmbedR default; \code{"fuzzy"} retains standard fuzzy UMAP weights.}
 
 \item{seed}{Integer random seed.}
 

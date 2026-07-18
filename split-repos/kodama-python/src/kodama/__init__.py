@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 import os
 import platform
 import subprocess
@@ -16,6 +19,7 @@ from ._core import (
     matrix as _matrix,
     matrix_graph as _matrix_graph,
     opentsne,
+    pca,
     plsldacv,
     umap,
 )
@@ -40,6 +44,10 @@ def CoreKNN(data, labels, **kwargs):
 
 def CorePLSLDA(data, labels, **kwargs):
     return core_plslda(np.asarray(data, dtype=np.float32), _labels(labels), **kwargs)
+
+
+def PCA(data, **kwargs):
+    return pca(np.asarray(data, dtype=np.float32), **kwargs)
 
 
 class KodamaMatrixResult(dict):
@@ -287,6 +295,7 @@ def visualization(
     n_epochs=200,
     n_iter=500,
     perplexity=30.0,
+    graph_mode="binary",
     seed=None,
     **kwargs,
 ):
@@ -316,6 +325,7 @@ def visualization(
             n_threads=n_threads,
             seed=1234 if seed is None else seed,
             gpu_device=gpu_device,
+            graph_mode=graph_mode,
             **kwargs,
         )
     if method_l in {"t-sne", "tsne", "opentsne"}:
@@ -439,6 +449,7 @@ KODAMA = SimpleNamespace(
     clustering=clustering,
     timing=timing,
     diagnostics=diagnostics,
+    pca=PCA,
 )
 
 KODAMA_matrix = matrix
@@ -449,12 +460,14 @@ KODAMA_clustering = clustering
 KODAMA_timing = timing
 KODAMA_diagnostics = diagnostics
 makeSNNGraph = graph
+KODAMA_pca = PCA
 
 __all__ = [
     "KNNCV",
     "PLSLDACV",
     "CoreKNN",
     "CorePLSLDA",
+    "PCA",
     "KODAMA",
     "KODAMA_matrix",
     "KODAMA_matrix_graph",
@@ -463,6 +476,7 @@ __all__ = [
     "KODAMA_clustering",
     "KODAMA_timing",
     "KODAMA_diagnostics",
+    "KODAMA_pca",
     "KodamaMatrixResult",
     "makeSNNGraph",
     "clustering",
@@ -476,6 +490,7 @@ __all__ = [
     "matrix",
     "matrix_graph",
     "opentsne",
+    "pca",
     "plsldacv",
     "timing",
     "umap",

@@ -1,6 +1,10 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #include "kodama/kodama.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <complex>
@@ -145,6 +149,16 @@ double clip_value(const double x, const double lo, const double hi) {
 
 float clip4f(const float x) {
   return x < -4.0f ? -4.0f : (x > 4.0f ? 4.0f : x);
+}
+
+void atomic_add_float(std::atomic<float>& target, const float value) {
+  float expected = target.load(std::memory_order_relaxed);
+  while (!target.compare_exchange_weak(
+    expected,
+    expected + value,
+    std::memory_order_relaxed,
+    std::memory_order_relaxed
+  )) {}
 }
 
 // Copied/adapted from tkcaccia/fastEmbedR (MIT) for standalone kodama-cpp.
@@ -362,53 +376,214 @@ void smooth_knn_dist(
 
   const int threads = effective_cpu_threads(n_threads, n);
   std::vector<long double> thread_sums(static_cast<std::size_t>(threads), 0.0L);
-  parallel_for_chunks(n, threads, [&](const int begin, const int end, const int thread_id) {
+  std::vector<std::size_t> thread_counts(static_cast<std::size_t>(threads), 0u);
+  auto global_worker = [&](const int begin, const int end, const int thread_id) {
     long double local_sum = 0.0L;
+    std::size_t local_count = 0u;
     for (int row = begin; row < end; ++row) {
-      float rho = std::numeric_limits<float>::infinity();
-      float max_distance = 0.0f;
-      float mean_distance = 0.0f;
-      int finite_count = 0;
       for (int col = 0; col < k; ++col) {
-        const float d = graph.distances[static_cast<std::size_t>(col) * n + row];
-        if (!std::isfinite(d) || d < 0.0f) continue;
-        if (d > 0.0f && d < rho) rho = d;
-        max_distance = std::max(max_distance, d);
-        mean_distance += d;
-        ++finite_count;
-      }
-      if (!std::isfinite(rho)) rho = 0.0f;
-      if (finite_count > 0) mean_distance /= static_cast<float>(finite_count);
-
-      float lo = 0.0f;
-      float hi = std::numeric_limits<float>::infinity();
-      float sigma = 1.0f;
-      for (int iter = 0; iter < 64; ++iter) {
-        double psum = 0.0;
-        for (int col = 0; col < k; ++col) {
-          const float raw = graph.distances[static_cast<std::size_t>(col) * n + row];
-          if (!std::isfinite(raw) || raw < 0.0f) continue;
-          const float d = raw - rho;
-          psum += d <= 0.0f ? 1.0 : std::exp(-static_cast<double>(d) / sigma);
-        }
-        if (std::fabs(psum - target) < tol) break;
-        if (psum > target) {
-          hi = sigma;
-          sigma = 0.5f * (lo + hi);
-        } else {
-          lo = sigma;
-          sigma = std::isinf(hi) ? sigma * 2.0f : 0.5f * (lo + hi);
+        const float distance =
+          graph.distances[static_cast<std::size_t>(col) * n + row];
+        if (std::isfinite(distance) && distance >= 0.0f) {
+          local_sum += static_cast<long double>(distance);
+          ++local_count;
         }
       }
-      const float min_scale = std::max(mean_distance, max_distance) * static_cast<float>(min_k_dist_scale);
-      if (sigma < min_scale) sigma = min_scale;
-      sigma = std::max(sigma, 1.0e-6f);
-      sigmas[static_cast<std::size_t>(row)] = sigma;
-      rhos[static_cast<std::size_t>(row)] = rho;
-      local_sum += sigma;
     }
     thread_sums[static_cast<std::size_t>(thread_id)] = local_sum;
+    thread_counts[static_cast<std::size_t>(thread_id)] = local_count;
+  };
+  if (threads == 1 || n < 2048) {
+    global_worker(0, n, 0);
+  } else {
+    parallel_for_chunks(n, threads, global_worker);
+  }
+
+  long double global_sum = 0.0L;
+  std::size_t global_count = 0u;
+  for (int thread_id = 0; thread_id < threads; ++thread_id) {
+    global_sum += thread_sums[static_cast<std::size_t>(thread_id)];
+    global_count += thread_counts[static_cast<std::size_t>(thread_id)];
+  }
+  const double global_mean = global_count > 0u ?
+    static_cast<double>(global_sum / static_cast<long double>(global_count)) :
+    1.0;
+
+  auto membership_sum = [&](const int row, const double rho, const double sigma) {
+    double sum = 0.0;
+    const double safe_sigma = std::max(sigma, 1.0e-12);
+    for (int col = 0; col < k; ++col) {
+      const float raw = graph.distances[static_cast<std::size_t>(col) * n + row];
+      if (!std::isfinite(raw)) continue;
+      const double distance = static_cast<double>(raw) - rho;
+      sum += distance <= 0.0 ? 1.0 : std::exp(-distance / safe_sigma);
+    }
+    return sum;
+  };
+
+  auto worker = [&](const int begin, const int end, const int) {
+    for (int row = begin; row < end; ++row) {
+      double rho = std::numeric_limits<double>::infinity();
+      double row_sum = 0.0;
+      int row_count = 0;
+      for (int col = 0; col < k; ++col) {
+        const float distance =
+          graph.distances[static_cast<std::size_t>(col) * n + row];
+        if (!std::isfinite(distance)) continue;
+        if (distance >= 0.0f) {
+          row_sum += static_cast<double>(distance);
+          ++row_count;
+        }
+        if (distance > 0.0f && static_cast<double>(distance) < rho) {
+          rho = static_cast<double>(distance);
+        }
+      }
+      if (!std::isfinite(rho)) rho = 0.0;
+      rhos[static_cast<std::size_t>(row)] = static_cast<float>(rho);
+
+      constexpr double sigma_max = (std::numeric_limits<double>::max)();
+      double sigma = 1.0;
+      double best_sigma = sigma;
+      double best_diff = sigma_max;
+      double lo = 0.0;
+      double hi = sigma_max;
+      for (int iter = 0; iter < 64; ++iter) {
+        const double sum = membership_sum(row, rho, sigma);
+        const double diff = std::abs(sum - target);
+        if (diff < best_diff) {
+          best_diff = diff;
+          best_sigma = sigma;
+        }
+        if (sum > target) {
+          hi = sigma;
+          sigma = 0.5 * (lo + hi);
+        } else {
+          lo = sigma;
+          sigma = hi == sigma_max ? sigma * 2.0 : 0.5 * (lo + hi);
+        }
+        if (diff < tol) break;
+      }
+
+      const double row_mean = row_count > 0 ?
+        row_sum / static_cast<double>(row_count) :
+        global_mean;
+      const double sigma_floor =
+        min_k_dist_scale * (rho > 0.0 ? row_mean : global_mean);
+      best_sigma = std::max(best_sigma, sigma_floor);
+      sigmas[static_cast<std::size_t>(row)] =
+        static_cast<float>(std::max(best_sigma, 1.0e-12));
+    }
+  };
+  if (threads == 1 || n < 2048) {
+    worker(0, n, 0);
+  } else {
+    parallel_for_chunks(n, threads, worker);
+  }
+}
+
+void attach_umap_epoch_schedule(CsrGraph& graph) {
+  graph.max_weight = 0.0f;
+  for (const float weight : graph.weights) {
+    if (std::isfinite(weight) && weight > graph.max_weight) {
+      graph.max_weight = weight;
+    }
+  }
+  graph.epochs_per_sample.resize(graph.weights.size());
+  if (graph.max_weight <= 0.0f) {
+    std::fill(
+      graph.epochs_per_sample.begin(),
+      graph.epochs_per_sample.end(),
+      std::numeric_limits<float>::infinity()
+    );
+    return;
+  }
+  for (std::size_t i = 0; i < graph.weights.size(); ++i) {
+    graph.epochs_per_sample[i] =
+      graph.max_weight / std::max(graph.weights[i], 1.0e-6f);
+  }
+}
+
+int compact_umap_directed_rows(
+  const std::vector<int>& raw_offsets,
+  const std::vector<int>& row_ends,
+  std::vector<int>& neighbors,
+  std::vector<float>* weights,
+  std::vector<int>& offsets,
+  const int n_threads
+) {
+  const int n = static_cast<int>(raw_offsets.size()) - 1;
+  offsets.assign(static_cast<std::size_t>(n) + 1u, 0);
+  std::vector<int> counts(static_cast<std::size_t>(n), 0);
+
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      const int begin = raw_offsets[static_cast<std::size_t>(row)];
+      const int end = row_ends[static_cast<std::size_t>(row)];
+      for (int pos = begin + 1; pos < end; ++pos) {
+        const int neighbor = neighbors[static_cast<std::size_t>(pos)];
+        const float weight = weights == nullptr ? 1.0f : (*weights)[static_cast<std::size_t>(pos)];
+        int cursor = pos;
+        while (cursor > begin &&
+               neighbors[static_cast<std::size_t>(cursor - 1)] > neighbor) {
+          neighbors[static_cast<std::size_t>(cursor)] =
+            neighbors[static_cast<std::size_t>(cursor - 1)];
+          if (weights != nullptr) {
+            (*weights)[static_cast<std::size_t>(cursor)] =
+              (*weights)[static_cast<std::size_t>(cursor - 1)];
+          }
+          --cursor;
+        }
+        neighbors[static_cast<std::size_t>(cursor)] = neighbor;
+        if (weights != nullptr) (*weights)[static_cast<std::size_t>(cursor)] = weight;
+      }
+
+      int count = 0;
+      int read = begin;
+      while (read < end) {
+        const int neighbor = neighbors[static_cast<std::size_t>(read++)];
+        while (read < end && neighbors[static_cast<std::size_t>(read)] == neighbor) {
+          ++read;
+        }
+        ++count;
+      }
+      counts[static_cast<std::size_t>(row)] = count;
+    }
   });
+
+  for (int row = 0; row < n; ++row) {
+    offsets[static_cast<std::size_t>(row + 1)] =
+      offsets[static_cast<std::size_t>(row)] + counts[static_cast<std::size_t>(row)];
+  }
+  const int compact_size = offsets[static_cast<std::size_t>(n)];
+  std::vector<int> compact_neighbors(static_cast<std::size_t>(compact_size));
+  std::vector<float> compact_weights;
+  if (weights != nullptr) compact_weights.resize(static_cast<std::size_t>(compact_size));
+
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      int write = offsets[static_cast<std::size_t>(row)];
+      int read = raw_offsets[static_cast<std::size_t>(row)];
+      const int end = row_ends[static_cast<std::size_t>(row)];
+      while (read < end) {
+        const int neighbor = neighbors[static_cast<std::size_t>(read)];
+        float weight = weights == nullptr ? 1.0f : (*weights)[static_cast<std::size_t>(read)];
+        ++read;
+        while (read < end && neighbors[static_cast<std::size_t>(read)] == neighbor) {
+          if (weights != nullptr) {
+            weight = std::max(weight, (*weights)[static_cast<std::size_t>(read)]);
+          }
+          ++read;
+        }
+        compact_neighbors[static_cast<std::size_t>(write)] = neighbor;
+        if (weights != nullptr) compact_weights[static_cast<std::size_t>(write)] = weight;
+        ++write;
+      }
+    }
+  });
+
+  neighbors.swap(compact_neighbors);
+  if (weights != nullptr) weights->swap(compact_weights);
+  return compact_size;
 }
 
 CsrGraph build_umap_csr_graph(const PreparedGraph& graph, const int n_threads = 1) {
@@ -418,84 +593,373 @@ CsrGraph build_umap_csr_graph(const PreparedGraph& graph, const int n_threads = 
   std::vector<float> rhos;
   smooth_knn_dist(graph, sigmas, rhos, n_threads);
 
-  std::vector<std::vector<std::pair<int, float>>> directed(static_cast<std::size_t>(n));
+  std::vector<int> raw_counts(static_cast<std::size_t>(n), 0);
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      int count = 0;
+      for (int col = 0; col < k; ++col) {
+        const int neighbor = graph.indices[static_cast<std::size_t>(col) * n + row];
+        const float distance = graph.distances[static_cast<std::size_t>(col) * n + row];
+        if (neighbor >= 0 && neighbor < n && neighbor != row && std::isfinite(distance)) {
+          ++count;
+        }
+      }
+      raw_counts[static_cast<std::size_t>(row)] = count;
+    }
+  });
+
+  std::vector<int> raw_offsets(static_cast<std::size_t>(n) + 1u, 0);
   for (int row = 0; row < n; ++row) {
-    directed[static_cast<std::size_t>(row)].reserve(static_cast<std::size_t>(k));
-    for (int j = 0; j < k; ++j) {
-      const int nb = graph.indices[static_cast<std::size_t>(j) * n + row];
-      const float d = graph.distances[static_cast<std::size_t>(j) * n + row];
-      if (nb < 0 || nb >= n || nb == row || !std::isfinite(d)) continue;
+    raw_offsets[static_cast<std::size_t>(row + 1)] =
+      raw_offsets[static_cast<std::size_t>(row)] + raw_counts[static_cast<std::size_t>(row)];
+  }
+  if (raw_offsets[static_cast<std::size_t>(n)] == 0) {
+    throw std::runtime_error("The fuzzy UMAP graph has no usable edges.");
+  }
+
+  std::vector<int> directed_neighbors(
+    static_cast<std::size_t>(raw_offsets[static_cast<std::size_t>(n)])
+  );
+  std::vector<float> directed_weights(directed_neighbors.size());
+  std::vector<int> row_ends = raw_offsets;
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      int write = raw_offsets[static_cast<std::size_t>(row)];
       const float rho = rhos[static_cast<std::size_t>(row)];
       const float sigma = sigmas[static_cast<std::size_t>(row)];
-      const float w = d <= rho ? 1.0f : std::exp(-(d - rho) / sigma);
-      if (std::isfinite(w) && w > 1.0e-6f) directed[static_cast<std::size_t>(row)].push_back({nb, w});
-    }
-    std::sort(directed[static_cast<std::size_t>(row)].begin(), directed[static_cast<std::size_t>(row)].end());
-  }
-
-  std::vector<std::vector<std::pair<int, float>>> incoming(static_cast<std::size_t>(n));
-  for (int row = 0; row < n; ++row) {
-    for (const auto& edge : directed[static_cast<std::size_t>(row)]) {
-      incoming[static_cast<std::size_t>(edge.first)].push_back({row, edge.second});
-    }
-  }
-  for (auto& row : incoming) std::sort(row.begin(), row.end());
-
-  CsrGraph out;
-  out.offsets.resize(static_cast<std::size_t>(n) + 1u, 0);
-  std::vector<std::vector<std::pair<int, float>>> rows(static_cast<std::size_t>(n));
-  for (int row = 0; row < n; ++row) {
-    const auto& fwd = directed[static_cast<std::size_t>(row)];
-    const auto& rev = incoming[static_cast<std::size_t>(row)];
-    std::size_t a = 0;
-    std::size_t b = 0;
-    while (a < fwd.size() || b < rev.size()) {
-      const int out_nb = a < fwd.size() ? fwd[a].first : std::numeric_limits<int>::max();
-      const int in_nb = b < rev.size() ? rev[b].first : std::numeric_limits<int>::max();
-      int nb = 0;
-      float forward = 0.0f;
-      float reverse = 0.0f;
-      if (out_nb == in_nb) {
-        nb = out_nb;
-        forward = fwd[a].second;
-        reverse = rev[b].second;
-        ++a;
-        ++b;
-      } else if (out_nb < in_nb) {
-        nb = out_nb;
-        forward = fwd[a].second;
-        ++a;
-      } else {
-        nb = in_nb;
-        reverse = rev[b].second;
-        ++b;
+      for (int col = 0; col < k; ++col) {
+        const int neighbor = graph.indices[static_cast<std::size_t>(col) * n + row];
+        const float distance = graph.distances[static_cast<std::size_t>(col) * n + row];
+        if (neighbor < 0 || neighbor >= n || neighbor == row || !std::isfinite(distance)) {
+          continue;
+        }
+        const float weight = distance <= rho ? 1.0f : std::exp(-(distance - rho) / sigma);
+        if (!std::isfinite(weight) || weight <= 0.0f) continue;
+        directed_neighbors[static_cast<std::size_t>(write)] = neighbor;
+        directed_weights[static_cast<std::size_t>(write)] = weight;
+        ++write;
       }
-      if (nb < 0 || nb >= n || nb == row) continue;
-      const float w = forward + reverse - forward * reverse;
-      if (std::isfinite(w) && w > 1.0e-6f) rows[static_cast<std::size_t>(row)].push_back({nb, w});
+      row_ends[static_cast<std::size_t>(row)] = write;
     }
-    out.offsets[static_cast<std::size_t>(row + 1)] =
-      out.offsets[static_cast<std::size_t>(row)] + static_cast<int>(rows[static_cast<std::size_t>(row)].size());
+  });
+
+  std::vector<int> directed_offsets;
+  const int directed_nnz = compact_umap_directed_rows(
+    raw_offsets,
+    row_ends,
+    directed_neighbors,
+    &directed_weights,
+    directed_offsets,
+    n_threads
+  );
+  sigmas.clear();
+  sigmas.shrink_to_fit();
+  rhos.clear();
+  rhos.shrink_to_fit();
+
+  const int graph_threads = effective_cpu_threads(n_threads, n);
+  std::vector<std::vector<int>> incoming_cursor(
+    static_cast<std::size_t>(graph_threads),
+    std::vector<int>(static_cast<std::size_t>(n), 0)
+  );
+  parallel_for_chunks(n, graph_threads, [&](const int begin_row, const int end_row, const int thread_id) {
+    auto& counts = incoming_cursor[static_cast<std::size_t>(thread_id)];
+    for (int row = begin_row; row < end_row; ++row) {
+      for (int pos = directed_offsets[static_cast<std::size_t>(row)];
+           pos < directed_offsets[static_cast<std::size_t>(row + 1)]; ++pos) {
+        ++counts[static_cast<std::size_t>(directed_neighbors[static_cast<std::size_t>(pos)])];
+      }
+    }
+  });
+
+  std::vector<int> incoming_offsets(static_cast<std::size_t>(n) + 1u, 0);
+  for (int row = 0; row < n; ++row) {
+    int count = 0;
+    for (int thread_id = 0; thread_id < graph_threads; ++thread_id) {
+      count += incoming_cursor[static_cast<std::size_t>(thread_id)][static_cast<std::size_t>(row)];
+    }
+    incoming_offsets[static_cast<std::size_t>(row + 1)] =
+      incoming_offsets[static_cast<std::size_t>(row)] + count;
+  }
+  for (int row = 0; row < n; ++row) {
+    int start = incoming_offsets[static_cast<std::size_t>(row)];
+    for (int thread_id = 0; thread_id < graph_threads; ++thread_id) {
+      int& cursor = incoming_cursor[static_cast<std::size_t>(thread_id)][static_cast<std::size_t>(row)];
+      const int count = cursor;
+      cursor = start;
+      start += count;
+    }
   }
 
-  out.neighbors.resize(static_cast<std::size_t>(out.offsets[static_cast<std::size_t>(n)]));
-  out.weights.resize(out.neighbors.size());
-  out.max_weight = 0.0f;
+  std::vector<int> incoming_neighbors(static_cast<std::size_t>(directed_nnz));
+  std::vector<float> incoming_weights(static_cast<std::size_t>(directed_nnz));
+  parallel_for_chunks(n, graph_threads, [&](const int begin_row, const int end_row, const int thread_id) {
+    auto& cursor = incoming_cursor[static_cast<std::size_t>(thread_id)];
+    for (int row = begin_row; row < end_row; ++row) {
+      for (int pos = directed_offsets[static_cast<std::size_t>(row)];
+           pos < directed_offsets[static_cast<std::size_t>(row + 1)]; ++pos) {
+        const int target = directed_neighbors[static_cast<std::size_t>(pos)];
+        const int output = cursor[static_cast<std::size_t>(target)]++;
+        incoming_neighbors[static_cast<std::size_t>(output)] = row;
+        incoming_weights[static_cast<std::size_t>(output)] =
+          directed_weights[static_cast<std::size_t>(pos)];
+      }
+    }
+  });
+  incoming_cursor.clear();
+  incoming_cursor.shrink_to_fit();
+
+  auto merge_row = [&](const int row, const bool write_output, int& output, CsrGraph& result) {
+    int forward_pos = directed_offsets[static_cast<std::size_t>(row)];
+    const int forward_end = directed_offsets[static_cast<std::size_t>(row + 1)];
+    int reverse_pos = incoming_offsets[static_cast<std::size_t>(row)];
+    const int reverse_end = incoming_offsets[static_cast<std::size_t>(row + 1)];
+    int count = 0;
+    while (forward_pos < forward_end || reverse_pos < reverse_end) {
+      const int forward_neighbor = forward_pos < forward_end ?
+        directed_neighbors[static_cast<std::size_t>(forward_pos)] :
+        std::numeric_limits<int>::max();
+      const int reverse_neighbor = reverse_pos < reverse_end ?
+        incoming_neighbors[static_cast<std::size_t>(reverse_pos)] :
+        std::numeric_limits<int>::max();
+      int neighbor = 0;
+      float forward_weight = 0.0f;
+      float reverse_weight = 0.0f;
+      if (forward_neighbor == reverse_neighbor) {
+        neighbor = forward_neighbor;
+        forward_weight = directed_weights[static_cast<std::size_t>(forward_pos++)];
+        reverse_weight = incoming_weights[static_cast<std::size_t>(reverse_pos++)];
+      } else if (forward_neighbor < reverse_neighbor) {
+        neighbor = forward_neighbor;
+        forward_weight = directed_weights[static_cast<std::size_t>(forward_pos++)];
+      } else {
+        neighbor = reverse_neighbor;
+        reverse_weight = incoming_weights[static_cast<std::size_t>(reverse_pos++)];
+      }
+      if (neighbor == row) continue;
+      const float weight =
+        forward_weight + reverse_weight - forward_weight * reverse_weight;
+      if (!std::isfinite(weight) || weight <= 1.0e-6f) continue;
+      if (write_output) {
+        result.neighbors[static_cast<std::size_t>(output)] = neighbor;
+        result.weights[static_cast<std::size_t>(output)] = weight;
+        ++output;
+      }
+      ++count;
+    }
+    return count;
+  };
+
+  std::fill(raw_counts.begin(), raw_counts.end(), 0);
+  CsrGraph unused;
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      int output = 0;
+      raw_counts[static_cast<std::size_t>(row)] = merge_row(row, false, output, unused);
+    }
+  });
+
+  CsrGraph result;
+  result.offsets.resize(static_cast<std::size_t>(n) + 1u, 0);
   for (int row = 0; row < n; ++row) {
-    int pos = out.offsets[static_cast<std::size_t>(row)];
-    for (const auto& edge : rows[static_cast<std::size_t>(row)]) {
-      out.neighbors[static_cast<std::size_t>(pos)] = edge.first;
-      out.weights[static_cast<std::size_t>(pos)] = edge.second;
-      out.max_weight = std::max(out.max_weight, edge.second);
-      ++pos;
+    result.offsets[static_cast<std::size_t>(row + 1)] =
+      result.offsets[static_cast<std::size_t>(row)] + raw_counts[static_cast<std::size_t>(row)];
+  }
+  const int nnz = result.offsets[static_cast<std::size_t>(n)];
+  if (nnz == 0) throw std::runtime_error("The fuzzy UMAP graph has no usable edges.");
+  result.neighbors.resize(static_cast<std::size_t>(nnz));
+  result.weights.resize(static_cast<std::size_t>(nnz));
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      int output = result.offsets[static_cast<std::size_t>(row)];
+      merge_row(row, true, output, result);
+    }
+  });
+  attach_umap_epoch_schedule(result);
+  return result;
+}
+
+CsrGraph build_umap_binary_csr_graph(
+  const PreparedGraph& graph,
+  const int n_threads
+) {
+  const int n = graph.samples;
+  const int k = graph.neighbors;
+  std::vector<int> raw_counts(static_cast<std::size_t>(n), 0);
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      int count = 0;
+      for (int col = 0; col < k; ++col) {
+        const int neighbor = graph.indices[static_cast<std::size_t>(col) * n + row];
+        if (neighbor >= 0 && neighbor < n && neighbor != row) ++count;
+      }
+      raw_counts[static_cast<std::size_t>(row)] = count;
+    }
+  });
+
+  std::vector<int> raw_offsets(static_cast<std::size_t>(n) + 1u, 0);
+  for (int row = 0; row < n; ++row) {
+    raw_offsets[static_cast<std::size_t>(row + 1)] =
+      raw_offsets[static_cast<std::size_t>(row)] + raw_counts[static_cast<std::size_t>(row)];
+  }
+  if (raw_offsets[static_cast<std::size_t>(n)] == 0) {
+    throw std::runtime_error("The binary UMAP graph has no usable edges.");
+  }
+
+  std::vector<int> directed_neighbors(
+    static_cast<std::size_t>(raw_offsets[static_cast<std::size_t>(n)])
+  );
+  std::vector<int> row_ends = raw_offsets;
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      int write = raw_offsets[static_cast<std::size_t>(row)];
+      for (int col = 0; col < k; ++col) {
+        const int neighbor = graph.indices[static_cast<std::size_t>(col) * n + row];
+        if (neighbor < 0 || neighbor >= n || neighbor == row) continue;
+        directed_neighbors[static_cast<std::size_t>(write++)] = neighbor;
+      }
+      row_ends[static_cast<std::size_t>(row)] = write;
+    }
+  });
+
+  std::vector<int> directed_offsets;
+  const int directed_nnz = compact_umap_directed_rows(
+    raw_offsets,
+    row_ends,
+    directed_neighbors,
+    nullptr,
+    directed_offsets,
+    n_threads
+  );
+
+  const int graph_threads = effective_cpu_threads(n_threads, n);
+  std::vector<std::vector<int>> incoming_cursor(
+    static_cast<std::size_t>(graph_threads),
+    std::vector<int>(static_cast<std::size_t>(n), 0)
+  );
+  parallel_for_chunks(n, graph_threads, [&](const int begin_row, const int end_row, const int thread_id) {
+    auto& counts = incoming_cursor[static_cast<std::size_t>(thread_id)];
+    for (int row = begin_row; row < end_row; ++row) {
+      for (int pos = directed_offsets[static_cast<std::size_t>(row)];
+           pos < directed_offsets[static_cast<std::size_t>(row + 1)]; ++pos) {
+        ++counts[static_cast<std::size_t>(directed_neighbors[static_cast<std::size_t>(pos)])];
+      }
+    }
+  });
+
+  std::vector<int> incoming_offsets(static_cast<std::size_t>(n) + 1u, 0);
+  for (int row = 0; row < n; ++row) {
+    int count = 0;
+    for (int thread_id = 0; thread_id < graph_threads; ++thread_id) {
+      count += incoming_cursor[static_cast<std::size_t>(thread_id)][static_cast<std::size_t>(row)];
+    }
+    incoming_offsets[static_cast<std::size_t>(row + 1)] =
+      incoming_offsets[static_cast<std::size_t>(row)] + count;
+  }
+  for (int row = 0; row < n; ++row) {
+    int start = incoming_offsets[static_cast<std::size_t>(row)];
+    for (int thread_id = 0; thread_id < graph_threads; ++thread_id) {
+      int& cursor = incoming_cursor[static_cast<std::size_t>(thread_id)][static_cast<std::size_t>(row)];
+      const int count = cursor;
+      cursor = start;
+      start += count;
     }
   }
-  if (out.max_weight <= 0.0f) out.max_weight = 1.0f;
-  out.epochs_per_sample.resize(out.weights.size());
-  for (std::size_t i = 0; i < out.weights.size(); ++i) {
-    out.epochs_per_sample[i] = out.max_weight / std::max(out.weights[i], 1.0e-6f);
+
+  std::vector<int> incoming_neighbors(static_cast<std::size_t>(directed_nnz));
+  parallel_for_chunks(n, graph_threads, [&](const int begin_row, const int end_row, const int thread_id) {
+    auto& cursor = incoming_cursor[static_cast<std::size_t>(thread_id)];
+    for (int row = begin_row; row < end_row; ++row) {
+      for (int pos = directed_offsets[static_cast<std::size_t>(row)];
+           pos < directed_offsets[static_cast<std::size_t>(row + 1)]; ++pos) {
+        const int target = directed_neighbors[static_cast<std::size_t>(pos)];
+        incoming_neighbors[static_cast<std::size_t>(cursor[static_cast<std::size_t>(target)]++)] = row;
+      }
+    }
+  });
+
+  auto merge_count = [&](const int row) {
+    int forward_pos = directed_offsets[static_cast<std::size_t>(row)];
+    const int forward_end = directed_offsets[static_cast<std::size_t>(row + 1)];
+    int reverse_pos = incoming_offsets[static_cast<std::size_t>(row)];
+    const int reverse_end = incoming_offsets[static_cast<std::size_t>(row + 1)];
+    int count = 0;
+    while (forward_pos < forward_end || reverse_pos < reverse_end) {
+      const int forward_neighbor = forward_pos < forward_end ?
+        directed_neighbors[static_cast<std::size_t>(forward_pos)] :
+        std::numeric_limits<int>::max();
+      const int reverse_neighbor = reverse_pos < reverse_end ?
+        incoming_neighbors[static_cast<std::size_t>(reverse_pos)] :
+        std::numeric_limits<int>::max();
+      if (forward_neighbor == reverse_neighbor) {
+        ++forward_pos;
+        ++reverse_pos;
+      } else if (forward_neighbor < reverse_neighbor) {
+        ++forward_pos;
+      } else {
+        ++reverse_pos;
+      }
+      ++count;
+    }
+    return count;
+  };
+
+  std::fill(raw_counts.begin(), raw_counts.end(), 0);
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      raw_counts[static_cast<std::size_t>(row)] = merge_count(row);
+    }
+  });
+
+  CsrGraph result;
+  result.offsets.resize(static_cast<std::size_t>(n) + 1u, 0);
+  for (int row = 0; row < n; ++row) {
+    result.offsets[static_cast<std::size_t>(row + 1)] =
+      result.offsets[static_cast<std::size_t>(row)] + raw_counts[static_cast<std::size_t>(row)];
   }
-  return out;
+  const int nnz = result.offsets[static_cast<std::size_t>(n)];
+  result.neighbors.resize(static_cast<std::size_t>(nnz));
+  parallel_for_chunks(n, n_threads, [&](const int begin_row, const int end_row, const int) {
+    for (int row = begin_row; row < end_row; ++row) {
+      int forward_pos = directed_offsets[static_cast<std::size_t>(row)];
+      const int forward_end = directed_offsets[static_cast<std::size_t>(row + 1)];
+      int reverse_pos = incoming_offsets[static_cast<std::size_t>(row)];
+      const int reverse_end = incoming_offsets[static_cast<std::size_t>(row + 1)];
+      int write = result.offsets[static_cast<std::size_t>(row)];
+      while (forward_pos < forward_end || reverse_pos < reverse_end) {
+        const int forward_neighbor = forward_pos < forward_end ?
+          directed_neighbors[static_cast<std::size_t>(forward_pos)] :
+          std::numeric_limits<int>::max();
+        const int reverse_neighbor = reverse_pos < reverse_end ?
+          incoming_neighbors[static_cast<std::size_t>(reverse_pos)] :
+          std::numeric_limits<int>::max();
+        if (forward_neighbor == reverse_neighbor) {
+          result.neighbors[static_cast<std::size_t>(write++)] = forward_neighbor;
+          ++forward_pos;
+          ++reverse_pos;
+        } else if (forward_neighbor < reverse_neighbor) {
+          result.neighbors[static_cast<std::size_t>(write++)] = forward_neighbor;
+          ++forward_pos;
+        } else {
+          result.neighbors[static_cast<std::size_t>(write++)] = reverse_neighbor;
+          ++reverse_pos;
+        }
+      }
+    }
+  });
+  result.weights.assign(static_cast<std::size_t>(nnz), 1.0f);
+  result.epochs_per_sample.assign(static_cast<std::size_t>(nnz), 1.0f);
+  result.max_weight = 1.0f;
+  return result;
+}
+
+CsrGraph build_selected_umap_graph(
+  const PreparedGraph& graph,
+  const UMAPOptions& options
+) {
+  return options.graph_mode == UMAPGraphMode::Binary ?
+    build_umap_binary_csr_graph(graph, options.n_threads) :
+    build_umap_csr_graph(graph, options.n_threads);
 }
 
 void scale_embedding_max_abs_and_jitter(std::vector<double>& embedding, int n, double scale, double jitter, std::mt19937& rng) {
@@ -827,11 +1291,15 @@ std::vector<float> optimize_umap_csr_cpu(
   const int threads = effective_cpu_threads(options.n_threads, static_cast<int>(active_pos.size()));
 
   if (threads > 1 && n >= 10000) {
-    std::vector<float> x(static_cast<std::size_t>(n));
-    std::vector<float> y(static_cast<std::size_t>(n));
+    std::vector<std::atomic<float>> x(static_cast<std::size_t>(n));
+    std::vector<std::atomic<float>> y(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
-      x[static_cast<std::size_t>(i)] = embedding[static_cast<std::size_t>(i) * 2u];
-      y[static_cast<std::size_t>(i)] = embedding[static_cast<std::size_t>(i) * 2u + 1u];
+      x[static_cast<std::size_t>(i)].store(
+        embedding[static_cast<std::size_t>(i) * 2u], std::memory_order_relaxed
+      );
+      y[static_cast<std::size_t>(i)].store(
+        embedding[static_cast<std::size_t>(i) * 2u + 1u], std::memory_order_relaxed
+      );
     }
 
     ReusableBarrier barrier(threads);
@@ -862,25 +1330,14 @@ std::vector<float> optimize_umap_csr_cpu(
       float alpha = alpha0;
       for (int epoch = 0; epoch < options.n_epochs; ++epoch) {
         TauPrng prng = make_tau_prng(options.seed, epoch, end, t);
-        int cached_head = -1;
-        float cached_head_x = 0.0f;
-        float cached_head_y = 0.0f;
         for (std::size_t edge = begin; edge < end; ++edge) {
           if (epoch_of_next_sample[edge] > epoch) continue;
           const int head = active_rows_ptr[edge];
           const int tail = active_tails_ptr[edge];
-          float head_x;
-          float head_y;
-          if (head == cached_head) {
-            head_x = cached_head_x;
-            head_y = cached_head_y;
-          } else {
-            cached_head = head;
-            head_x = x[static_cast<std::size_t>(head)];
-            head_y = y[static_cast<std::size_t>(head)];
-          }
-          float tail_x = x[static_cast<std::size_t>(tail)];
-          float tail_y = y[static_cast<std::size_t>(tail)];
+          const float head_x = x[static_cast<std::size_t>(head)].load(std::memory_order_relaxed);
+          const float head_y = y[static_cast<std::size_t>(head)].load(std::memory_order_relaxed);
+          const float tail_x = x[static_cast<std::size_t>(tail)].load(std::memory_order_relaxed);
+          const float tail_y = y[static_cast<std::size_t>(tail)].load(std::memory_order_relaxed);
           const float dx = head_x - tail_x;
           const float dy = head_y - tail_y;
           const float dist_sq = std::max(eps, dx * dx + dy * dy);
@@ -889,10 +1346,10 @@ std::vector<float> optimize_umap_csr_cpu(
             attraction_const * dist_pow / (dist_sq * (af * dist_pow + 1.0f));
           const float gx = clip4f(grad_coeff * dx) * alpha;
           const float gy = clip4f(grad_coeff * dy) * alpha;
-          head_x += gx;
-          head_y += gy;
-          tail_x -= gx;
-          tail_y -= gy;
+          atomic_add_float(x[static_cast<std::size_t>(head)], gx);
+          atomic_add_float(y[static_cast<std::size_t>(head)], gy);
+          atomic_add_float(x[static_cast<std::size_t>(tail)], -gx);
+          atomic_add_float(y[static_cast<std::size_t>(tail)], -gy);
           epoch_of_next_sample[edge] += epochs_per_sample_ptr[edge];
 
           int n_neg_samples = 0;
@@ -907,23 +1364,25 @@ std::vector<float> optimize_umap_csr_cpu(
           for (int sample = 0; sample < n_neg_samples; ++sample) {
             const int neg = prng.vertex(n);
             if (neg == head) continue;
-            const float neg_x = neg == tail ? tail_x : x[static_cast<std::size_t>(neg)];
-            const float neg_y = neg == tail ? tail_y : y[static_cast<std::size_t>(neg)];
-            const float ndx = head_x - neg_x;
-            const float ndy = head_y - neg_y;
+            const float current_head_x =
+              x[static_cast<std::size_t>(head)].load(std::memory_order_relaxed);
+            const float current_head_y =
+              y[static_cast<std::size_t>(head)].load(std::memory_order_relaxed);
+            const float neg_x = x[static_cast<std::size_t>(neg)].load(std::memory_order_relaxed);
+            const float neg_y = y[static_cast<std::size_t>(neg)].load(std::memory_order_relaxed);
+            const float ndx = current_head_x - neg_x;
+            const float ndy = current_head_y - neg_y;
             const float neg_dist_sq = std::max(eps, ndx * ndx + ndy * ndy);
             const float neg_pow = umap_powf_fast(neg_dist_sq, bf);
             const float repulse =
               repulsion_const / ((0.001f + neg_dist_sq) * (af * neg_pow + 1.0f));
-            head_x += clip4f(repulse * ndx) * alpha;
-            head_y += clip4f(repulse * ndy) * alpha;
+            atomic_add_float(
+              x[static_cast<std::size_t>(head)], clip4f(repulse * ndx) * alpha
+            );
+            atomic_add_float(
+              y[static_cast<std::size_t>(head)], clip4f(repulse * ndy) * alpha
+            );
           }
-          x[static_cast<std::size_t>(head)] = head_x;
-          y[static_cast<std::size_t>(head)] = head_y;
-          cached_head_x = head_x;
-          cached_head_y = head_y;
-          x[static_cast<std::size_t>(tail)] = tail_x;
-          y[static_cast<std::size_t>(tail)] = tail_y;
           if (n_neg_samples > 0) {
             epoch_of_next_negative_sample[edge] +=
               n_neg_samples * epochs_per_negative_sample_ptr[edge];
@@ -940,8 +1399,10 @@ std::vector<float> optimize_umap_csr_cpu(
     run_worker(0);
     for (auto& worker : workers) worker.join();
     for (int i = 0; i < n; ++i) {
-      embedding[static_cast<std::size_t>(i) * 2u] = x[static_cast<std::size_t>(i)];
-      embedding[static_cast<std::size_t>(i) * 2u + 1u] = y[static_cast<std::size_t>(i)];
+      embedding[static_cast<std::size_t>(i) * 2u] =
+        x[static_cast<std::size_t>(i)].load(std::memory_order_relaxed);
+      embedding[static_cast<std::size_t>(i) * 2u + 1u] =
+        y[static_cast<std::size_t>(i)].load(std::memory_order_relaxed);
     }
     return embedding;
   }
@@ -1187,9 +1648,6 @@ SparseProbabilitiesF build_tsne_probabilities_float(
 ) {
   const int n = graph.samples;
   const int k = graph.neighbors;
-  if (perplexity > static_cast<double>(k)) {
-    throw std::invalid_argument("openTSNE perplexity is larger than the supplied KNN width.");
-  }
   for (int row = 0; row < n; ++row) {
     for (int j = 0; j < k; ++j) {
       const int nb = graph.indices[static_cast<std::size_t>(j) * n + row];
@@ -1807,6 +2265,39 @@ void apply_open_tsne_update_f(
   });
 }
 
+void validate_opentsne_options(
+  const OpenTSNEOptions& options,
+  const int samples
+) {
+  if (!std::isfinite(options.perplexity) || options.perplexity <= 0.0) {
+    throw std::invalid_argument("openTSNE perplexity must be positive and finite.");
+  }
+  if (samples - 1 < 3.0 * options.perplexity) {
+    throw std::invalid_argument("openTSNE perplexity is too large for the number of samples.");
+  }
+  if (options.theta < 0.0 || options.theta > 1.0) {
+    throw std::invalid_argument("openTSNE theta must lie in [0, 1].");
+  }
+  if (options.early_exaggeration_iter < 0 || options.n_iter < 0 ||
+      options.early_exaggeration_iter + options.n_iter < 1) {
+    throw std::invalid_argument("openTSNE iteration counts must be non-negative and sum to at least one.");
+  }
+  if (!std::isfinite(options.early_exaggeration) || options.early_exaggeration <= 0.0 ||
+      !std::isfinite(options.exaggeration) || options.exaggeration <= 0.0) {
+    throw std::invalid_argument("openTSNE exaggeration values must be positive and finite.");
+  }
+  if (options.learning_rate <= 0.0 && !options.learning_rate_auto) {
+    throw std::invalid_argument("openTSNE learning_rate must be positive or automatic.");
+  }
+  if (!std::isfinite(options.initial_momentum) || options.initial_momentum < 0.0 ||
+      !std::isfinite(options.final_momentum) || options.final_momentum < 0.0) {
+    throw std::invalid_argument("openTSNE momentum values must be non-negative and finite.");
+  }
+  if (!std::isfinite(options.min_gain) || options.min_gain <= 0.0) {
+    throw std::invalid_argument("openTSNE min_gain must be positive and finite.");
+  }
+}
+
 std::vector<float> optimize_opentsne_cpu(
   const PreparedGraph& graph,
   const OpenTSNEOptions& options
@@ -1815,15 +2306,7 @@ std::vector<float> optimize_opentsne_cpu(
     throw std::invalid_argument("CPU openTSNE supports n_components in 1..3.");
   }
   const int n = graph.samples;
-  if (n - 1 < 3.0 * options.perplexity) {
-    throw std::invalid_argument("openTSNE perplexity is too large for the number of samples.");
-  }
-  if (options.early_exaggeration_iter + options.n_iter < 1) {
-    throw std::invalid_argument("openTSNE needs at least one optimization iteration.");
-  }
-  if (options.learning_rate <= 0.0 && !options.learning_rate_auto) {
-    throw std::invalid_argument("openTSNE learning_rate must be positive or automatic.");
-  }
+  validate_opentsne_options(options, n);
   const int threads = effective_cpu_threads(options.n_threads, n);
   SparseProbabilitiesF p = build_tsne_probabilities_float(graph, options.perplexity, threads);
 
@@ -1949,6 +2432,32 @@ const char* cuda_embedding_error() {
 }  // namespace
 #endif
 
+namespace {
+void validate_umap_options(const UMAPOptions& options) {
+  if (options.n_epochs < 0) {
+    throw std::invalid_argument("UMAP n_epochs must be non-negative.");
+  }
+  if (!std::isfinite(options.min_dist) || options.min_dist < 0.0) {
+    throw std::invalid_argument("UMAP min_dist must be non-negative and finite.");
+  }
+  if (options.negative_sample_rate < 0) {
+    throw std::invalid_argument("UMAP negative_sample_rate must be non-negative.");
+  }
+  if (!std::isfinite(options.learning_rate) || options.learning_rate <= 0.0) {
+    throw std::invalid_argument("UMAP learning_rate must be positive and finite.");
+  }
+  if (!std::isfinite(options.repulsion_strength) || options.repulsion_strength <= 0.0) {
+    throw std::invalid_argument("UMAP repulsion_strength must be positive and finite.");
+  }
+  if (options.spectral_n_iter < 1) {
+    throw std::invalid_argument("UMAP spectral_n_iter must be positive.");
+  }
+  if (options.n_threads < 1) {
+    throw std::invalid_argument("UMAP n_threads must be positive.");
+  }
+}
+}  // namespace
+
 EmbeddingResult KODAMAUMAP_CPU(
   const NeighborGraph& graph,
   const UMAPOptions& options
@@ -1956,9 +2465,10 @@ EmbeddingResult KODAMAUMAP_CPU(
   if (options.n_components != 2) {
     throw std::invalid_argument("CPU UMAP currently supports n_components=2.");
   }
+  validate_umap_options(options);
   const auto started = Clock::now();
   PreparedGraph prepared = prepare_graph(graph, options.n_neighbors);
-  CsrGraph csr = build_umap_csr_graph(prepared, options.n_threads);
+  CsrGraph csr = build_selected_umap_graph(prepared, options);
   EmbeddingResult result;
   result.samples = prepared.samples;
   result.components = 2;
@@ -1979,12 +2489,13 @@ EmbeddingResult KODAMAUMAP_CUDA(
   if (options.n_components != 2) {
     throw std::invalid_argument("CUDA UMAP currently supports n_components=2.");
   }
+  validate_umap_options(options);
   if (!fastembedr_cuda_available()) {
     throw std::runtime_error("No CUDA device is available for KODAMA UMAP.");
   }
   const auto started = Clock::now();
   PreparedGraph prepared = prepare_graph(graph, options.n_neighbors);
-  CsrGraph csr = build_umap_csr_graph(prepared, options.n_threads);
+  CsrGraph csr = build_selected_umap_graph(prepared, options);
   if (csr.neighbors.empty()) {
     throw std::runtime_error("CUDA UMAP requires at least one graph edge.");
   }
@@ -2077,6 +2588,7 @@ EmbeddingResult KODAMAOpenTSNE_CUDA(
     options.n_neighbors :
     static_cast<int>(std::ceil(options.perplexity));
   PreparedGraph prepared = prepare_graph(graph, requested_neighbors);
+  validate_opentsne_options(options, prepared.samples);
   std::vector<float> init = options.init;
   int has_init = static_cast<int>(init.size() == static_cast<std::size_t>(prepared.samples) * 2u);
   if (!has_init) {

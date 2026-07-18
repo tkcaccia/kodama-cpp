@@ -1,4 +1,7 @@
 #!/usr/bin/env Rscript
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 
 get_env <- function(name, default) {
   value <- Sys.getenv(name, "")

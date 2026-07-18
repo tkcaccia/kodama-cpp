@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #include <Rcpp.h>
 
 #include "kodama/kodama.hpp"
@@ -14,7 +17,14 @@ kodama::DistanceMetric parse_metric(const std::string& metric) {
 kodama::Backend parse_backend(const std::string& backend) {
   if (backend == "cpu") return kodama::Backend::CPU;
   if (backend == "cuda") return kodama::Backend::CUDA;
+  if (backend == "metal") return kodama::Backend::Metal;
   Rcpp::stop("Unsupported backend: " + backend);
+}
+
+kodama::UMAPGraphMode parse_umap_graph_mode(const std::string& mode) {
+  if (mode == "binary") return kodama::UMAPGraphMode::Binary;
+  if (mode == "fuzzy") return kodama::UMAPGraphMode::Fuzzy;
+  Rcpp::stop("Unsupported UMAP graph mode: " + mode);
 }
 
 kodama::CoreClassifier parse_classifier(const std::string& classifier) {
@@ -208,6 +218,49 @@ Rcpp::NumericMatrix embedding_to_r(const kodama::EmbeddingResult& result) {
   out.attr("runtime_seconds") = result.runtime_seconds;
   out.attr("backend") = kodama::to_string(result.backend);
   return out;
+}
+
+Rcpp::List pca_to_r(const kodama::PCAResult& result) {
+  Rcpp::NumericMatrix scores(result.samples, result.components);
+  Rcpp::NumericMatrix loadings(result.variables, result.components);
+  for (int row = 0; row < result.samples; ++row) {
+    for (int component = 0; component < result.components; ++component) {
+      scores(row, component) = result.scores[
+        static_cast<std::size_t>(row) * result.components + component
+      ];
+    }
+  }
+  for (int variable = 0; variable < result.variables; ++variable) {
+    for (int component = 0; component < result.components; ++component) {
+      loadings(variable, component) = result.loadings[
+        static_cast<std::size_t>(variable) * result.components + component
+      ];
+    }
+  }
+  return Rcpp::List::create(
+    Rcpp::Named("scores") = scores,
+    Rcpp::Named("loadings") = loadings,
+    Rcpp::Named("singular_values") = Rcpp::NumericVector(
+      result.singular_values.begin(), result.singular_values.end()
+    ),
+    Rcpp::Named("sdev") = Rcpp::NumericVector(result.sdev.begin(), result.sdev.end()),
+    Rcpp::Named("variance") = Rcpp::NumericVector(result.variance.begin(), result.variance.end()),
+    Rcpp::Named("variance_explained") = Rcpp::NumericVector(
+      result.variance_explained.begin(), result.variance_explained.end()
+    ),
+    Rcpp::Named("cumulative_variance_explained") = Rcpp::NumericVector(
+      result.cumulative_variance_explained.begin(), result.cumulative_variance_explained.end()
+    ),
+    Rcpp::Named("total_variance") = result.total_variance,
+    Rcpp::Named("center") = Rcpp::NumericVector(result.center.begin(), result.center.end()),
+    Rcpp::Named("scale") = Rcpp::NumericVector(result.scale.begin(), result.scale.end()),
+    Rcpp::Named("ncomp") = result.components,
+    Rcpp::Named("oversample") = result.oversample,
+    Rcpp::Named("power") = result.power_iterations,
+    Rcpp::Named("backend") = kodama::to_string(result.backend),
+    Rcpp::Named("precision") = "float32",
+    Rcpp::Named("runtime_seconds") = result.runtime_seconds
+  );
 }
 
 Rcpp::List kodama_matrix_result_to_r(
@@ -617,6 +670,38 @@ Rcpp::List kodama_knn_graph_cpp(
 }
 
 // [[Rcpp::export]]
+Rcpp::List kodama_pca_cpp(
+  Rcpp::NumericMatrix data,
+  int ncomp = 2,
+  bool center = true,
+  bool scale = false,
+  std::string backend = "cpu",
+  int seed = 4,
+  int n_threads = 1,
+  int gpu_device = 0,
+  int oversample = -1,
+  int power = -1
+) {
+  const int n = data.nrow();
+  const int p = data.ncol();
+  std::vector<float> x = matrix_to_float(data);
+  kodama::PCAOptions options;
+  options.n_components = ncomp;
+  options.center = center;
+  options.scale = scale;
+  options.backend = parse_backend(backend);
+  options.seed = static_cast<std::uint64_t>(seed);
+  options.n_threads = n_threads;
+  options.gpu_device = gpu_device;
+  options.oversample = oversample;
+  options.power_iterations = power;
+  return pca_to_r(kodama::PCA(
+    kodama::MatrixView{x.data(), static_cast<std::size_t>(n), static_cast<std::size_t>(p)},
+    options
+  ));
+}
+
+// [[Rcpp::export]]
 Rcpp::NumericMatrix kodama_umap_cpp(
   Rcpp::IntegerMatrix indices,
   Rcpp::NumericMatrix distances,
@@ -631,7 +716,8 @@ Rcpp::NumericMatrix kodama_umap_cpp(
   int n_threads = 1,
   int seed = 1234,
   std::string backend = "cpu",
-  int gpu_device = 0
+  int gpu_device = 0,
+  std::string graph_mode = "binary"
 ) {
   kodama::UMAPOptions options;
   options.n_neighbors = n_neighbors;
@@ -644,6 +730,7 @@ Rcpp::NumericMatrix kodama_umap_cpp(
   options.n_threads = n_threads;
   options.seed = seed;
   options.gpu_device = gpu_device;
+  options.graph_mode = parse_umap_graph_mode(graph_mode);
   if (!init.isNull()) {
     Rcpp::NumericMatrix init_matrix(init);
     if (init_matrix.nrow() != indices.nrow() || init_matrix.ncol() != 2) Rcpp::stop("init must have nrow(indices) rows and 2 columns.");

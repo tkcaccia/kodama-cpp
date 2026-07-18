@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 import numpy as np
 
 import kodama
@@ -51,16 +54,40 @@ def test_public_api_cpu():
     pls = kodama.PLSLDACV(x, labels, folds=3, ncomp=2, backend="cpu")
     core_knn = kodama.CoreKNN(x, labels, cycles=1, folds=3, k=3, backend="cpu")
     core_pls = kodama.CorePLSLDA(x, labels, cycles=1, folds=3, ncomp=2, backend="cpu")
+    pca = kodama.PCA(x, ncomp=3, backend="cpu", seed=4)
     graph = kodama.graph(x, k=5, backend="cpu")
-    emb = kodama.visualization(graph, method="UMAP", k=5, n_epochs=3, backend="cpu")
+    emb = kodama.visualization(
+        graph,
+        method="UMAP",
+        k=5,
+        n_epochs=3,
+        backend="cpu",
+        graph_mode="binary",
+    )
+    emb_fuzzy = kodama.visualization(
+        graph,
+        method="UMAP",
+        k=5,
+        n_epochs=3,
+        backend="cpu",
+        graph_mode="fuzzy",
+    )
     clu = kodama.clustering(graph, n_iterations=2, random_walk_steps=2)
 
     assert knncv["predicted"].shape == (60,)
     assert pls["predicted"].shape == (60,)
     assert core_knn["clbest"].shape == (60,)
     assert core_pls["clbest"].shape == (60,)
+    assert pca["scores"].shape == (60, 3)
+    assert pca["loadings"].shape == (5, 3)
+    assert pca["scores"].dtype == np.float32
+    assert pca["precision"] == "float32"
+    assert np.all(np.diff(pca["singular_values"]) <= 1e-5)
     assert graph["indices"].shape == (60, 5)
     assert emb.shape == (60, 2)
+    assert emb_fuzzy.shape == (60, 2)
+    assert np.all(np.isfinite(emb))
+    assert np.all(np.isfinite(emb_fuzzy))
     assert clu["membership"].shape == (60,)
 
 

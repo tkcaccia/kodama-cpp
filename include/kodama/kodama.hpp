@@ -1,4 +1,9 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #pragma once
+
+#include "kodama/version.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -47,6 +52,11 @@ enum class GraphWeightType {
 
 enum class GraphFeatureMode {
   LaplacianSelfTuning
+};
+
+enum class UMAPGraphMode {
+  Binary,
+  Fuzzy
 };
 
 enum class MatrixValueType {
@@ -359,13 +369,14 @@ struct UMAPOptions {
   int n_threads = 1;
   int seed = 1234;
   int gpu_device = 0;
+  UMAPGraphMode graph_mode = UMAPGraphMode::Binary;
   std::vector<float> init;
 };
 
 struct OpenTSNEOptions {
   int n_components = 2;
   int n_neighbors = 0;
-  double perplexity = 15.0;
+  double perplexity = 30.0;
   double theta = 0.5;
   int early_exaggeration_iter = 250;
   int n_iter = 500;
@@ -388,6 +399,38 @@ struct EmbeddingResult {
   int samples = 0;
   int components = 2;
   Backend backend = Backend::CPU;
+  double runtime_seconds = 0.0;
+};
+
+struct PCAOptions {
+  int n_components = 2;
+  bool center = true;
+  bool scale = false;
+  int oversample = -1;
+  int power_iterations = -1;
+  int n_threads = 1;
+  std::uint64_t seed = 4;
+  int gpu_device = 0;
+  Backend backend = Backend::CPU;
+};
+
+struct PCAResult {
+  std::vector<float> scores;
+  std::vector<float> loadings;
+  std::vector<float> singular_values;
+  std::vector<float> sdev;
+  std::vector<float> variance;
+  std::vector<float> variance_explained;
+  std::vector<float> cumulative_variance_explained;
+  std::vector<float> center;
+  std::vector<float> scale;
+  int samples = 0;
+  int variables = 0;
+  int components = 0;
+  int oversample = 0;
+  int power_iterations = 0;
+  Backend backend = Backend::CPU;
+  double total_variance = 0.0;
   double runtime_seconds = 0.0;
 };
 
@@ -713,6 +756,26 @@ EmbeddingResult KODAMAOpenTSNE_CUDA(
 EmbeddingResult KODAMAOpenTSNE_CPU(
   const NeighborGraph& graph,
   const OpenTSNEOptions& options = OpenTSNEOptions()
+);
+
+PCAResult PCA(
+  MatrixView x,
+  const PCAOptions& options = PCAOptions()
+);
+
+PCAResult PCA_CPU(
+  MatrixView x,
+  const PCAOptions& options = PCAOptions()
+);
+
+PCAResult PCA_CUDA(
+  MatrixView x,
+  const PCAOptions& options = PCAOptions()
+);
+
+PCAResult PCA_METAL(
+  MatrixView x,
+  const PCAOptions& options = PCAOptions()
 );
 
 NeighborGraph KODAMAKNNGraph_CPU(

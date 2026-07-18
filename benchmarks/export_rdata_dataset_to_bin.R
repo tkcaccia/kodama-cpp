@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 3) {
   stop("Usage: export_rdata_dataset_to_bin.R <dataset_name> <input.RData> <output_dir>", call. = FALSE)

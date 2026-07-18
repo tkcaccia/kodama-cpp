@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
+#include <algorithm>
 #include <iostream>
 #include <cmath>
 #include <vector>
@@ -67,6 +71,32 @@ int main() {
   if (graph.neighbors != 5 || graph.indices.size() != static_cast<std::size_t>(samples * 5)) {
     std::cerr << "Metal graph smoke test failed.\n";
     return 1;
+  }
+
+  kodama::PCAOptions pca_options;
+  pca_options.n_components = 3;
+  pca_options.oversample = 1;
+  pca_options.power_iterations = 1;
+  pca_options.seed = 7;
+  const kodama::PCAResult pca_cpu = kodama::PCA_CPU(
+    kodama::MatrixView{x.data(), samples, dimensions}, pca_options
+  );
+  const kodama::PCAResult pca_metal = kodama::PCA_METAL(
+    kodama::MatrixView{x.data(), samples, dimensions}, pca_options
+  );
+  if (pca_metal.backend != kodama::Backend::Metal ||
+      pca_metal.scores.size() != static_cast<std::size_t>(samples * 3) ||
+      pca_metal.loadings.size() != static_cast<std::size_t>(dimensions * 3)) {
+    std::cerr << "Metal PCA dimensions or backend metadata failed.\n";
+    return 1;
+  }
+  for (int component = 0; component < 3; ++component) {
+    const float reference = std::max(1.0f, pca_cpu.singular_values[static_cast<std::size_t>(component)]);
+    if (std::abs(pca_cpu.singular_values[static_cast<std::size_t>(component)] -
+                 pca_metal.singular_values[static_cast<std::size_t>(component)]) / reference > 2e-3f) {
+      std::cerr << "Metal PCA singular values disagree with CPU.\n";
+      return 1;
+    }
   }
 
   kodama::KODAMAMatrixOptions matrix_options;
@@ -151,6 +181,6 @@ int main() {
     std::cerr << "Metal clustering silently fell back to CPU.\n";
     return 1;
   }
-  std::cout << "Metal KNN smoke test passed.\n";
+  std::cout << "Metal KNN and PCA smoke tests passed.\n";
   return 0;
 }

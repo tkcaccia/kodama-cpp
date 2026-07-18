@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 cmake_minimum_required(VERSION 3.18)
 
 project(kodama-cpp
@@ -24,6 +27,7 @@ add_library(kodama_cpp
   src/kodama_matrix.cpp
   src/knncv.cpp
   src/native_knn.cpp
+  src/pca.cpp
   src/plscv.cpp
   src/visualization.cpp
 )
@@ -128,9 +132,9 @@ if(KODAMA_ENABLE_CUDA)
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1)
   target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR})
   target_link_libraries(kodama_cpp PRIVATE ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
-  target_sources(kodama_cpp PRIVATE src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/cuda_simpls_float.cpp src/native_cuda_backend.cu)
+  target_sources(kodama_cpp PRIVATE src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/cuda_simpls_float.cpp src/native_cuda_backend.cu src/pca_cuda.cu)
   set_property(TARGET kodama_cpp PROPERTY CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
-  set_source_files_properties(src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/native_cuda_backend.cu PROPERTIES LANGUAGE CUDA)
+  set_source_files_properties(src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/native_cuda_backend.cu src/pca_cuda.cu PROPERTIES LANGUAGE CUDA)
 endif()
 
 include(GNUInstallDirs)
@@ -161,6 +165,26 @@ install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/kodama-cppConfigVersion.cmake"
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/kodama-cpp
 )
+install(FILES
+  LICENSE
+  PROVENANCE.md
+  THIRD_PARTY_NOTICES.md
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/kodama-cpp
+)
+install(DIRECTORY licenses/
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/kodama-cpp/third-party
+)
+install(FILES
+  API_STABILITY.md
+  CHANGELOG.md
+  CITATION.cff
+  CONTRIBUTING.md
+  README.md
+  RELEASE_CHECKLIST.md
+  docs/previous-version-delta.md
+  docs/release-validation.md
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/kodama-cpp
+)
 
 if(KODAMA_BUILD_EXAMPLES)
   add_executable(kodama_cv_example examples/run_cv.cpp)
@@ -188,8 +212,16 @@ endif()
 
 if(KODAMA_BUILD_TESTS)
   enable_testing()
+  if(UNIX)
+    add_test(
+      NAME kodama_license_audit
+      COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_license_headers.sh
+    )
+  endif()
   add_executable(kodama_cpp_tests tests/test_cv.cpp)
   target_link_libraries(kodama_cpp_tests PRIVATE kodama_cpp)
+  add_executable(kodama_public_api_0_1_tests tests/test_public_api_0_1.cpp)
+  target_link_libraries(kodama_public_api_0_1_tests PRIVATE kodama_cpp)
   if(KODAMA_ENABLE_METAL)
     target_compile_definitions(kodama_cpp_tests PRIVATE KODAMA_ENABLE_METAL=1)
     add_executable(kodama_metal_tests tests/test_metal.cpp)
@@ -201,6 +233,7 @@ if(KODAMA_BUILD_TESTS)
     target_compile_definitions(kodama_cpp_tests PRIVATE KODAMA_ENABLE_CUDA=1)
   endif()
   add_test(NAME kodama_cpp_tests COMMAND kodama_cpp_tests)
+  add_test(NAME kodama_public_api_0_1_tests COMMAND kodama_public_api_0_1_tests)
   if(KODAMA_BUILD_EXAMPLES)
     if(KODAMA_ENABLE_CUDA)
       set(KODAMA_FLOAT32_SMOKE_CUDA ON)

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 test_that("kodama_matrix runs KNN and PLS-LDA on a small matrix", {
   set.seed(1)
   x <- matrix(rnorm(90 * 6), 90, 6)
@@ -46,16 +49,39 @@ test_that("public API wrappers are exposed", {
   pls <- PLSLDACV(x, labels, folds = 3, ncomp = 2, backend = "cpu")
   core_knn <- CoreKNN(x, labels, cycles = 1, folds = 3, k = 3, backend = "cpu")
   core_pls <- CorePLSLDA(x, labels, cycles = 1, folds = 3, ncomp = 2, backend = "cpu")
+  pca <- KODAMA.pca(x, ncomp = 3, backend = "cpu", seed = 4)
   graph <- KODAMA.graph(x, k = 5, backend = "cpu")
-  emb <- KODAMA.visualization(graph, method = "UMAP", k = 5, n.epochs = 3, backend = "cpu")
+  emb <- KODAMA.visualization(
+    graph,
+    method = "UMAP",
+    k = 5,
+    n.epochs = 3,
+    backend = "cpu",
+    graph.mode = "binary"
+  )
+  emb_fuzzy <- KODAMA.visualization(
+    graph,
+    method = "UMAP",
+    k = 5,
+    n.epochs = 3,
+    backend = "cpu",
+    graph.mode = "fuzzy"
+  )
   clu <- KODAMA.clustering(graph, n.iterations = 2, random.walk.steps = 2)
 
   expect_length(knncv$predicted, nrow(x))
   expect_length(pls$predicted, nrow(x))
   expect_length(core_knn$clbest, nrow(x))
   expect_length(core_pls$clbest, nrow(x))
+  expect_equal(dim(pca$scores), c(nrow(x), 3L))
+  expect_equal(dim(pca$loadings), c(ncol(x), 3L))
+  expect_equal(pca$precision, "float32")
+  expect_true(all(diff(pca$singular_values) <= 1e-5))
   expect_equal(dim(graph$indices), c(nrow(x), 5L))
   expect_equal(dim(emb), c(nrow(x), 2L))
+  expect_equal(dim(emb_fuzzy), c(nrow(x), 2L))
+  expect_true(all(is.finite(emb)))
+  expect_true(all(is.finite(emb_fuzzy)))
   expect_length(clu$membership, nrow(x))
 })
 

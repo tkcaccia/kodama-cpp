@@ -17,7 +17,6 @@ LinkingTo: Rcpp
 Imports:
     Rcpp
 Suggests:
-    irlba,
     testthat (>= 3.0.0)
 Config/testthat/edition: 3
 SystemRequirements: kodama-cpp; optional CUDA Toolkit runtime

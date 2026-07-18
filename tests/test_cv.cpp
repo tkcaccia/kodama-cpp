@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+// SPDX-License-Identifier: MIT
+
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -8,6 +11,7 @@
 #include <vector>
 
 #include "kodama/kodama.hpp"
+#include "../src/spatial_grid_knn.hpp"
 
 namespace {
 
@@ -177,10 +181,141 @@ void check_spatial_grid_graph() {
 #endif
 }
 
+void check_spatial_grid_query_nearest() {
+  const std::vector<float> base_2d = {
+    0.0f, 0.0f,
+    2.0f, 0.0f,
+    0.0f, 3.0f,
+    5.0f, 5.0f,
+    -3.0f, 2.0f
+  };
+  const std::vector<float> query_2d = {
+    1.0f, 0.0f,
+    9.0f, 9.0f,
+    -4.0f, 2.0f
+  };
+  const kodama::NeighborGraph graph_2d = kodama::detail::spatial_grid_query_nearest(
+    base_2d.data(),
+    5,
+    query_2d.data(),
+    3,
+    2,
+    2
+  );
+  require(graph_2d.indices == std::vector<int>({0, 3, 4}),
+          "Spatial grid 2D base/query nearest indices mismatch.");
+  require(std::abs(graph_2d.distances[0] - 1.0f) < 1e-6f &&
+          std::abs(graph_2d.distances[1] - std::sqrt(32.0f)) < 1e-6f &&
+          std::abs(graph_2d.distances[2] - 1.0f) < 1e-6f,
+          "Spatial grid 2D base/query nearest distances mismatch.");
+
+  const std::vector<float> base_3d = {
+    0.0f, 0.0f, 0.0f,
+    2.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 4.0f,
+    5.0f, 5.0f, 5.0f
+  };
+  const std::vector<float> query_3d = {
+    1.0f, 0.0f, 0.0f,
+    7.0f, 6.0f, 5.0f
+  };
+  const kodama::NeighborGraph graph_3d = kodama::detail::spatial_grid_query_nearest(
+    base_3d.data(),
+    4,
+    query_3d.data(),
+    2,
+    3,
+    2
+  );
+  require(graph_3d.indices == std::vector<int>({0, 3}),
+          "Spatial grid 3D base/query nearest indices mismatch.");
+  require(std::abs(graph_3d.distances[0] - 1.0f) < 1e-6f &&
+          std::abs(graph_3d.distances[1] - std::sqrt(5.0f)) < 1e-6f,
+          "Spatial grid 3D base/query nearest distances mismatch.");
+}
+
+void check_pca_cpu() {
+  constexpr int n = 80;
+  constexpr int p = 5;
+  std::vector<double> values(static_cast<std::size_t>(n) * p);
+  std::vector<float> values_float(values.size());
+  for (int row = 0; row < n; ++row) {
+    const double a = std::sin(0.17 * row);
+    const double b = std::cos(0.11 * row);
+    for (int col = 0; col < p; ++col) {
+      const double value = (col + 1.0) * a + (p - col) * 0.35 * b +
+        0.12 * std::sin((col + 2.0) * 0.07 * row);
+      values[static_cast<std::size_t>(row) * p + col] = value;
+      values_float[static_cast<std::size_t>(row) * p + col] = static_cast<float>(value);
+    }
+  }
+
+  kodama::PCAOptions options;
+  options.n_components = 3;
+  options.oversample = 2;
+  options.power_iterations = 2;
+  options.n_threads = 2;
+  options.seed = 19;
+  const kodama::PCAResult result = kodama::PCA_CPU(
+    kodama::MatrixView{values.data(), n, p}, options
+  );
+  require(result.backend == kodama::Backend::CPU, "PCA CPU backend metadata mismatch.");
+  require(result.samples == n && result.variables == p && result.components == 3,
+          "PCA CPU dimensions mismatch.");
+  require(result.scores.size() == static_cast<std::size_t>(n * 3),
+          "PCA CPU score size mismatch.");
+  require(result.loadings.size() == static_cast<std::size_t>(p * 3),
+          "PCA CPU loading size mismatch.");
+  require(result.center.size() == p && result.scale.size() == p,
+          "PCA CPU preprocessing metadata mismatch.");
+  for (const float value : result.scores) require(std::isfinite(value), "PCA CPU score is non-finite.");
+  for (const float value : result.loadings) require(std::isfinite(value), "PCA CPU loading is non-finite.");
+  for (int component = 0; component < result.components; ++component) {
+    double mean = 0.0;
+    for (int row = 0; row < n; ++row) {
+      mean += result.scores[static_cast<std::size_t>(row) * result.components + component];
+    }
+    require(std::abs(mean / n) < 2e-4, "Centered PCA scores do not have zero mean.");
+    for (int other = 0; other < result.components; ++other) {
+      double dot = 0.0;
+      for (int variable = 0; variable < p; ++variable) {
+        dot += result.loadings[static_cast<std::size_t>(variable) * result.components + component] *
+               result.loadings[static_cast<std::size_t>(variable) * result.components + other];
+      }
+      require(std::abs(dot - (component == other ? 1.0 : 0.0)) < 2e-3,
+              "PCA loadings are not orthonormal.");
+    }
+  }
+  require(result.singular_values[0] >= result.singular_values[1] &&
+          result.singular_values[1] >= result.singular_values[2],
+          "PCA singular values are not sorted.");
+  require(result.cumulative_variance_explained.back() <= 1.001f,
+          "PCA cumulative explained variance exceeds one.");
+
+  const kodama::PCAResult repeat = kodama::PCA_CPU(
+    kodama::MatrixView{values.data(), n, p}, options
+  );
+  require(result.scores == repeat.scores && result.loadings == repeat.loadings,
+          "PCA CPU is not deterministic for a fixed seed.");
+  const kodama::PCAResult float_result = kodama::PCA_CPU(
+    kodama::MatrixView{values_float.data(), n, p}, options
+  );
+  for (int component = 0; component < result.components; ++component) {
+    const float reference = std::max(1.0f, result.singular_values[static_cast<std::size_t>(component)]);
+    require(
+      std::abs(result.singular_values[static_cast<std::size_t>(component)] -
+               float_result.singular_values[static_cast<std::size_t>(component)]) / reference < 2e-4f,
+      "PCA float32 and float64 input paths disagree."
+    );
+  }
+}
+
 }  // namespace
 
 int main() {
   check_spatial_grid_graph();
+  check_spatial_grid_query_nearest();
+  check_pca_cpu();
 
   ToyData d = make_toy_data();
   kodama::MatrixView view{d.x.data(), static_cast<std::size_t>(d.n), static_cast<std::size_t>(d.p)};
@@ -484,6 +619,46 @@ int main() {
   for (float value : graph_laplacian_features) require(std::isfinite(value), "Self-tuning graph features contain non-finite values.");
 
 #if defined(KODAMA_ENABLE_CUDA)
+  kodama::PCAOptions cuda_pca_options;
+  cuda_pca_options.n_components = 4;
+  cuda_pca_options.oversample = 2;
+  cuda_pca_options.power_iterations = 1;
+  cuda_pca_options.seed = 13;
+  const kodama::PCAResult cpu_pca_reference = kodama::PCA_CPU(fview, cuda_pca_options);
+  const kodama::PCAResult cuda_pca = kodama::PCA_CUDA(fview, cuda_pca_options);
+  require(cuda_pca.backend == kodama::Backend::CUDA, "CUDA PCA backend metadata mismatch.");
+  require(cuda_pca.scores.size() == static_cast<std::size_t>(d.n * 4),
+          "CUDA PCA score size mismatch.");
+  for (int component = 0; component < 4; ++component) {
+    const float reference = std::max(
+      1.0f, cpu_pca_reference.singular_values[static_cast<std::size_t>(component)]
+    );
+    require(
+      std::abs(cuda_pca.singular_values[static_cast<std::size_t>(component)] -
+               cpu_pca_reference.singular_values[static_cast<std::size_t>(component)]) / reference < 3e-3f,
+      "CUDA PCA singular values disagree with CPU."
+    );
+  }
+
+  const kodama::EmbeddingResult cuda_umap = kodama::KODAMAUMAP_CUDA(
+    km_res.knn, umap_options
+  );
+  require(cuda_umap.backend == kodama::Backend::CUDA &&
+          cuda_umap.embedding.size() == static_cast<std::size_t>(d.n * 2),
+          "CUDA UMAP smoke test failed.");
+  for (const float value : cuda_umap.embedding) {
+    require(std::isfinite(value), "CUDA UMAP produced a non-finite value.");
+  }
+  const kodama::EmbeddingResult cuda_tsne = kodama::KODAMAOpenTSNE_CUDA(
+    km_res.knn, tsne_options
+  );
+  require(cuda_tsne.backend == kodama::Backend::CUDA &&
+          cuda_tsne.embedding.size() == static_cast<std::size_t>(d.n * 2),
+          "CUDA openTSNE smoke test failed.");
+  for (const float value : cuda_tsne.embedding) {
+    require(std::isfinite(value), "CUDA openTSNE produced a non-finite value.");
+  }
+
   kodama::PLSOptions cuda_pls = pls;
   cuda_pls.backend = kodama::Backend::CUDA;
   kodama::PLSCVResult cuda_pres = kodama::PLSDACV_CUDA(view, d.y, d.constrain, cuda_pls);
@@ -539,36 +714,55 @@ int main() {
 #endif
 
 #if defined(KODAMA_ENABLE_METAL)
-  require(kodama::MetalAvailable(), "Metal build did not find an Apple Metal device.");
-  kodama::KNNOptions metal_knn = knn;
-  metal_knn.backend = kodama::Backend::Metal;
-  metal_knn.index_type = kodama::KNNIndexType::MetalExact;
-  kodama::KNNCVResult metal_kres = kodama::KNNCV_METAL(fview, d.y, d.constrain, metal_knn);
-  require(metal_kres.parameters.backend == kodama::Backend::Metal, "Metal KNNCV did not report Metal backend.");
-  require(metal_kres.parameters.index_type == kodama::KNNIndexType::MetalExact, "Metal KNNCV did not report exact Metal search.");
-  check_constrained_folds(d.constrain, metal_kres.fold_assignments);
-  require(metal_kres.global_accuracy > 0.95, "Metal KNNCV accuracy unexpectedly low.");
+  if (kodama::MetalAvailable()) {
+    kodama::KNNOptions metal_knn = knn;
+    metal_knn.backend = kodama::Backend::Metal;
+    metal_knn.index_type = kodama::KNNIndexType::MetalExact;
+    kodama::KNNCVResult metal_kres =
+        kodama::KNNCV_METAL(fview, d.y, d.constrain, metal_knn);
+    require(metal_kres.parameters.backend == kodama::Backend::Metal,
+            "Metal KNNCV did not report Metal backend.");
+    require(metal_kres.parameters.index_type ==
+                kodama::KNNIndexType::MetalExact,
+            "Metal KNNCV did not report exact Metal search.");
+    check_constrained_folds(d.constrain, metal_kres.fold_assignments);
+    require(metal_kres.global_accuracy > 0.95,
+            "Metal KNNCV accuracy unexpectedly low.");
 
-  kodama::PLSOptions metal_pls = pls;
-  metal_pls.backend = kodama::Backend::Metal;
-  kodama::PLSCVResult metal_lres = kodama::PLSLDACV_METAL(fview, d.y, d.constrain, metal_pls);
-  require(metal_lres.parameters.backend == kodama::Backend::Metal, "Metal PLS-LDA did not report Metal backend.");
-  check_pls_result(metal_lres, d.y, d.constrain, 4);
-  require(metal_lres.global_accuracy > 0.60, "Metal PLS-LDA accuracy unexpectedly low.");
-  require(std::abs(metal_lres.global_accuracy - flres.global_accuracy) < 0.10, "Metal PLS-LDA diverged from CPU accuracy.");
+    kodama::PLSOptions metal_pls = pls;
+    metal_pls.backend = kodama::Backend::Metal;
+    kodama::PLSCVResult metal_lres =
+        kodama::PLSLDACV_METAL(fview, d.y, d.constrain, metal_pls);
+    require(metal_lres.parameters.backend == kodama::Backend::Metal,
+            "Metal PLS-LDA did not report Metal backend.");
+    check_pls_result(metal_lres, d.y, d.constrain, 4);
+    require(metal_lres.global_accuracy > 0.60,
+            "Metal PLS-LDA accuracy unexpectedly low.");
+    require(std::abs(metal_lres.global_accuracy - flres.global_accuracy) < 0.10,
+            "Metal PLS-LDA diverged from CPU accuracy.");
 
-  kodama::CoreOptions metal_core_knn = core_knn;
-  metal_core_knn.knn.backend = kodama::Backend::Metal;
-  metal_core_knn.knn.index_type = kodama::KNNIndexType::MetalExact;
-  kodama::CoreResult metal_core_kres = kodama::CoreKNN_METAL(fview, noisy, d.constrain, fixed, metal_core_knn);
-  require(metal_core_kres.clbest.size() == noisy.size(), "Metal Core KNN clbest size mismatch.");
-  require(metal_core_kres.cycles_completed >= 1, "Metal Core KNN did not run any cycles.");
+    kodama::CoreOptions metal_core_knn = core_knn;
+    metal_core_knn.knn.backend = kodama::Backend::Metal;
+    metal_core_knn.knn.index_type = kodama::KNNIndexType::MetalExact;
+    kodama::CoreResult metal_core_kres =
+        kodama::CoreKNN_METAL(fview, noisy, d.constrain, fixed, metal_core_knn);
+    require(metal_core_kres.clbest.size() == noisy.size(),
+            "Metal Core KNN clbest size mismatch.");
+    require(metal_core_kres.cycles_completed >= 1,
+            "Metal Core KNN did not run any cycles.");
 
-  kodama::CoreOptions metal_core_pls = core_pls;
-  metal_core_pls.pls.backend = kodama::Backend::Metal;
-  kodama::CoreResult metal_core_lres = kodama::CorePLSLDA_METAL(fview, noisy, d.constrain, fixed, metal_core_pls);
-  require(metal_core_lres.clbest.size() == noisy.size(), "Metal Core PLS-LDA clbest size mismatch.");
-  require(metal_core_lres.cycles_completed >= 1, "Metal Core PLS-LDA did not run any cycles.");
+    kodama::CoreOptions metal_core_pls = core_pls;
+    metal_core_pls.pls.backend = kodama::Backend::Metal;
+    kodama::CoreResult metal_core_lres = kodama::CorePLSLDA_METAL(
+        fview, noisy, d.constrain, fixed, metal_core_pls);
+    require(metal_core_lres.clbest.size() == noisy.size(),
+            "Metal Core PLS-LDA clbest size mismatch.");
+    require(metal_core_lres.cycles_completed >= 1,
+            "Metal Core PLS-LDA did not run any cycles.");
+  } else {
+    std::cout << "Metal runtime checks skipped: no Apple Metal device is "
+                 "available.\n";
+  }
 #endif
 
   std::cout << "All kodama-cpp CV tests passed.\n";

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 as_kodama_matrix <- function(x) {
   x <- as.matrix(x)
   storage.mode(x) <- "double"
@@ -29,28 +32,44 @@ kodama_scale_init_max_abs <- function(scores, target = 10, seed = 4L) {
   sweep(init, 2L, colMeans(init), check.margin = FALSE)
 }
 
-kodama_visual_pca_scores <- function(data, n.components = 2L) {
+kodama_visual_pca_scores <- function(data,
+                                     n.components = 2L,
+                                     backend = "cpu",
+                                     n.cores = 1L,
+                                     gpu.device = 0L,
+                                     seed = 4L) {
   n.components <- min(as.integer(n.components), ncol(data), max(1L, nrow(data) - 1L))
   if (n.components < 1L) stop("Cannot build a visual initialization from empty data.")
-  scores <- NULL
-  method <- "stats_prcomp"
-  if (requireNamespace("irlba", quietly = TRUE)) {
-    pca <- irlba::prcomp_irlba(data, n = n.components, center = TRUE, scale. = FALSE)
-    scores <- as.matrix(pca$x[, seq_len(n.components), drop = FALSE])
-    method <- "irlba_prcomp"
-  }
-  if (is.null(scores)) {
-    pca <- stats::prcomp(data, rank. = n.components, center = TRUE, scale. = FALSE)
-    scores <- as.matrix(pca$x[, seq_len(n.components), drop = FALSE])
-  }
+  fit <- kodama_pca_cpp(
+    data,
+    ncomp = n.components,
+    center = TRUE,
+    scale = FALSE,
+    backend = backend,
+    seed = as.integer(seed),
+    n_threads = as.integer(n.cores),
+    gpu_device = as.integer(gpu.device)
+  )
+  scores <- as.matrix(fit$scores)
   if (ncol(scores) < 2L) scores <- cbind(scores, 0)
   scores <- scores[, 1:2, drop = FALSE]
-  attr(scores, "method") <- method
+  attr(scores, "method") <- paste0("kodama_cpp_", fit$backend, "_rsvd")
   scores
 }
 
-kodama_make_visual_init <- function(data, seed = 4L) {
-  scores <- kodama_visual_pca_scores(data, n.components = 2L)
+kodama_make_visual_init <- function(data,
+                                    seed = 4L,
+                                    backend = "cpu",
+                                    n.cores = 1L,
+                                    gpu.device = 0L) {
+  scores <- kodama_visual_pca_scores(
+    data,
+    n.components = 2L,
+    backend = backend,
+    n.cores = n.cores,
+    gpu.device = gpu.device,
+    seed = seed
+  )
   out <- list(
     opentsne = kodama_scale_init_sd(scores, target = 1e-4),
     umap = kodama_scale_init_max_abs(scores, target = 10, seed = seed),
@@ -344,7 +363,15 @@ kodama_matrix <- function(data,
   backend <- match.arg(backend)
   spatial.constraint.mode <- match.arg(spatial.constraint.mode)
   data_matrix <- as_kodama_matrix(data)
-  visual_init <- if (isTRUE(visual.init)) kodama_make_visual_init(data_matrix, seed = seed) else NULL
+  visual_init <- if (isTRUE(visual.init)) {
+    kodama_make_visual_init(
+      data_matrix,
+      seed = seed,
+      backend = backend,
+      n.cores = n.cores,
+      gpu.device = 0L
+    )
+  } else NULL
   parameters <- list(
     M = as.integer(M),
     Tcycle = as.integer(Tcycle),
@@ -657,6 +684,52 @@ KODAMA.makeSNNGraph <- KODAMA.graph
 #' @export
 makeSNNGraph <- KODAMA.graph
 
+#' Backend-native float32 PCA
+#'
+#' @param data Numeric matrix with observations in rows.
+#' @param ncomp Number of principal components.
+#' @param center Whether to center columns.
+#' @param scale Whether to scale centered columns to unit sample standard deviation.
+#' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
+#' @param n.cores Number of CPU worker threads.
+#' @param gpu.device Accelerator device id.
+#' @param seed Random seed for the Gaussian subspace sketch.
+#' @param oversample Optional randomized-SVD oversampling width. `NULL` uses the
+#'   backend policy from fastEmbedR.
+#' @param power Optional randomized-SVD power count. `NULL` uses the backend
+#'   policy from fastEmbedR.
+#' @return A list containing scores, loadings, singular values, explained
+#'   variance, preprocessing vectors, backend metadata, and runtime.
+#' @export
+kodama_pca <- function(data,
+                       ncomp = 2L,
+                       center = TRUE,
+                       scale = FALSE,
+                       backend = c("cpu", "cuda", "metal"),
+                       n.cores = 1L,
+                       gpu.device = 0L,
+                       seed = 4L,
+                       oversample = NULL,
+                       power = NULL) {
+  backend <- match.arg(backend)
+  kodama_pca_cpp(
+    as_kodama_matrix(data),
+    ncomp = as.integer(ncomp),
+    center = isTRUE(center),
+    scale = isTRUE(scale),
+    backend = backend,
+    seed = as.integer(seed),
+    n_threads = as.integer(n.cores),
+    gpu_device = as.integer(gpu.device),
+    oversample = if (is.null(oversample)) -1L else as.integer(oversample),
+    power = if (is.null(power)) -1L else as.integer(power)
+  )
+}
+
+#' @rdname kodama_pca
+#' @export
+KODAMA.pca <- kodama_pca
+
 #' Visualize a matrix or KODAMA graph with UMAP or openTSNE
 #'
 #' @param x Input matrix, KODAMA result, or KNN graph list.
@@ -667,6 +740,8 @@ makeSNNGraph <- KODAMA.graph
 #' @param backend Execution backend, either `"cpu"` or `"cuda"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
+#' @param graph.mode UMAP graph weighting mode. `"binary"` matches the current
+#'   fastEmbedR default; `"fuzzy"` retains standard fuzzy UMAP weights.
 #' @param n.epochs Number of UMAP optimization epochs.
 #' @param n.iter Number of openTSNE optimization iterations.
 #' @param perplexity openTSNE perplexity.
@@ -684,11 +759,13 @@ KODAMA.visualization <- function(x,
                                  n.epochs = 200L,
                                  n.iter = 500L,
                                  perplexity = 30,
+                                 graph.mode = c("binary", "fuzzy"),
                                  seed = 4L,
                                  ...) {
   method <- match.arg(method)
   metric <- match.arg(metric)
   backend <- match.arg(backend)
+  graph.mode <- match.arg(graph.mode)
   graph <- extract_kodama_graph(x)
   if (is.null(graph)) {
     graph <- KODAMA.graph(x, k = k, metric = metric, backend = backend, n.cores = n.cores, gpu.device = gpu.device)
@@ -707,6 +784,7 @@ KODAMA.visualization <- function(x,
       n_threads = as.integer(n.cores),
       seed = as.integer(seed),
       gpu_device = as.integer(gpu.device),
+      graph_mode = graph.mode,
       ...
     ))
   }

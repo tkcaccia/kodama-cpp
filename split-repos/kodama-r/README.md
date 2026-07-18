@@ -21,6 +21,7 @@ The wrapper exports:
 - `KNNCV()` and `PLSLDACV()` for cross-validated classifier kernels.
 - `CoreKNN()` and `CorePLSLDA()` for label-optimization kernels.
 - `KODAMA.matrix()` for complete KODAMA matrix construction.
+- `KODAMA.pca()` / `kodama_pca()` for backend-native float32 PCA.
 - `KODAMA.visualization()` for UMAP/openTSNE embeddings from KODAMA graphs.
 - `KODAMA.graph()`, `KODAMA.makeSNNGraph()`, `makeSNNGraph()`, and
   `KODAMA.clustering()` for graph construction and CPU random-walk clustering.
@@ -95,7 +96,7 @@ R CMD INSTALL .
 ```
 
 CUDA install uses the CUDA-enabled build directory and the runtime library
-environment. On a Linux machine with a conda/micromamba FAISS/CUDA environment:
+environment. On a Linux machine with a conda/micromamba CUDA environment:
 
 ```sh
 export ENV_DIR=/path/to/faiss-cuda-env
@@ -138,6 +139,9 @@ lab <- rep(1:3, length.out = nrow(x))
 cv <- KNNCV(x, lab, folds = 3, k = 5, backend = "cpu")
 cv$accuracy
 
+pc <- KODAMA.pca(x, ncomp = 3, backend = "cpu")
+dim(pc$scores)
+
 kk <- KODAMA.matrix(
   x,
   classifier = "knn",
@@ -153,7 +157,7 @@ head(kk$best_labels)
 ```
 
 For CUDA verification, switch `backend = "cuda"` after confirming that the R
-session can load the same CUDA/FAISS libraries used by the C++ build.
+session can load the same CUDA Toolkit libraries used by the C++ build.
 
 ## Run `R CMD Check`
 
@@ -205,7 +209,7 @@ If installation cannot find the C++ headers, set `KODAMA_CPP_ROOT` explicitly.
 If installation cannot find `libkodama_cpp`, build `kodama-cpp` first and set
 `KODAMA_CPP_BUILD_DIR` to the CMake build directory.
 
-If loading fails with missing FAISS, OpenMP, BLAS, or CUDA symbols, start R from
+If loading fails with missing OpenMP or CUDA symbols, start R from
 the same shell where `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `CONDA_PREFIX`, and
 related runtime variables are set.
 
