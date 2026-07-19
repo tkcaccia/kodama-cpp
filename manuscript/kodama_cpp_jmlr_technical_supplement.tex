@@ -330,7 +330,7 @@ All timings in this section are wall-clock seconds from the benchmark drivers, a
 \toprule
 Item & Value \\
 \midrule
-Date & 2026-07-18 UTC for release-candidate CUDA visualization validation; M/Tcycle validation dated 2026-07-16 UTC; earlier broad kernel snapshot dated 2026-07-06 UTC \\
+Date & 2026-07-19 UTC for current-CRAN and CI/coverage validation; 2026-07-18 UTC for CUDA visualization validation; M/Tcycle validation dated 2026-07-16 UTC; earlier broad kernel snapshot dated 2026-07-06 UTC \\
 GPU & NVIDIA GeForce RTX 5060 Ti, 16 GB device memory, driver 595.71.05 \\
 Build validation & Fresh CUDA 13.2 build succeeded; CTest passed 4/4 configured tests in 1.91 s \\
 Runtime & CUDA Toolkit only for native search/PLS paths; no FAISS, cuVS, RAFT, RMM, or Armadillo link \\
@@ -531,6 +531,26 @@ kodama-cpp & CUDA & 4 & 2.361 & 258.6x & 1.000/0.882 & 0.052/0.069 & 3/8.5 \\
 }
 \end{table}
 
+\subsubsection{Current CRAN systems comparison}
+A separate short-run systems comparison addresses the current public release. MetRef was run with M = 20, Tcycle = 20, requested landmarks = 100000 (655 effective landmarks under the retained 75\% rule), splitting = 100, graph k = 500, ncomp = 50, seed 1234, and four CPU workers. The CV-selected run is chosen by raw held-out accuracy; ARI and class count are computed only afterward. KODAMA 3.3 automatically selects its PLS route because its deprecated FUN argument is ignored, so this is not classifier- or trajectory-parity with kodama-cpp SIMPLS plus latent-space LDA.
+
+Current CRAN KODAMA 3.3 completed in 344.914 seconds, compared with 822.989 seconds for kodama-cpp CPU4; thus KODAMA 3.3 was 2.39 times faster in this limited check. It also had higher selected raw CV accuracy and selected ARI. These unfavorable current results are retained and are not combined with the classifier-matched legacy KNN comparison. An exactly matched CUDA row is omitted because graph k = 500 exceeds the native CUDA builder limit of 256; neither landmarks nor graph k was changed silently to create an accelerator row.
+
+\begin{table}[h]
+\caption{Short MetRef current-release systems comparison at M = 20 and Tcycle = 20. KODAMA 3.3 and kodama-cpp use different PLS classifier routes; this is not classifier parity.}
+\small
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{llllllll}
+\toprule
+Implementation & Classifier route & Backend & Workers & Seconds & CV selected/median & ARI selected/median & Classes selected/median \\
+\midrule
+KODAMA 3.3 & automatic PLS & CPU & 4 & 344.914 & 0.9893 / 0.9740 & 0.7004 / 0.6961 & 20 / 20 \\
+kodama-cpp 0.1.0 & SIMPLS + LDA & CPU & 4 & 822.989 & 0.9802 / 0.9550 & 0.6430 / 0.6584 & 30 / 35 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
 \begin{table}[h]
 \caption{KODAMA.matrix CUDA validation on MetRef with M = 100 and Tcycle = 100.}
 \small
@@ -702,6 +722,8 @@ Area & Current evidence \\
 Correctness & CTest passed on dependency-free CPU, Apple Metal, and CUDA builds; tests cover constrained folds, predictions, confusion matrices, requested component counts, and backend parity. \\
 Numerics & Float32 MatrixView validation tests exercise CPU, CUDA, and Metal KNN/PLS-LDA paths with typed backend metadata; a fresh CUDA configure/build verifies that SIMPLS has no Armadillo or double-fallback dependency. \\
 Performance & Kernel-level KNNCV/PLSLDACV timings are separated from core optimizer and KODAMA.matrix timings in the benchmark outputs. \\
+Continuous integration & GitHub Actions commit 0e019c1 passed CPU core jobs on Linux and macOS, a native Metal job on macOS, R package build/check, and Python installation/pytest. \\
+Coverage and documentation & LLVM 22.1.1 CPU instrumentation measured 63.58\% line, 57.03\% branch, 66.04\% function, and 67.61\% region coverage. CUDA and Metal are excluded from that CPU number and retain hardware tests. Doxygen generation and GitHub Pages deployment passed, and the public API site is reachable at https://tkcaccia.github.io/kodama-cpp/. \\
 Release & CMake install targets, wrapper build scripts, benchmark drivers, SPDX source headers, a pinned provenance matrix, retained third-party license texts, and a checksum-backed license audit are present. The final clean tag, commit hash, archive digest, and DOI are required by RELEASE\_CHECKLIST.md and will be inserted only after they are created. \\
 \bottomrule
 \end{tabularx}
@@ -710,7 +732,7 @@ Release & CMake install targets, wrapper build scripts, benchmark drivers, SPDX 
 \section{Availability and reproducibility}
 kodama-cpp is intended for release in the public tkcaccia/kodama-cpp GitHub repository. Original project code is licensed under MIT, while identified compatible third-party portions retain their upstream terms. In particular, the Metal backend is marked MIT AND Apache-2.0 because its fastEmbedR lineage retains the Faiss-mlx fused list-scan/top-k organization under Apache-2.0. The recommended project split is a standalone C++17 core repository, an R wrapper repository, and a Python wrapper repository.
 
-Reproducibility is supported through CMake builds, CPU, CUDA, and Metal tests, wrapper validation tests, benchmark scripts, and explicit recording of backend parameters. The C++ core does not depend on R data readers; wrapper packages are responsible for translating host-language objects into contiguous matrices before calling the library.
+Reproducibility is supported through CMake builds, CPU, CUDA, and Metal tests, wrapper validation tests, benchmark scripts, and explicit recording of backend parameters. GitHub Actions builds and tests the CPU core on Linux and macOS, builds the native Metal core on macOS, and installs and tests both wrapper packages. A separate LLVM workflow measures CPU source coverage, while Doxygen publishes the typed API and a compact C++/R/Python walkthrough at https://tkcaccia.github.io/kodama-cpp/. The C++ core does not depend on R data readers; wrappers translate host-language objects into contiguous matrices before calling the library.
 
 A versioned provenance audit maps every shipped source-like file to an SPDX license identifier and records pinned KODAMA, fastPLS, fastEmbedR, faissR, FAISS, Faiss-mlx, and cuVS snapshots. Stefano Cacciatore confirmed that tkcaccia is his historical Git identity and separately authorized MIT distribution of the KODAMA and fastPLS-derived portions whose copyright he owns. The audit preserves publication coauthor credit, third-party notices, and full license texts, and is enforced by a release-time source-header and retained-license checksum test.
 
@@ -745,6 +767,7 @@ C++ core, Apple Metal & Native Metal release-candidate build passed 5/5 configur
 C++ core, CUDA & A fresh CUDA 13.2 release-candidate build without FAISS, cuVS, RAFT, RMM, or Armadillo succeeded on chiamaka and CTest passed 4/4, including the source/license audit, core tests, frozen public-API test, and float32 install-consumer smoke test. The linked-soname audit found none of the removed dependencies, and the CMake cache contained no corresponding package option, target, header, or library entry; only the CUDA Toolkit environment directory retained a legacy faissgpu-cuvs label. \\
 R wrapper, local CPU & R CMD build followed by R CMD check --as-cran --no-manual passed on the source tarball in a UTF-8 locale with only the expected new-submission NOTE. \\
 Python wrapper, local CPU & Temporary virtual-environment install against the local CPU build passed pytest: 4/4 tests. \\
+GitHub Actions & Commit 0e019c1 passed five CI jobs: CPU core on Ubuntu and macOS, native Metal on macOS, R package build/check on Ubuntu, and Python installation/pytest on Ubuntu. Separate coverage and API-documentation workflows also passed. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -773,6 +796,8 @@ Audit enforcement & All tracked source-like files carry SPDX identifiers; offici
 The current implementation prioritizes KNN and PLS-LDA because they are central to the KODAMA optimization principle and can be implemented cleanly on CPU, CUDA, and Apple Metal. Additional classifiers are outside this release unless they preserve the cross-validated accuracy objective and can be tested without changing the method for a specific benchmark.
 
 The main engineering limitation is that KODAMA performs many cross-validation fits. This makes memory locality, buffer reuse, label compaction, and GPU scheduling as important as asymptotic complexity. The present release includes float32 buffers, fold reuse, label compaction, CUDA kernels, and native Metal KNN and PLS-LDA kernels, but full accelerator-resident batching of independent M runs remains an engineering extension rather than a claim of the current manuscript.
+
+The native CUDA neighbor-graph builder currently supports at most 256 retained neighbors per sample, whereas the CPU path supports larger rows. The implementation raises an error rather than silently truncating k. This matters when comparing with interfaces that couple landmark count and graph size; the current-CRAN MetRef systems comparison therefore reports the exactly matched CPU4 path and does not manufacture an unmatched CUDA row.
 
 \section{KODAMA pseudocode}
 Algorithm 1 isolates one independent run inside the M-run ensemble. It starts from one landmark label vector, uses the previous CV predictions to propose label changes, evaluates each proposal with exactly one CV pass, and returns the best label vector found by that run.

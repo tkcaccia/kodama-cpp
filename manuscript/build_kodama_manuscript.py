@@ -353,9 +353,12 @@ SECTIONS = [
             (
                 "Reproducibility is supported through CMake builds, CPU, CUDA, and Metal tests, wrapper "
                 "validation tests, benchmark scripts, and explicit recording of backend parameters. "
-                "The C++ core does not depend on R data readers; wrapper packages are responsible "
-                "for translating host-language objects into contiguous matrices before calling the "
-                "library."
+                "GitHub Actions builds and tests the CPU core on Linux and macOS, builds the native "
+                "Metal core on macOS, and installs and tests both wrapper packages. A separate LLVM "
+                "workflow measures CPU source coverage, while Doxygen publishes the typed API and a "
+                "compact C++/R/Python walkthrough at https://tkcaccia.github.io/kodama-cpp/. The C++ "
+                "core does not depend on R data readers; wrappers translate host-language objects into "
+                "contiguous matrices before calling the library."
             ),
             (
                 "A versioned provenance audit maps every shipped source-like file to an SPDX license "
@@ -386,6 +389,14 @@ SECTIONS = [
                 "and PLS-LDA kernels, but full accelerator-resident "
                 "batching of independent M runs remains an engineering extension rather than a claim "
                 "of the current manuscript."
+            ),
+            (
+                "The native CUDA neighbor-graph builder currently supports at most 256 retained "
+                "neighbors per sample, whereas the CPU path supports larger rows. The implementation "
+                "raises an error rather than silently truncating k. This matters when comparing with "
+                "interfaces that couple landmark count and graph size; the current-CRAN MetRef systems "
+                "comparison therefore reports the exactly matched CPU4 path and does not manufacture an "
+                "unmatched CUDA row."
             ),
         ],
     ),
@@ -731,6 +742,14 @@ VALIDATION_ROWS = [
         "Kernel-level KNNCV/PLSLDACV timings are separated from core optimizer and KODAMA.matrix timings in the benchmark outputs.",
     ),
     (
+        "Continuous integration",
+        "GitHub Actions commit 0e019c1 passed CPU core jobs on Linux and macOS, a native Metal job on macOS, R package build/check, and Python installation/pytest.",
+    ),
+    (
+        "Coverage and documentation",
+        "LLVM 22.1.1 CPU instrumentation measured 63.58% line, 57.03% branch, 66.04% function, and 67.61% region coverage. CUDA and Metal are excluded from that CPU number and retain hardware tests. Doxygen generation and GitHub Pages deployment passed, and the public API site is reachable at https://tkcaccia.github.io/kodama-cpp/.",
+    ),
+    (
         "Release",
         "CMake install targets, wrapper build scripts, benchmark drivers, SPDX source headers, a pinned provenance matrix, retained third-party license texts, and a checksum-backed license audit are present. The final clean tag, commit hash, archive digest, and DOI are required by RELEASE_CHECKLIST.md and will be inserted only after they are created.",
     ),
@@ -783,6 +802,7 @@ WRAPPER_VALIDATION_ROWS = [
     ("C++ core, CUDA", "A fresh CUDA 13.2 release-candidate build without FAISS, cuVS, RAFT, RMM, or Armadillo succeeded on chiamaka and CTest passed 4/4, including the source/license audit, core tests, frozen public-API test, and float32 install-consumer smoke test. The linked-soname audit found none of the removed dependencies, and the CMake cache contained no corresponding package option, target, header, or library entry; only the CUDA Toolkit environment directory retained a legacy faissgpu-cuvs label."),
     ("R wrapper, local CPU", "R CMD build followed by R CMD check --as-cran --no-manual passed on the source tarball in a UTF-8 locale with only the expected new-submission NOTE."),
     ("Python wrapper, local CPU", "Temporary virtual-environment install against the local CPU build passed pytest: 4/4 tests."),
+    ("GitHub Actions", "Commit 0e019c1 passed five CI jobs: CPU core on Ubuntu and macOS, native Metal on macOS, R package build/check on Ubuntu, and Python installation/pytest on Ubuntu. Separate coverage and API-documentation workflows also passed."),
 ]
 
 
@@ -902,7 +922,7 @@ PILOT_EXPERIMENT_PARAGRAPHS = [
 
 
 BENCHMARK_PROTOCOL_ROWS = [
-    ("Date", "2026-07-18 UTC for release-candidate CUDA visualization validation; M/Tcycle validation dated 2026-07-16 UTC; earlier broad kernel snapshot dated 2026-07-06 UTC"),
+    ("Date", "2026-07-19 UTC for current-CRAN and CI/coverage validation; 2026-07-18 UTC for CUDA visualization validation; M/Tcycle validation dated 2026-07-16 UTC; earlier broad kernel snapshot dated 2026-07-06 UTC"),
     ("GPU", "NVIDIA GeForce RTX 5060 Ti, 16 GB device memory, driver 595.71.05"),
     ("Build validation", "Fresh CUDA 13.2 build succeeded; CTest passed 4/4 configured tests in 1.91 s"),
     ("Runtime", "CUDA Toolkit only for native search/PLS paths; no FAISS, cuVS, RAFT, RMM, or Armadillo link"),
@@ -1118,6 +1138,33 @@ HISTORICAL_KNN_ROWS = [
     ("kodama-cpp", "CPU", "1", "965.348", "0.63x", "1.000/0.874", "0.045/0.071", "2/8.5"),
     ("kodama-cpp", "CPU", "4", "235.547", "2.59x", "1.000/0.874", "0.045/0.071", "2/8.5"),
     ("kodama-cpp", "CUDA", "4", "2.361", "258.6x", "1.000/0.882", "0.052/0.069", "3/8.5"),
+]
+
+
+CURRENT_CRAN_COMPARISON_PARAGRAPHS = [
+    (
+        "A separate short-run systems comparison addresses the current public release. MetRef was "
+        "run with M = 20, Tcycle = 20, requested landmarks = 100000 (655 effective landmarks under "
+        "the retained 75% rule), splitting = 100, graph k = 500, ncomp = 50, seed 1234, and four CPU "
+        "workers. The CV-selected run is chosen by raw held-out accuracy; ARI and class count are "
+        "computed only afterward. KODAMA 3.3 automatically selects its PLS route because its deprecated "
+        "FUN argument is ignored, so this is not classifier- or trajectory-parity with kodama-cpp "
+        "SIMPLS plus latent-space LDA."
+    ),
+    (
+        "Current CRAN KODAMA 3.3 completed in 344.914 seconds, compared with 822.989 seconds for "
+        "kodama-cpp CPU4; thus KODAMA 3.3 was 2.39 times faster in this limited check. It also had "
+        "higher selected raw CV accuracy and selected ARI. These unfavorable current results are "
+        "retained and are not combined with the classifier-matched legacy KNN comparison. An exactly "
+        "matched CUDA row is omitted because graph k = 500 exceeds the native CUDA builder limit of "
+        "256; neither landmarks nor graph k was changed silently to create an accelerator row."
+    ),
+]
+
+
+CURRENT_CRAN_COMPARISON_ROWS = [
+    ("KODAMA 3.3", "automatic PLS", "CPU", "4", "344.914", "0.9893 / 0.9740", "0.7004 / 0.6961", "20 / 20"),
+    ("kodama-cpp 0.1.0", "SIMPLS + LDA", "CPU", "4", "822.989", "0.9802 / 0.9550", "0.6430 / 0.6584", "30 / 35"),
 ]
 
 
@@ -2287,6 +2334,16 @@ def build_docx() -> None:
                 [1.15, 0.65, 0.55, 0.7, 0.8, 1.0, 1.05, 1.05],
                 font_size=6.8,
             )
+            doc.add_heading("Current CRAN systems comparison", level=3)
+            for paragraph in CURRENT_CRAN_COMPARISON_PARAGRAPHS:
+                doc.add_paragraph(paragraph)
+            add_table(
+                doc,
+                ("Implementation", "Classifier route", "Backend", "Workers", "Seconds", "Selected/median CV", "Selected/median ARI", "Selected/median classes"),
+                CURRENT_CRAN_COMPARISON_ROWS,
+                [1.1, 1.0, 0.6, 0.55, 0.7, 1.05, 1.05, 1.05],
+                font_size=6.8,
+            )
             doc.add_heading("KODAMA.matrix MetRef validation benchmark", level=3)
             add_table(
                 doc,
@@ -2443,88 +2500,73 @@ def build_self_review() -> None:
     apply_compact_memo_styles(doc)
     add_title(
         doc,
-        "Reviewer-style self-assessment of the kodama-cpp JMLR manuscript",
-        "Internal review memo and addressed revisions",
-        "Prepared with the current manuscript.",
+        "Fresh JMLR MLOSS reviewer report: kodama-cpp",
+        "Independent first-read assessment of the current submission package",
+        "Review date: 19 July 2026",
     )
-    doc.add_heading("Reviewer Summary", level=1)
+    doc.add_heading("Summary", level=1)
     doc.add_paragraph(
-        "The manuscript now reads as a software-methods submission rather than a checklist. It formalizes KODAMA as cross-validated accuracy maximization, separates raw CV accuracy from proposal acceptance scores and external diagnostics, compares the portable C++ library with the public R-package literature, and distinguishes methodological continuity from implementation novelty. "
-        "The KODAMA.matrix procedure is specified with label-vector search mechanics, proposal, temperature, M/Tcycle, landmark, splitting, constraint, graph-correction rules, and explicit pseudocode at both the single-run and matrix-ensemble levels. The revision adds literature context from semi-supervised learning, weak supervision, cluster validation, circular-analysis warnings, visualization, and open-source ML reproducibility. Implementation claims are mapped to source locations, tests, and current benchmark evidence. The revision also narrows the graph-input KODAMA claim: graph input is documented and wrapper-validated as an optional API, while graph-only PLS-LDA is not presented as equivalent to data-input PLS-LDA without matched benchmarks."
+        "This submission presents a substantial standalone implementation of KODAMA rather than a new "
+        "learning objective. The manuscript clearly distinguishes continuity with the published KODAMA "
+        "method from the new C++17 systems contribution: float32 state ownership, CPU/CUDA/Metal backends, "
+        "label-aware SIMPLS plus latent-space LDA, package-owned neighbor search, supplied-graph entry points, "
+        "and thin R/Python bindings. The algorithm is reproducible from the equations and pseudocode: proposal "
+        "generation, one-CV-pass-per-cycle evaluation, acceptance score, cooling rule, independent M runs, "
+        "landmark and splitting semantics, projection, and agreement-graph correction are all specified."
     )
+    doc.add_paragraph(
+        "The empirical section is appropriately cautious. Internal CV accuracy is not presented as external "
+        "truth, reference labels are used only after optimization, and positive and negative visualization "
+        "results are retained. Kernel, optimizer, and end-to-end timings are separated. A legacy classifier-"
+        "matched comparison and a separately scoped current-CRAN systems comparison prevent the predecessor "
+        "discussion from relying on an obsolete release alone."
+    )
+
     doc.add_heading("Major Comments", level=1)
+    doc.add_paragraph(
+        "I identify no remaining major scientific or software-methods objection within the declared scope. "
+        "The architecture is non-trivial, the public objective is fully described, the software is testable, "
+        "and the manuscript does not claim universal improvement over standard visualization or clustering."
+    )
+
+    doc.add_heading("Minor Comments", level=1)
     add_numbered(
         doc,
         [
-            "Legacy KNN comparison: a matched MetRef benchmark reports the KNN-capable KODAMA 2.4.1 release and current single-core CPU, four-core CPU, and CUDA paths. It is explicitly labeled as a legacy KNN-to-KNN comparison, not as the current CRAN baseline. A separate comparison with current CRAN KODAMA 3.3 remains necessary and must disclose that its automatic PLS-DA path is not classifier-parity with latent-space PLS-LDA.",
-            "Continuous integration and coverage: the manually executed CPU, CUDA, Metal, R, and Python checks are substantial, but the repository does not yet contain a cross-platform CI workflow or a measured source-coverage report. Both remain release work under the JMLR MLOSS review criteria.",
-            "User documentation: installation and wrapper references are present, but the standalone C++ and Python interfaces still need one compact end-to-end tutorial and a browsable generated API site.",
-            "Public API and release identity: version 0.1.0, semantic-versioning policy, wrapper versions, and a compile-link API snapshot test are complete. The final tag, commit, source archive, and DOI remain external release actions and are not fabricated.",
-            "Licensing and provenance: pinned origins, SPDX identifiers, retained license texts, checksums, and the Metal Apache-2.0 exception are frozen in release documents. The residual coauthor-contribution confirmation is stated explicitly.",
-            "MLOSS format: the official-style main paper now occupies four description pages plus references; the detailed manuscript is retained as a technical supplement.",
-            "Visualization evidence: a fixed CUDA M=100/Tcycle=100 panel now reports both classifiers, both embeddings, runtime, ARI, active classes, silhouette, and local purity on five named nonspatial datasets. Its positive and negative outcomes, including the 44,808-sample scale case, are retained. Matched backend and historical-wrapper matrices remain required before broad empirical claims.",
+            "Create the clean v0.1.0 tag, archive that exact commit, and insert the archive digest and DOI before submission. The manuscript correctly leaves these fields unresolved instead of inventing them, but a software paper should cite an immutable artifact.",
+            "Complete the author-only cover-letter fields: coauthor consent, funding, competing interests, conflict-free editor/reviewer suggestions, and dated community metrics. These are submission formalities rather than defects in the software contribution.",
+            "Keep the current-CRAN comparison explicitly labeled as a short end-to-end systems check. KODAMA 3.3 automatically chooses its PLS route and is not classifier- or trajectory-parity with kodama-cpp PLS-LDA. The full M=100/Tcycle=100 legacy and sensitivity evidence should remain separate.",
+            "Document the native CUDA graph-builder limit k <= 256 prominently. Current CRAN couples a large landmark request to k=500 on MetRef, so an exactly matched CUDA row is correctly omitted rather than produced with a silent parameter change.",
+            "The measured CPU coverage is useful but moderate (63.58% lines and 57.03% branches). Graph clustering and several PLS helper paths are the clearest future test targets. CUDA and Metal hardware tests should continue to be reported separately rather than folded into the CPU percentage.",
+            "Most reported wall times are descriptive runs, not replicated performance distributions. Preserve that language and avoid inferential speed claims until repeated measurements across additional hardware are archived.",
         ],
     )
-    doc.add_heading("Revisions Applied", level=1)
+
+    doc.add_heading("Strengths", level=1)
     add_bullets(
         doc,
         [
-            "Removed application-specific discussion and focused the paper on the KODAMA principle and implementation.",
-            "Removed unsupported experimental paths and described only KNN and PLS-LDA as KODAMA classifiers.",
-            "Added theory framing for cross-validated label predictability.",
-            "Expanded the description of how high cross-validated accuracy label vectors are found: CV predictions guide group proposals, class-transition proposals aggregate unstable label movement, one CV pass evaluates each proposal, and a cooling acceptance rule maintains exploration.",
-            "Expanded the mathematical description into a reproducible KODAMA.matrix procedure, including M runs, Tcycle, landmark selection, splitting, constrained groups, proposal rules, temperature acceptance, and KODAMA graph correction.",
-            "Added KODAMA pseudocode that makes the initial CV evaluation, one-CV-per-cycle proposal loop, acceptance rule, projection step, and final graph reweighting explicit.",
-            "Added a focused single-run pseudocode block showing one independent M run as the stochastic unit repeated by the ensemble.",
-            "Completed a pinned licensing and provenance audit with per-file SPDX identifiers, retained third-party notices and license checksums, explicit KODAMA/fastPLS relicensing scope, and the MIT/Apache-2.0 Metal exception.",
-            "Added a public-literature comparison against the original KODAMA paper, the Bioinformatics R-package paper, and the documented R interface.",
-            "Added a related-work section positioning KODAMA relative to semi-supervised graph learning, pseudo-labeling, weak supervision, clustering stability, prediction strength, UMAP, t-SNE, and open-source ML reproducibility.",
-            "Added a compact architecture figure showing R/Python wrappers, the C++17 core, CPU, CUDA, and Metal backends, graph/embedding/clustering utilities, and typed outputs.",
-            "Reframed the implementation contribution around backend-native state ownership and added separate CUDA and Apple Metal subsections with explicit host/device boundaries, reusable workspaces, strict backend identity, and a shared parity contract.",
-            "Added implementation details on float32 storage, label-aware SIMPLS, package-owned CPU/CUDA/Metal neighbor search, independent M cycles, typed outputs, and release validation.",
-            "Replaced the installed FAISS/cuVS CUDA search path with package-owned exact/IVF KNN and k-means, and added clean-build, CTest, soname-audit, MNIST70k, and MetRef evidence.",
-            "Added an implementation-evidence matrix linking each claim to source files, tests, and measured benchmark rows.",
-            "Added evaluation guardrails that explicitly address circularity, parameter dependence, visualization bias, runtime attribution, and wrapper reproducibility.",
-            "Added an ablation matrix specifying the required classifier, graph-correction, M/Tcycle, landmark/splitting, backend, and wrapper-parity comparisons.",
-            "Added exact benchmark protocol, dataset coverage, and installation commands for the C++ core plus R and Python wrappers.",
-            "Added an explicit distinction between raw CV accuracy, proposal acceptance score, and external diagnostics.",
-            "Added a frozen 0.1.0 public API contract, version header, compile-link API test, changelog, contribution guide, prior-version delta, release checklist, and clean-tag archive script.",
-            "Separated the submission into an official four-page MLOSS paper plus references and a detailed technical supplement.",
-            "Added a track-specific cover-letter draft and a reviewer-comment response matrix with all author-only and external release fields left explicit.",
-            "Added resumable release-validation, nonspatial M/Tcycle sensitivity, historical-R, backend, and six-panel UMAP/openTSNE benchmark drivers.",
-            "Inserted completed current-validation results from the CUDA workstation: CV kernel speedups, CoreKNN/CorePLSLDA optimization medians, and the MetRef KODAMA.matrix validation benchmark.",
-            "Completed the named MetRef/USPS M/Tcycle sensitivity experiment on CUDA and inserted the numerical tables and curve figure.",
-            "Added an agreement-graph convergence analysis showing why M controls Monte Carlo precision rather than single-run optimization quality; reported empirical RMSE/correlation and the 1/(2 sqrt(M)) worst-case standard-error bound.",
-            "Updated the end-to-end MetRef evidence to M=100/Tcycle=100 and reported the KNN collapse alongside the much stronger PLS-LDA external-label and visualization diagnostics.",
-            "Replaced the obsolete short-run visualization preview with a reproducible five-dataset CUDA panel at M=100/Tcycle=100, archived its complete CSV and six-panel plots, and added a balanced silhouette/runtime/ARI figure that retains negative results.",
-            "Bounded each independent CUDA k-means assignment workspace at 256 MiB and row-batched exact centroid scoring, allowing the 44,808-sample nonspatial panel to complete with four concurrent M lanes on a 16 GiB GPU.",
-            "Completed the matched MetRef legacy KNN comparison: current single-core, four-core, and CUDA wall times are reported against KODAMA R 2.4.1, with explicit disclosure that it is not the current CRAN release and that proposal trajectories differ.",
-            "Removed draft-status boxes and footer language from the manuscript.",
+            "The distinction between raw CV accuracy, proposal acceptance score, and external diagnostics is unusually clear and prevents circular quality claims.",
+            "The single-run and ensemble pseudocode make the stochastic optimization independently implementable.",
+            "Backend identity is strict and testable; unavailable accelerators do not masquerade as successful CPU execution.",
+            "The evidence matrix links implementation claims to source locations, tests, and measured results.",
+            "Cross-platform GitHub Actions, measured CPU coverage, a frozen API test, provenance audit, and hosted documentation substantially strengthen MLOSS readiness.",
+            "The manuscript retains unfavorable datasets and states that KODAMA correction is classifier- and dataset-dependent.",
         ],
     )
-    doc.add_heading("Remaining Work", level=1)
-    add_bullets(
-        doc,
-        [
-            "Extend the completed five-dataset visualization panel to additional data domains and run the remaining matched backend and release-ablation matrices on the release hardware.",
-            "Add Linux and macOS continuous-integration jobs for the standalone core and wrappers, retain accelerator validation as a separately documented hardware job, and publish a measured line/branch coverage report.",
-            "Publish a compact C++/R/Python end-to-end tutorial and generated API documentation at a stable project URL.",
-            "Create and push the clean v0.1.0 tag, archive it, record the SHA-256 digest, and deposit it for an archival DOI.",
-            "Obtain coauthor consent; complete funding, competing-interest, action-editor, reviewer, and current user-community fields in the cover letter; and confirm that no adapted KODAMA or fastPLS code was supplied outside the inspected Git history, or retain the relevant permission.",
-        ],
-    )
+
     doc.add_heading("Reviewer Recommendation", level=1)
     doc.add_paragraph(
-        "Recommendation: promising JMLR MLOSS submission after the listed release-engineering actions. "
-        "The four-page paper is focused, the KODAMA search is reproducible from the text, the heterogeneous "
-        "architecture is a non-trivial software contribution, and limitations and negative results are stated "
-        "with unusual clarity. Additional theory is not the priority."
+        "Recommendation: Minor Revision. The manuscript and software are suitable in scope and technical "
+        "substance for JMLR MLOSS. The remaining requests concern release immutability, author declarations, "
+        "and sharper disclosure of benchmark and CUDA graph-size boundaries; they do not require a new "
+        "algorithm, a redesign of the implementation, or a major new experimental campaign."
     )
     doc.add_paragraph(
-        "The principal desk-review risks are the absence of committed cross-platform CI and measured coverage, "
-        "the lack of a stable hosted tutorial/API site, and incomplete tag, DOI, community-metric, and author "
-        "declarations. Broader benchmarks strengthen impact, but these software-quality items are at least as "
-        "important under the published MLOSS criteria."
+        "I would not recommend rejection or major revision on the basis of the limited current result set: the "
+        "paper already contains named multi-dataset positive and negative evidence, parameter sensitivity, "
+        "cross-platform validation, and a carefully bounded claim. Broader repeated benchmarks would increase "
+        "impact, but the present MLOSS contribution is primarily the reusable heterogeneous implementation."
     )
     doc.save(SELF_REVIEW)
 
@@ -2998,6 +3040,29 @@ def build_tex() -> None:
                 body.append(
                     f"{tex_escape(implementation)} & {tex_escape(backend)} & {tex_escape(workers)} & "
                     f"{tex_escape(seconds)} & {tex_escape(speedup)} & {tex_escape(cv_pair)} & "
+                    f"{tex_escape(ari_pair)} & {tex_escape(classes_pair)} \\\\"
+                )
+            body.append(r"\bottomrule")
+            body.append(r"\end{tabular}%")
+            body.append(r"}")
+            body.append(r"\end{table}")
+            body.append("")
+            body.append(r"\subsubsection{Current CRAN systems comparison}")
+            for paragraph in CURRENT_CRAN_COMPARISON_PARAGRAPHS:
+                body.append(tex_escape(paragraph))
+                body.append("")
+            body.append(r"\begin{table}[h]")
+            body.append(r"\caption{Short MetRef current-release systems comparison at M = 20 and Tcycle = 20. KODAMA 3.3 and kodama-cpp use different PLS classifier routes; this is not classifier parity.}")
+            body.append(r"\small")
+            body.append(r"\resizebox{\linewidth}{!}{%")
+            body.append(r"\begin{tabular}{llllllll}")
+            body.append(r"\toprule")
+            body.append(r"Implementation & Classifier route & Backend & Workers & Seconds & CV selected/median & ARI selected/median & Classes selected/median \\")
+            body.append(r"\midrule")
+            for implementation, classifier, backend, workers, seconds, cv_pair, ari_pair, classes_pair in CURRENT_CRAN_COMPARISON_ROWS:
+                body.append(
+                    f"{tex_escape(implementation)} & {tex_escape(classifier)} & {tex_escape(backend)} & "
+                    f"{tex_escape(workers)} & {tex_escape(seconds)} & {tex_escape(cv_pair)} & "
                     f"{tex_escape(ari_pair)} & {tex_escape(classes_pair)} \\\\"
                 )
             body.append(r"\bottomrule")

@@ -21,7 +21,7 @@ COVER_TXT = ROOT / "kodama_cpp_jmlr_cover_letter.txt"
 READINESS_DOCX = ROOT / "kodama_cpp_jmlr_submission_readiness.docx"
 
 SOFTWARE_VERSION = "0.1.0"
-REVIEWED_BASELINE = "0eb2261ec10c62082950acb6f7b1c9f98c4617a4"
+REVIEWED_BASELINE = "0e019c1c2d371e330355afa9ca7fa3b18761de0a"
 
 
 def build_main_tex() -> None:
@@ -58,7 +58,7 @@ def build_main_tex() -> None:
         \maketitle
 
         \begin{abstract}
-        KODAMA searches for latent structure by maximizing the held-out predictability of an evolving label vector. We present \texttt{kodama-cpp}, a standalone C++17 implementation that preserves this objective while reorganizing its repeated numerical work for multicore CPU, NVIDIA CUDA, and Apple Metal. One typed core owns float32 data, folds, labels, classifier workspaces, and graph outputs. KODAMA optimization exposes two classifiers: KNN and SIMPLS followed by latent-space LDA. Backend-specific implementations provide nearest-neighbor search, k-means initialization, label-aware SIMPLS cross-products, reusable workspaces, and strict backend identity without linking R, Python, FAISS, cuVS, RAFT, or Armadillo. Independent optimization runs can start from different sampled landmarks, and every proposal cycle performs exactly one cross-validation evaluation. The public API supports data matrices, supplied neighbor graphs, graph construction, float32 randomized PCA, and UMAP/openTSNE visualization; thin R and Python wrappers call the same interface. Validation separates classifier parity, kernel runtime, complete KODAMA runtime, and external-label diagnostics so that internal cross-validated accuracy is not mistaken for ground-truth recovery.
+        KODAMA searches for latent structure by maximizing the held-out predictability of evolving labels. We present \texttt{kodama-cpp}, a standalone C++17 implementation that preserves this objective across multicore CPU, NVIDIA CUDA, and Apple Metal. One float32 core owns folds, labels, classifier workspaces, and graph outputs. It exposes KNN and SIMPLS followed by latent-space LDA; backend implementations provide neighbor search, k-means, label-aware cross-products, reusable workspaces, and strict backend identity without runtime dependence on R, Python, FAISS, cuVS, RAFT, or Armadillo. Independent runs may sample different landmarks, and each proposal receives exactly one cross-validation evaluation. The matrix/graph API also provides PCA and UMAP/openTSNE, with thin R and Python wrappers. Validation separates classifier parity, kernel and complete runtimes, and external-label diagnostics.
         \end{abstract}
 
         \begin{keywords}
@@ -69,7 +69,7 @@ def build_main_tex() -> None:
 
         KODAMA treats a sample-label vector as an optimization variable rather than observed truth. A candidate labeling is useful when a classifier trained on some samples can reproduce it on held-out samples. The original method and R package established this cross-validated accuracy principle and used an ensemble of optimized label vectors to correct pairwise dissimilarities before visualization \citep{cacciatore2014kodama,cacciatore2017kodama}. The method is therefore related to prediction-strength and stability validation, but differs by placing held-out predictability inside the label search itself \citep{tibshirani2005predictionstrength}.
 
-        Repeated classifier fitting makes KODAMA a systems problem as well as a statistical one. Neighbor graphs, fold matrices, class encodings, projections, and evolving labels recur across many proposal cycles. \texttt{kodama-cpp} moves these operations into a standalone float32 core, keeps the KODAMA state machine common across backends, and exposes the same contract to R and Python. The contribution is a new portable implementation of established mathematics, not a replacement learning objective.
+        Repeated fitting also makes KODAMA a systems problem: graphs, folds, class encodings, and projections recur across proposals. \texttt{kodama-cpp} moves this work into one float32 core with a common state machine and R/Python contract. It is a portable implementation of established mathematics, not a replacement objective.
 
         \section{KODAMA objective and search}
 
@@ -79,12 +79,12 @@ def build_main_tex() -> None:
         \end{equation}
         KODAMA searches for label vectors with high $A$; it does not interpret $A$ as external accuracy. The current implementation uses either KNN or SIMPLS plus LDA in the requested feasible latent dimension \citep{dejong1993simpls}. Fold assignments remain fixed within a run, and constrained samples move as one group.
 
-        Each of $M$ runs uses seed $s+r$, selects up to $L$ landmarks, and initializes \texttt{splitting} labels by k-means. When the requested $L\ge n$, the historical rule $\lceil0.75n\rceil$ is retained. The default initial class count is 100 for $n<40000$ and 300 otherwise. At cycle $t$, the previous held-out predictions propose group relabelings. The largest proposal size decreases smoothly from broad to local moves,
+        Run $r$ uses seed $s+r$, up to $L$ landmarks, and \texttt{splitting} k-means labels. If $L\ge n$, the historical rule $\lceil0.75n\rceil$ is retained; initial classes default to 100 for $n<40000$ and 300 otherwise. Held-out predictions propose grouped relabelings whose maximum size decreases smoothly,
         \begin{equation}
           q_{\max}(t)=1+\left\lfloor(G-1)\left[1-p_t^2(3-2p_t)\right]\right\rfloor,
           \qquad p_t=\frac{t+1}{T+1},
         \end{equation}
-        and $q$ groups are sampled uniformly from $1,\ldots,q_{\max}(t)$. Class-transition proposals can absorb one or more source labels whose held-out predictions preferentially transition into a target, without permitting a one-class result. PLS--LDA additionally applies transition-driven coarsening when fragmented classes are unstable.
+        with $q$ sampled uniformly from $1,\ldots,q_{\max}(t)$. Transition proposals absorb source labels preferentially predicted as a target without permitting one class; PLS--LDA also coarsens unstable fragments.
 
         The proposed vector receives exactly one new CV pass. Raw $A$ is reported, while the default acceptance score guards against trivial predictability:
         \begin{equation}
@@ -95,7 +95,7 @@ def build_main_tex() -> None:
         After $T$ cycles, labels are projected from landmarks to all samples. Across runs, an original graph edge $(i,j)$ has agreement $a_{ij}$ equal to the fraction of valid runs assigning its endpoints the same label. Its corrected distance is $d'_{ij}=(1+d_{ij})/a_{ij}^2$; zero agreement removes the edge. This sparse graph is the KODAMA representation supplied to visualization.
 
         \begin{quote}\small
-        \textbf{One independent run.} Initialize landmarks, labels, folds, and one CV prediction; for $t=1,\ldots,T$: propose grouped and class-transition moves from the current predictions; evaluate the proposal once by CV; update the best state by $S$ and the current state by the cooling rule. Return the best raw accuracy and labels. Repeat independently for $r=1,\ldots,M$, project labels, and reweight the shared graph by run-wise agreement.
+        \textbf{One independent run.} Initialize landmarks, labels, folds, and one CV prediction. For $t=1,\ldots,T$, propose grouped/transition moves, evaluate once by CV, update the best by $S$, and update the current state by cooling. Return the best raw accuracy and labels. Repeat for $M$ independent runs, project labels, and reweight the shared graph by agreement.
         \end{quote}
 
         \section{Standalone heterogeneous implementation}
@@ -109,13 +109,13 @@ def build_main_tex() -> None:
         \label{fig:architecture}
         \end{figure}
 
-        Dense one-hot responses are avoided in PLS--LDA: $X^\top Y$ is computed from class-wise feature sums, and compact active labels are mapped to contiguous codes each cycle. Fold indices and workspaces are reused. The requested component count is evaluated wherever mathematically feasible; it is not selected by internal validation. Results include predictions, folds, confusion matrices, label ensembles, timings, memory, search parameters, and the backend that executed.
+        PLS--LDA avoids dense one-hot responses by computing $X^\top Y$ from class sums and compacting active labels each cycle. Fold indices and workspaces are reused. The requested feasible component count is evaluated without internal selection. Results record predictions, folds, confusion matrices, label ensembles, resources, search parameters, and the executing backend.
 
-        Graph input is an alternative API. KNN consumes supplied indices and distances; graph-only PLS--LDA uses one documented self-tuning normalized-Laplacian transform. PCA is an auxiliary primitive, not part of the KODAMA objective. Pinned fastEmbedR UMAP/openTSNE kernels use matched contracts for classic and corrected graphs, with direct float32 CSR construction and explicit binary or fuzzy UMAP edges \citep{mcinnes2018umap,vandermaaten2008tsne}.
+        The alternative graph API lets KNN consume supplied neighbors; graph-only PLS--LDA uses a documented self-tuning normalized Laplacian. PCA is auxiliary. Pinned fastEmbedR UMAP/openTSNE kernels use matched classic/corrected contracts and direct float32 CSR graphs \citep{mcinnes2018umap,vandermaaten2008tsne}.
 
         \section{Validation and scope}
 
-        Validation separates kernels from end-to-end runtime. CTest checks predictions, folds, requested components, PCA invariants, strict backend metadata, float32 inputs, graph utilities, and the frozen \texttt{0.1.0} API; wrappers test matrix, graph, PCA, and visualization calls. Table~\ref{tab:validation} reports within-platform measurements.
+        CTest checks numerical, float32, backend, graph, and frozen \texttt{0.1.0} API contracts; wrappers test matrix, graph, PCA, and visualization calls. GitHub Actions passed CPU jobs on Linux and macOS, native Metal, R/Python, coverage, and documentation. LLVM CPU coverage was 63.58\% by line and 57.03\% by branch; accelerators retain hardware-specific tests. Table~\ref{tab:validation} reports within-platform measurements.
 
         \begin{table}[t]
         \caption{Selected implementation validation. Accuracy is CPU/accelerator; runtime is seconds.}
@@ -134,15 +134,13 @@ def build_main_tex() -> None:
         \end{tabular}
         \end{table}
 
-        At matched MetRef KNN settings ($M=T=100$, \texttt{splitting}=50), the legacy KNN-capable KODAMA R 2.4.1 took 610.5 seconds; kodama-cpp CPU1, CPU4, and CUDA took 965.3, 235.5, and 2.36 seconds. All reached best raw $A=1$. This is neither a current-CRAN nor a trajectory-parity comparison.
+        At matched MetRef KNN settings ($M=T=100$, \texttt{splitting}=50), legacy KODAMA R 2.4.1 took 610.5 seconds versus 965.3, 235.5, and 2.36 seconds for kodama-cpp CPU1, CPU4, and CUDA. A short non-parity check ($M=T=20$, 655 landmarks, graph $k=500$) took 344.914 seconds for KODAMA 3.3 CPU4 and 822.989 seconds for kodama-cpp PLS--LDA CPU4; selected ARI was .7004/.6430. CUDA is omitted because $k=500$ exceeds its limit of 256.
 
-        An easily predicted labeling may still be too coarse, so raw accuracy, proposal score, and external diagnostics are separated. At $M=100$, increasing $T$ from 20 to 100 improved median accuracy and reduced fragmentation on USPS and MetRef PLS--LDA; MetRef KNN remained over-coarsened. $M$ instead controls ensemble precision: worst-case agreement-edge standard error is 0.05 at $M=100$, and all four $M=50$ graphs correlated at least 0.9888 with their $M=100$ counterparts. ARI was nonmonotone and was not tuned. A five-dataset panel, including 44,808 samples in its largest matrix, showed classifier- and dataset-dependent silhouette changes; the supplement retains all positive and negative results.
+        Raw accuracy, proposal score, and external diagnostics remain separate because predictability can be too coarse. Raising $T$ from 20 to 100 improved median accuracy and fragmentation for USPS and MetRef PLS--LDA, but MetRef KNN stayed over-coarsened. At $M=100$, worst-case agreement-edge standard error is .05; all $M=50$ graphs correlated at least .9888 with $M=100$. ARI was nonmonotone and untuned. A five-dataset panel (largest $n=44{,}808$) retained positive and negative silhouette changes.
 
         \section{Availability and limitations}
 
-        Version \texttt{0.1.0} is MIT licensed at \url{https://github.com/tkcaccia/kodama-cpp}; adapted portions retain upstream notices and the Metal Apache-2.0 exception. Provenance pins source snapshots, and release tests compile-link the API. The final commit and DOI await archival deposition.
-
-        Repeated CV fitting remains the main cost, and $M$-run orchestration is not fully device-resident. Approximate search may change neighbor ties within documented recall tolerances. Graph-only PLS--LDA is a spectral surrogate, not equivalent to data-input PLS--LDA; strict backend metadata exposes these boundaries.
+        Version \texttt{0.1.0} is MIT licensed at \url{https://github.com/tkcaccia/kodama-cpp}; retained notices include a Metal Apache-2.0 exception. Provenance and API tests are archived, and documentation is at \url{https://tkcaccia.github.io/kodama-cpp/}; the final tag/DOI remain pending. Repeated CV is the main cost, and $M$ runs are not fully device-resident. Approximate ties may vary. CUDA graph construction supports $k\leq256$ and raises otherwise. Graph-only PLS--LDA is a spectral surrogate, not data-input PLS--LDA.
 
         \newpage
         \bibliography{kodama_cpp_refs}
@@ -278,16 +276,16 @@ def build_readiness_report() -> None:
     )
     rows = [
         ("Legacy KNN comparison", "A matched MetRef KNN benchmark compares the KNN-capable KODAMA 2.4.1 release with kodama-cpp single-core CPU, four-core CPU, and CUDA paths. It is not presented as the current CRAN baseline.", "Completed on chiamaka"),
-        ("Current CRAN comparison", "KODAMA 3.3 is the current CRAN release. Its deprecated FUN argument is ignored and its automatic PLS-DA route is not classifier-parity with kodama-cpp latent-space PLS-LDA, so it requires a separately labeled end-to-end comparison.", "Benchmark pending"),
+        ("Current CRAN comparison", "A separately labeled MetRef M=20/Tcycle=20 systems check compares KODAMA 3.3 CPU4 with kodama-cpp PLS-LDA CPU4. It reports unfavorable results unchanged and explicitly states classifier non-parity and the CUDA k limit.", "Completed on chiamaka"),
         ("Frozen public API", "Version 0.1.0 macros, SemVer policy, CMake package version, wrapper versions, and a compile-link API snapshot test are present.", "Completed locally"),
         ("Version/tag/DOI", "Release checklist and clean-tag archive script prevent an uncommitted or dirty artifact from being cited.", "External tag and deposit pending"),
         ("License provenance", "Pinned upstream snapshots, per-component licensing, SPDX tests, retained licenses, and the Metal Apache exception are documented.", "Engineering audit complete; coauthor contribution confirmation remains"),
         ("MLOSS page budget", "The detailed manuscript is retained as a technical supplement; a separate official-style main paper targets four description pages plus references.", "Completed; four description pages plus references verified"),
         ("CUDA release build", "An isolated CUDA 13.2 release-candidate build passed all four configured CTests, including license, core, public-API, and float32 install-consumer checks.", "Completed on chiamaka"),
-        ("Continuous integration", "Manual CPU, CUDA, Metal, R, and Python checks are recorded, but no cross-platform GitHub Actions workflow or measured coverage report is yet committed.", "Release blocker"),
-        ("User documentation", "Installation and wrapper references exist; a compact end-to-end C++/R/Python tutorial and browsable generated API site are still needed.", "Release blocker"),
+        ("Continuous integration", "GitHub Actions builds and tests the CPU core on Linux/macOS, native Metal on macOS, and the R/Python wrappers on Ubuntu. A separate LLVM workflow reports CPU coverage.", "Completed at 0e019c1"),
+        ("User documentation", "A compact C++/R/Python walkthrough and generated Doxygen API are published through GitHub Pages.", "Completed and URL verified"),
         ("M/Tcycle rationale", "Named MetRef/USPS sweeps report CV accuracy, ARI, active classes, runtime, and agreement-graph convergence; M=100 is justified by ensemble precision rather than external-label tuning.", "Completed on CUDA"),
-        ("Final ablations", "The release driver fixes M=100, Tcycle=100, landmarks, k, ncomp, splitting, graph correction, backend, wrappers, and external metrics before inspection.", "Five-dataset CUDA panel complete, including the 44,808-sample scale case; matched-backend rows pending"),
+        ("Final ablations", "The release driver fixes M=100, Tcycle=100, landmarks, k, ncomp, splitting, graph correction, backend, wrappers, and external metrics before inspection.", "Five-dataset CUDA panel complete; current-CRAN CPU4 check complete; exact current-CRAN CUDA match excluded because k=500 exceeds the native CUDA limit"),
         ("Visualization claims", "Classic and KODAMA UMAP/openTSNE use the same implementation/settings. The completed five-dataset panel retains positive and negative results, and the paper explicitly declines a universal improvement claim.", "Completed for MetRef, PBMC3K PCA50, OptDigits, USPS, and Macosko2015 retina"),
         ("Cover letter", "A track-specific draft includes prior-publication disclosure, license, URL, version, software delta, and explicit author-only fields.", "Draft complete; author fields pending"),
         ("Release sustainability", "README, changelog, contribution guide, API policy, prior-version delta, validation protocol, and release checklist are included.", "Completed locally"),

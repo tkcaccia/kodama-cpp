@@ -1,0 +1,3 @@
+"dataset","implementation","scope","n","p","truth_classes","M","Tcycle","landmarks_requested","graph_neighbors","splitting","ncomp","seed","cores_requested","wall_seconds","selected_run","selected_accuracy","median_accuracy","selected_ari","median_ari","selected_classes","median_classes","min_classes","max_classes"
+"MetRef","cpu4","kodama-cpp SIMPLS plus latent-space LDA",873,375,22,20,20,100000,500,100,50,1234,4,822.989,4,0.980152671755725,0.954961832061069,0.643036547942798,0.658403803956225,30,35,24,41
+"MetRef","cran3.3","current CRAN KODAMA 3.3 automatic PLS route",873,375,22,20,20,100000,500,100,50,1234,4,344.914,11,0.989312977099237,0.974045801526718,0.700399291034122,0.696074333003976,20,20,17,24

@@ -135,7 +135,7 @@ main <- function() {
   dir.create(file.path(out_dir, "records"), recursive = TRUE, showWarnings = FALSE)
 
   datasets <- csv_env("KODAMA_COMPARE_DATASETS", "MetRef")
-  implementations <- csv_env("KODAMA_COMPARE_IMPLEMENTATIONS", "cran3.3,cpu4,cuda")
+  implementations <- csv_env("KODAMA_COMPARE_IMPLEMENTATIONS", "cran3.3,cpu4")
   paths <- dataset_paths(data_root)
   M <- integer_env("KODAMA_COMPARE_M", 100L)
   Tcycle <- integer_env("KODAMA_COMPARE_TCYCLE", 100L)
@@ -168,6 +168,13 @@ main <- function() {
     p <- ncol(x)
     ncomp <- min(ncomp_requested, p, n - 1L)
     graph_neighbors <- max(1L, floor(min(landmarks, n * 0.75 - 1, 500)))
+    if ("cuda" %in% implementations && graph_neighbors > 256L) {
+      stop(
+        "The matched current-CRAN graph requests k=", graph_neighbors,
+        ", but the native CUDA graph builder supports k <= 256. ",
+        "Do not change landmarks or graph k silently; omit cuda or run a separately labeled design."
+      )
+    }
 
     for (implementation in implementations) {
       path <- record_path(out_dir, dataset, implementation)

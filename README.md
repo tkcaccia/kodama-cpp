@@ -27,6 +27,7 @@ wrappers are included in this repository.
 | Use KODAMA from Python | [`split-repos/kodama-python/README.md`](split-repos/kodama-python/README.md) |
 | Build for NVIDIA CUDA or Apple Metal | [Accelerator builds](#accelerator-builds) |
 | Inspect the stable public surface | [`API_STABILITY.md`](API_STABILITY.md) |
+| Browse the generated API and tutorials | [kodama-cpp documentation](https://tkcaccia.github.io/kodama-cpp/) |
 
 The R and Python wrappers currently live under `split-repos/`. They are being
 prepared as independent repositories, but the embedded copies are the

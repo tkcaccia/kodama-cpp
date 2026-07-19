@@ -1,0 +1,37 @@
+timestamp_utc=2026-07-19 06:48:46 UTC
+KODAMA_version=3.3
+kodamaR_version=0.1.0
+M=20
+Tcycle=20
+landmarks_requested=100000
+splitting=100
+ncomp_requested=50
+seed=1234
+R version 4.6.0 (2026-04-24)
+Platform: x86_64-pc-linux-gnu
+Running under: Ubuntu 22.04.5 LTS
+
+Matrix products: default
+BLAS:   /usr/lib/x86_64-linux-gnu/blas/libblas.so.3.10.0
+LAPACK: /usr/lib/x86_64-linux-gnu/lapack/liblapack.so.3.10.0  LAPACK version 3.10.0
+
+locale:
+ [1] LC_CTYPE=C.UTF-8       LC_NUMERIC=C           LC_TIME=C.UTF-8
+ [4] LC_COLLATE=C.UTF-8     LC_MONETARY=C.UTF-8    LC_MESSAGES=C.UTF-8
+ [7] LC_PAPER=C.UTF-8       LC_NAME=C              LC_ADDRESS=C
+[10] LC_TELEPHONE=C         LC_MEASUREMENT=C.UTF-8 LC_IDENTIFICATION=C
+
+time zone: Africa/Johannesburg
+tzcode source: system (glibc)
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base
+
+other attached packages:
+[1] kodamaR_0.1.0 KODAMA_3.3    umap_0.2.10.0 Rtsne_0.17
+
+loaded via a namespace (and not attached):
+ [1] Matrix_1.7-5      lattice_0.22-7    reticulate_1.46.0 png_0.1-9
+ [5] cli_3.6.6         askpass_1.2.1     openssl_2.4.1     grid_4.6.0
+ [9] compiler_4.6.0    tools_4.6.0       RSpectra_0.16-2   Rcpp_1.1.1-1.1
+[13] rlang_1.2.0       jsonlite_2.0.0
