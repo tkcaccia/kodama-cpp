@@ -183,6 +183,11 @@ install(FILES
   RELEASE_CHECKLIST.md
   docs/previous-version-delta.md
   docs/release-validation.md
+  docs/backend-validation.md
+  docs/coverage.md
+  docs/getting-started.md
+  docs/mainpage.md
+  docs/r-api.md
   DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/kodama-cpp
 )
 

@@ -1,0 +1,31 @@
+name: CPU coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
+      - name: Measure core CPU coverage
+        env:
+          KODAMA_COVERAGE_CXX: clang++
+          KODAMA_LLVM_PROFDATA: llvm-profdata
+          KODAMA_LLVM_COV: llvm-cov
+        run: bash tools/run_cpu_coverage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kodama-cpp-cpu-coverage
+          path: |
+            coverage/coverage-summary.txt
+            coverage/coverage.lcov
+            coverage/html

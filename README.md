@@ -1,5 +1,9 @@
 # kodama-cpp
 
+[![CI](https://github.com/tkcaccia/kodama-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/tkcaccia/kodama-cpp/actions/workflows/ci.yml)
+[![CPU coverage](https://github.com/tkcaccia/kodama-cpp/actions/workflows/coverage.yml/badge.svg)](https://github.com/tkcaccia/kodama-cpp/actions/workflows/coverage.yml)
+[![API documentation](https://github.com/tkcaccia/kodama-cpp/actions/workflows/docs.yml/badge.svg)](https://github.com/tkcaccia/kodama-cpp/actions/workflows/docs.yml)
+
 **Standalone float32 KODAMA for CPU, NVIDIA CUDA, and Apple Metal.**
 
 `kodama-cpp` discovers informative sample structure by evolving label vectors

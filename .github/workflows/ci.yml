@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-cpu:
+    name: Core CPU (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build-ci
+          -DCMAKE_BUILD_TYPE=Release
+          -DKODAMA_ENABLE_CUDA=OFF
+          -DKODAMA_ENABLE_METAL=OFF
+          -DKODAMA_ENABLE_OPENMP=OFF
+          -DKODAMA_BUILD_EXAMPLES=ON
+          -DKODAMA_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build-ci --parallel 2
+      - name: Test
+        run: ctest --test-dir build-ci --output-on-failure
+
+  core-metal:
+    name: Core Metal (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build-metal-ci
+          -DCMAKE_BUILD_TYPE=Release
+          -DKODAMA_ENABLE_CUDA=OFF
+          -DKODAMA_ENABLE_METAL=ON
+          -DKODAMA_ENABLE_OPENMP=OFF
+          -DKODAMA_BUILD_EXAMPLES=OFF
+          -DKODAMA_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build-metal-ci --parallel 2
+      - name: Test
+        run: ctest --test-dir build-metal-ci --output-on-failure
+
+  r-wrapper:
+    name: R wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: split-repos/kodama-r
+      - name: Build core
+        run: >-
+          cmake -S . -B build-r-ci
+          -DCMAKE_BUILD_TYPE=Release
+          -DKODAMA_ENABLE_CUDA=OFF
+          -DKODAMA_ENABLE_METAL=OFF
+          -DKODAMA_ENABLE_OPENMP=OFF
+          -DKODAMA_BUILD_EXAMPLES=OFF
+          -DKODAMA_BUILD_TESTS=ON
+      - run: cmake --build build-r-ci --parallel 2
+      - name: Build R source package
+        env:
+          KODAMA_CPP_ROOT: ${{ github.workspace }}
+          KODAMA_CPP_BUILD_DIR: ${{ github.workspace }}/build-r-ci
+        run: R CMD build split-repos/kodama-r
+      - name: Check R package
+        env:
+          KODAMA_CPP_ROOT: ${{ github.workspace }}
+          KODAMA_CPP_BUILD_DIR: ${{ github.workspace }}/build-r-ci
+        run: R CMD check --no-manual --no-build-vignettes kodamaR_0.1.0.tar.gz
+
+  python-wrapper:
+    name: Python wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build core
+        run: >-
+          cmake -S . -B build-python-ci
+          -DCMAKE_BUILD_TYPE=Release
+          -DKODAMA_ENABLE_CUDA=OFF
+          -DKODAMA_ENABLE_METAL=OFF
+          -DKODAMA_ENABLE_OPENMP=OFF
+          -DKODAMA_BUILD_EXAMPLES=OFF
+          -DKODAMA_BUILD_TESTS=ON
+      - run: cmake --build build-python-ci --parallel 2
+      - name: Install wrapper
+        run: >-
+          python -m pip install -v "./split-repos/kodama-python[test]"
+          --config-settings=cmake.define.KODAMA_CPP_ROOT=${{ github.workspace }}
+          --config-settings=cmake.define.KODAMA_CPP_BUILD_DIR=${{ github.workspace }}/build-python-ci
+      - name: Test wrapper
+        run: pytest -q split-repos/kodama-python/tests
