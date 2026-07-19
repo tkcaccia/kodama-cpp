@@ -46,36 +46,35 @@ TOKENS = {
 
 
 AUTHORS = [
-    ("Moussa Kassim", "1,2"),
-    ("Martin Ocharo", "1,2"),
-    ("Alessia Vignoli", "3,4"),
-    ("Leonardo Tenori", "3,4"),
-    ("Stefano Cacciatore", "1,2"),
+    ("Moussa Kassim", "1,2", "moussa.kassim@icgeb.org"),
+    ("Martin Ocharo", "1,2", "martin.ocharo@icgeb.org"),
+    ("Dalia Ahmed", "1", "dalia.ahmed@icgeb.org"),
+    ("Dupe Ojo", "1", "dupe.ojo@icgeb.org"),
+    ("Alessia Vignoli", "3,4", "vignoli@cerm.unifi.it"),
+    ("Leonardo Tenori", "3,4", "tenori@cerm.unifi.it"),
+    ("Stefano Cacciatore", "1,2", "stefano.cacciatore@icgeb.org"),
 ]
 
 AFFILIATIONS = [
     (
         "1",
-        "Bioinformatics Unit, International Center for Genetic Engineering and Biotechnology, "
-        "Cape Town 7925, South Africa.",
+        "Bioinformatics Unit, International Centre for Genetic Engineering and Biotechnology "
+        "(ICGEB), Cape Town 7925, South Africa",
     ),
     (
         "2",
         "Department of Integrative Biomedical Sciences, Institute of Infectious Disease & Molecular "
-        "Medicine (IDM), University of Cape Town, Cape Town 7925, South Africa.",
+        "Medicine (IDM), University of Cape Town, Cape Town 7925, South Africa",
     ),
     (
         "3",
-        'Department of Chemistry "Ugo Schiff", University of Florence, Sesto Fiorentino, Italy.',
+        'Department of Chemistry "Ugo Schiff", University of Florence, Sesto Fiorentino, Italy',
     ),
     (
         "4",
-        "Magnetic Resonance Center (CERM), University of Florence, Sesto Fiorentino, Italy.",
+        "Magnetic Resonance Center (CERM), University of Florence, Sesto Fiorentino, Italy",
     ),
 ]
-
-CORRESPONDING_AUTHOR = "Stefano Cacciatore, stefano.cacciatore@icgeb.org"
-
 
 ABSTRACT = (
     "KODAMA searches for latent structure by maximizing the cross-validated predictability of an "
@@ -1854,20 +1853,30 @@ def add_title(
     set_run_font(run, 11)
     run.italic = True
 
-    p = doc.add_paragraph()
-    p.paragraph_format.space_after = Pt(4 if affiliations else 12)
     if author_records:
-        for index, (name, markers) in enumerate(author_records):
-            if index:
-                separator = ", and " if index == len(author_records) - 1 else ", "
-                run = p.add_run(separator)
-                set_run_font(run, 10, False, TOKENS["muted"])
+        table = doc.add_table(rows=0, cols=2)
+        for name, markers, email in author_records:
+            cells = table.add_row().cells
+            for cell in cells:
+                set_cell_margins(cell, top=0, bottom=0, start=0, end=0)
+            p = cells[0].paragraphs[0]
+            p.paragraph_format.space_after = Pt(0)
             run = p.add_run(name)
-            set_run_font(run, 10, False, TOKENS["muted"])
+            set_run_font(run, 10, True, TOKENS["muted"])
             run = p.add_run(markers)
             set_run_font(run, 8, False, TOKENS["muted"])
             run.font.superscript = True
+            p = cells[1].paragraphs[0]
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            p.paragraph_format.space_after = Pt(0)
+            run = p.add_run(email)
+            set_run_font(run, 8.5, False, TOKENS["muted"])
+            run.font.small_caps = True
+        set_table_width(table, [3.1, 3.35])
+        set_table_borders(table, color="FFFFFF", size="0")
     else:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(12)
         run = p.add_run(authors)
         set_run_font(run, 10, False, TOKENS["muted"])
 
@@ -1881,6 +1890,7 @@ def add_title(
             run.font.superscript = True
             run = p.add_run(" " + affiliation)
             set_run_font(run, 8.5, False, TOKENS["muted"])
+            run.italic = True
 
     if corresponding_author:
         p = doc.add_paragraph()
@@ -2157,7 +2167,6 @@ def build_docx() -> None:
         "",
         author_records=AUTHORS,
         affiliations=AFFILIATIONS,
-        corresponding_author=CORRESPONDING_AUTHOR,
     )
 
     doc.add_heading("Abstract", level=1)
@@ -2608,18 +2617,17 @@ def build_tex() -> None:
     body.append("")
     body.append(r"\begin{document}")
     body.append(r"\title{kodama-cpp: Cross-Validated Accuracy Maximization on CPU, CUDA, and Apple Metal}")
-    author_parts = [
-        r"\name " + tex_escape(name) + r"$^{" + markers + r"}$"
-        for name, markers in AUTHORS
-    ]
-    author_names = (
-        ", ".join(author_parts[:3])
-        + r" \\ "
-        + author_parts[3]
-        + r" \and "
-        + author_parts[4]
-    )
-    body.append(r"\author{" + author_names + r" \\")
+    body.append(r"\author{%")
+    for name, markers, email in AUTHORS:
+        body.append(
+            r"\name "
+            + tex_escape(name)
+            + r"$^{"
+            + markers
+            + r"}$ \email "
+            + tex_escape(email)
+            + r" \\"
+        )
     for marker, affiliation in AFFILIATIONS:
         affiliation_tex = tex_escape(affiliation).replace('"Ugo Schiff"', r"``Ugo Schiff''")
         if marker == "2":
@@ -2627,11 +2635,11 @@ def build_tex() -> None:
                 "Sciences, Institute",
                 r"Sciences, \\ \addr Institute",
             ).replace(
-                "(IDM), University",
-                r"(IDM), \\ \addr University",
+                "Medicine (IDM), University",
+                r"Medicine (IDM), \\ \addr University",
             )
         body.append(r"\addr $^{" + marker + r"}$ " + affiliation_tex + r" \\")
-    body.append(r"\email Corresponding author: " + tex_escape(CORRESPONDING_AUTHOR) + "}")
+    body.append(r"}")
     body.append(r"\editor{To be assigned}")
     body.append(r"\maketitle")
     body.append(r"\begin{abstract}")

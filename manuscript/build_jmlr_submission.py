@@ -37,7 +37,7 @@ def build_main_tex() -> None:
         \usepackage{url}
         \hypersetup{hidelinks}
 
-        \jmlrheading{1}{2026}{1--\pageref{LastPage}}{7/26}{}{26-0000}{Kassim, Ocharo, Vignoli, Tenori, and Cacciatore}
+        \jmlrheading{1}{2026}{1--\pageref{LastPage}}{7/26}{}{26-0000}{Kassim et al.}
         \ShortHeadings{kodama-cpp}{Kassim et al.}
         \firstpageno{1}
 
@@ -46,11 +46,15 @@ def build_main_tex() -> None:
         \title{kodama-cpp: Cross-Validated Accuracy Maximization on CPU, CUDA, and Apple Metal}
 
         \author{%
-        \name Moussa Kassim$^{1,2}$, Martin Ocharo$^{1,2}$, Alessia Vignoli$^{3,4}$,\\
-        Leonardo Tenori$^{3,4}$, and Stefano Cacciatore$^{1,2}$
-        \email stefano.cacciatore@icgeb.org\\
-        \addr $^1$Bioinformatics Unit, International Center for Genetic Engineering and Biotechnology, Cape Town 7925, South Africa\\
-        \addr $^2$Department of Integrative Biomedical Sciences, Institute of Infectious Disease \& Molecular Medicine, University of Cape Town, Cape Town 7925, South Africa\\
+        \name Moussa Kassim$^{1,2}$ \email moussa.kassim@icgeb.org\\
+        \name Martin Ocharo$^{1,2}$ \email martin.ocharo@icgeb.org\\
+        \name Dalia Ahmed$^{1}$ \email dalia.ahmed@icgeb.org\\
+        \name Dupe Ojo$^{1}$ \email dupe.ojo@icgeb.org\\
+        \name Alessia Vignoli$^{3,4}$ \email vignoli@cerm.unifi.it\\
+        \name Leonardo Tenori$^{3,4}$ \email tenori@cerm.unifi.it\\
+        \name Stefano Cacciatore$^{1,2}$ \email stefano.cacciatore@icgeb.org\\
+        \addr $^1$Bioinformatics Unit, International Centre for Genetic Engineering and Biotechnology (ICGEB), Cape Town 7925, South Africa\\
+        \addr $^2$Department of Integrative Biomedical Sciences, Institute of Infectious Disease \& Molecular Medicine (IDM), University of Cape Town, Cape Town 7925, South Africa\\
         \addr $^3$Department of Chemistry ``Ugo Schiff'', University of Florence, Sesto Fiorentino, Italy\\
         \addr $^4$Magnetic Resonance Center (CERM), University of Florence, Sesto Fiorentino, Italy}
 
@@ -236,7 +240,7 @@ def build_cover_letter() -> None:
     supplement.add_bullets(
         doc,
         [
-            "Coauthor consent: AUTHOR ACTION REQUIRED. Confirm that all five authors know of and consent to this submission.",
+            "Coauthor consent: AUTHOR ACTION REQUIRED. Confirm that all seven authors know of and consent to this submission.",
             "Funding supporting this work during the previous 36 months: AUTHOR ACTION REQUIRED.",
             "Competing interests and recent collaborations with JMLR action editors: AUTHOR ACTION REQUIRED.",
             "Suggested action editors: AUTHOR ACTION REQUIRED. Supply 3-5 conflict-free JMLR action editors with brief relevance statements.",
