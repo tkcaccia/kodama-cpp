@@ -17,6 +17,7 @@ kodama::DistanceMetric parse_metric(const std::string& metric) {
 kodama::Backend parse_backend(const std::string& backend) {
   if (backend == "cpu") return kodama::Backend::CPU;
   if (backend == "cuda") return kodama::Backend::CUDA;
+  if (backend == "metal") return kodama::Backend::Metal;
   Rcpp::stop("Unsupported backend: " + backend);
 }
 

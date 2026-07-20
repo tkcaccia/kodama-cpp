@@ -1441,6 +1441,7 @@ MetalSIMPLSResult metal_simpls_fit(
   result.y_weights.assign(static_cast<std::size_t>(responses) * static_cast<std::size_t>(components), 0.0f);
   std::vector<float> loadings(result.weights.size(), 0.0f);
   std::vector<float> s = cross_product;
+  const std::vector<float> s0 = cross_product;
 
   @autoreleasepool {
     MetalState& state = metal_state();
@@ -1532,66 +1533,41 @@ MetalSIMPLSResult metal_simpls_fit(
       );
     };
 
+    std::mt19937 generator(1u);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    std::vector<float> previous_weight;
+    int fitted_components = 0;
     for (int component = 0; component < components; ++component) {
-      std::vector<float> right(static_cast<std::size_t>(responses),
-        1.0f / std::sqrt(static_cast<float>(std::max(1, responses))));
       std::vector<float> weight(static_cast<std::size_t>(predictors), 0.0f);
-      for (int iteration = 0; iteration < 80; ++iteration) {
-        weight = cross_product_times(s, predictors, responses, right);
-        if (vector_norm(weight) <= 1e-6f) break;
-        normalize_vector(weight);
-        right = cross_product_transpose_times(s, predictors, responses, weight);
-        if (vector_norm(right) <= 1e-6f) break;
-        normalize_vector(right);
-      }
-      if (vector_norm(weight) <= 1e-6f) {
-        std::fill(weight.begin(), weight.end(), 0.0f);
-        weight.front() = 1.0f;
-      }
-      remove_stored_columns(weight, result.weights, predictors, components, component);
-      if (vector_norm(weight) <= 1e-6f) {
-        std::fill(weight.begin(), weight.end(), 0.0f);
-        weight[static_cast<std::size_t>(component % predictors)] = 1.0f;
+      if (previous_weight.empty()) {
+        for (float& value : weight) value = normal(generator);
       } else {
-        normalize_vector(weight);
+        weight = previous_weight;
       }
 
-      for (int iteration = 0; iteration < 120; ++iteration) {
-        std::vector<float> next = cross_product_times(
-          s,
-          predictors,
-          responses,
-          cross_product_transpose_times(s, predictors, responses, weight)
-        );
-        remove_stored_columns(next, result.weights, predictors, components, component);
-        if (vector_norm(next) <= 1e-6f) break;
-        normalize_vector(next);
-        weight.swap(next);
+      for (int iteration = 0; iteration < 2; ++iteration) {
+        const std::vector<float> response_projection =
+          cross_product_transpose_times(s, predictors, responses, weight);
+        weight = cross_product_times(s, predictors, responses, response_projection);
       }
-
-      right = cross_product_transpose_times(s, predictors, responses, weight);
-      const float singular_value = std::max(1e-6f, vector_norm(right));
-      for (float& value : right) value /= singular_value;
+      const float refresh_norm = vector_norm(weight);
+      if (!std::isfinite(refresh_norm) || refresh_norm <= 1.0e-10f) break;
+      for (float& value : weight) value /= refresh_norm;
 
       auto products = x_products(weight);
-      const std::vector<float>& scores = products.first;
-      const float score_norm_squared = vector_dot(scores, scores);
-      std::vector<float> loading = score_norm_squared > 1e-20 ? std::move(products.second) : weight;
-      if (score_norm_squared > 1e-20) {
-        const float scale = 1.0f / score_norm_squared;
-        for (float& value : loading) value *= scale;
-      }
+      const float score_norm = vector_norm(products.first);
+      if (!std::isfinite(score_norm) || score_norm <= 1.0e-10f) break;
+      const float inverse_score_norm = 1.0f / score_norm;
+      for (float& value : weight) value *= inverse_score_norm;
+      std::vector<float> loading = std::move(products.second);
+      for (float& value : loading) value *= inverse_score_norm;
+
+      const std::vector<float> response_weight =
+        cross_product_transpose_times(s0, predictors, responses, weight);
+      previous_weight = weight;
       remove_stored_columns(loading, loadings, predictors, components, component);
-      if (vector_norm(loading) <= 1e-6f) {
-        loading = weight;
-        remove_stored_columns(loading, loadings, predictors, components, component);
-      }
-      if (vector_norm(loading) <= 1e-6f) {
-        std::fill(loading.begin(), loading.end(), 0.0f);
-        loading[static_cast<std::size_t>(component % predictors)] = 1.0f;
-        remove_stored_columns(loading, loadings, predictors, components, component);
-      }
-      const float loading_norm = std::max(1e-6f, vector_norm(loading));
+      const float loading_norm = vector_norm(loading);
+      if (!std::isfinite(loading_norm) || loading_norm <= 1.0e-10f) break;
       for (float& value : loading) value /= loading_norm;
 
       for (int predictor = 0; predictor < predictors; ++predictor) {
@@ -1602,7 +1578,7 @@ MetalSIMPLSResult metal_simpls_fit(
       }
       for (int response = 0; response < responses; ++response) {
         result.y_weights[static_cast<std::size_t>(response) * static_cast<std::size_t>(components) +
-          static_cast<std::size_t>(component)] = right[static_cast<std::size_t>(response)];
+          static_cast<std::size_t>(component)] = response_weight[static_cast<std::size_t>(response)];
       }
 
       const std::vector<float> loading_cross = cross_product_transpose_times(
@@ -1618,6 +1594,40 @@ MetalSIMPLSResult metal_simpls_fit(
               loading_cross[static_cast<std::size_t>(response)];
         }
       }
+      fitted_components = component + 1;
+    }
+
+    if (fitted_components < 1) {
+      throw std::runtime_error("fastPLS-compatible Metal float32 SIMPLS fit failed.");
+    }
+    if (fitted_components < components) {
+      std::vector<float> fitted_weights(
+        static_cast<std::size_t>(predictors) * static_cast<std::size_t>(fitted_components),
+        0.0f
+      );
+      std::vector<float> fitted_y_weights(
+        static_cast<std::size_t>(responses) * static_cast<std::size_t>(fitted_components),
+        0.0f
+      );
+      for (int predictor = 0; predictor < predictors; ++predictor) {
+        for (int component = 0; component < fitted_components; ++component) {
+          fitted_weights[static_cast<std::size_t>(predictor) * static_cast<std::size_t>(fitted_components) +
+            static_cast<std::size_t>(component)] =
+              result.weights[static_cast<std::size_t>(predictor) * static_cast<std::size_t>(components) +
+                static_cast<std::size_t>(component)];
+        }
+      }
+      for (int response = 0; response < responses; ++response) {
+        for (int component = 0; component < fitted_components; ++component) {
+          fitted_y_weights[static_cast<std::size_t>(response) * static_cast<std::size_t>(fitted_components) +
+            static_cast<std::size_t>(component)] =
+              result.y_weights[static_cast<std::size_t>(response) * static_cast<std::size_t>(components) +
+                static_cast<std::size_t>(component)];
+        }
+      }
+      result.components = fitted_components;
+      result.weights = std::move(fitted_weights);
+      result.y_weights = std::move(fitted_y_weights);
     }
   }
   return result;

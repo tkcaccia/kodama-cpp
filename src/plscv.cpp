@@ -15,6 +15,7 @@
 #include <mutex>
 #include <memory>
 #include <numeric>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -417,6 +418,19 @@ std::vector<float> densef_to_colmajor(const DenseF& x) {
   return out;
 }
 
+DenseF densef_gram(const DenseF& x) {
+  DenseF gram(x.cols, x.cols);
+  for (int row = 0; row < x.cols; ++row) {
+    for (int col = 0; col <= row; ++col) {
+      float value = 0.0f;
+      for (int sample = 0; sample < x.rows; ++sample) value += x(sample, row) * x(sample, col);
+      gram(row, col) = value;
+      gram(col, row) = value;
+    }
+  }
+  return gram;
+}
+
 int sorted_class_index(const std::vector<int>& classes, int label) {
   const auto it = std::lower_bound(classes.begin(), classes.end(), label);
   if (it == classes.end() || *it != label) {
@@ -525,6 +539,7 @@ struct PLSFoldDataF {
   std::vector<float> scale;
   DenseF x_train;
   DenseF x_val;
+  DenseF x_train_gram;
   std::vector<float> x_train_colmajor;
   std::vector<float> x_train_gram_colmajor;
 };
@@ -557,6 +572,7 @@ struct PLSFoldXCacheF {
   std::uint64_t seed = 0;
   std::size_t constrain_hash = 0;
   bool train_colmajor = false;
+  bool train_gram = false;
   std::vector<int> fold_assignments;
   std::vector<int> fold_ids;
   std::vector<PLSFoldDataF> folds_data;
@@ -658,10 +674,19 @@ const PLSFoldXCacheF& get_pls_fold_x_cache_float(
   const std::vector<int>& labels,
   const std::vector<int>& constrain,
   const PLSOptions& options,
-  bool cache_train_colmajor
+  bool cache_train_colmajor,
+  bool cache_train_gram = false
 ) {
   thread_local PLSFoldXCacheF cache;
-  if (cache_matches_float(cache, x, constrain, options, cache_train_colmajor)) return cache;
+  if (cache_matches_float(cache, x, constrain, options, cache_train_colmajor)) {
+    if (cache_train_gram && !cache.train_gram) {
+      for (PLSFoldDataF& fold : cache.folds_data) {
+        if (fold.x_train.cols <= fold.x_train.rows) fold.x_train_gram = densef_gram(fold.x_train);
+      }
+      cache.train_gram = true;
+    }
+    return cache;
+  }
 
   cache = PLSFoldXCacheF{};
   cache.valid = true;
@@ -675,6 +700,7 @@ const PLSFoldXCacheF& get_pls_fold_x_cache_float(
   cache.seed = options.cv.seed;
   cache.constrain_hash = hash_int_vector(constrain);
   cache.train_colmajor = cache_train_colmajor;
+  cache.train_gram = false;
   cache.fold_assignments = detail::make_folds(labels, constrain, options.cv);
   cache.fold_ids = detail::sorted_unique_folds(cache.fold_assignments);
   cache.folds_data.reserve(cache.fold_ids.size());
@@ -1095,149 +1121,127 @@ std::vector<float> t_mat_vec_float(const DenseF& a, const std::vector<float>& x)
   return out;
 }
 
-std::vector<float> dominant_left_singular_vector_float(const DenseF& s) {
-  std::vector<float> u(static_cast<std::size_t>(s.cols), 1.0f / std::sqrt(static_cast<float>(std::max(1, s.cols))));
-  std::vector<float> v(static_cast<std::size_t>(s.rows), 0.0f);
-  for (int iter = 0; iter < 80; ++iter) {
-    v = mat_vec_float(s, u);
-    float nv = norm2_float(v);
-    if (nv <= 1e-6f) break;
-    for (float& x : v) x /= nv;
-    u = t_mat_vec_float(s, v);
-    float nu = norm2_float(u);
-    if (nu <= 1e-6f) break;
-    for (float& x : u) x /= nu;
-  }
-  if (norm2_float(v) <= 1e-6f) {
-    v.assign(static_cast<std::size_t>(s.rows), 0.0f);
-    if (!v.empty()) v[0] = 1.0f;
-  }
-  return v;
-}
-
-PLSFitF fit_pls_components_from_crossprod_float(const DenseF& x, DenseF s, int max_components) {
+PLSFitF fit_pls_components_from_crossprod_float(
+  const DenseF& x,
+  DenseF s,
+  int max_components,
+  const DenseF* x_gram = nullptr
+) {
   const int max_rank = std::min({max_components, x.cols, std::max(1, x.rows - 1)});
-  DenseF w(x.cols, max_rank);
-  DenseF qmat(s.cols, max_rank);
-  DenseF pmat(x.cols, max_rank);
-  for (int a = 0; a < max_rank; ++a) {
-    DenseF gram(s.rows, s.rows);
-    for (int i = 0; i < s.rows; ++i) {
-      for (int j = 0; j < s.rows; ++j) {
-        double val = 0.0;
-        for (int c = 0; c < s.cols; ++c) val += static_cast<double>(s(i, c)) * static_cast<double>(s(j, c));
-        gram(i, j) = static_cast<float>(val);
-      }
-    }
-    std::vector<float> wa = dominant_left_singular_vector_float(s);
-    for (int prev = 0; prev < a; ++prev) {
-      double proj = 0.0;
-      for (int j = 0; j < x.cols; ++j) proj += static_cast<double>(wa[static_cast<std::size_t>(j)]) * static_cast<double>(w(j, prev));
-      for (int j = 0; j < x.cols; ++j) wa[static_cast<std::size_t>(j)] -= static_cast<float>(proj * w(j, prev));
-    }
-    float nwa = norm2_float(wa);
-    if (nwa <= 1e-6f) {
-      std::fill(wa.begin(), wa.end(), 0.0f);
-      wa[static_cast<std::size_t>(a % x.cols)] = 1.0f;
-    } else {
-      for (float& v : wa) v /= nwa;
-    }
-    for (int iter = 0; iter < 120; ++iter) {
-      std::vector<float> next(static_cast<std::size_t>(x.cols), 0.0f);
-      for (int i = 0; i < x.cols; ++i) {
-        double val = 0.0;
-        for (int j = 0; j < x.cols; ++j) val += static_cast<double>(gram(i, j)) * static_cast<double>(wa[static_cast<std::size_t>(j)]);
-        next[static_cast<std::size_t>(i)] = static_cast<float>(val);
-      }
-      for (int prev = 0; prev < a; ++prev) {
-        double proj = 0.0;
-        for (int j = 0; j < x.cols; ++j) proj += static_cast<double>(next[static_cast<std::size_t>(j)]) * static_cast<double>(w(j, prev));
-        for (int j = 0; j < x.cols; ++j) next[static_cast<std::size_t>(j)] -= static_cast<float>(proj * w(j, prev));
-      }
-      float nn = norm2_float(next);
-      if (nn <= 1e-6f) break;
-      for (float& v : next) v /= nn;
-      wa.swap(next);
-    }
-    std::vector<float> right = t_mat_vec_float(s, wa);
-    const float sigma = std::max(1e-6f, norm2_float(right));
-    for (float& v : right) v /= sigma;
+  const DenseF s0 = s;
+  DenseF weights(x.cols, max_rank);
+  DenseF y_weights(s.cols, max_rank);
+  DenseF v_basis(x.cols, max_rank);
+  std::vector<float> previous_weight;
+  int fitted_rank = 0;
 
-    std::vector<float> t(static_cast<std::size_t>(x.rows), 0.0f);
-    for (int i = 0; i < x.rows; ++i) {
-      double val = 0.0;
-      for (int j = 0; j < x.cols; ++j) val += static_cast<double>(x(i, j)) * static_cast<double>(wa[static_cast<std::size_t>(j)]);
-      t[static_cast<std::size_t>(i)] = static_cast<float>(val);
-    }
-    double tnorm2 = 0.0;
-    for (float tv : t) tnorm2 += static_cast<double>(tv) * static_cast<double>(tv);
-    const double inv_tnorm2 = tnorm2 > 1e-20 ? 1.0 / tnorm2 : 0.0;
-    std::vector<float> vvec(static_cast<std::size_t>(x.cols), 0.0f);
-    if (inv_tnorm2 > 0.0) {
-      for (int j = 0; j < x.cols; ++j) {
-        double val = 0.0;
-        for (int i = 0; i < x.rows; ++i) val += static_cast<double>(x(i, j)) * static_cast<double>(t[static_cast<std::size_t>(i)]);
-        vvec[static_cast<std::size_t>(j)] = static_cast<float>(val * inv_tnorm2);
-      }
+  for (int a = 0; a < max_rank; ++a) {
+    std::vector<float> weight(static_cast<std::size_t>(x.cols), 0.0f);
+    if (!previous_weight.empty()) {
+      weight = previous_weight;
     } else {
-      vvec = wa;
+      std::mt19937 generator(1u);
+      std::normal_distribution<float> normal(0.0f, 1.0f);
+      for (float& value : weight) value = normal(generator);
     }
-    for (int prev = 0; prev < a; ++prev) {
-      double proj = 0.0;
-      for (int j = 0; j < x.cols; ++j) proj += static_cast<double>(vvec[static_cast<std::size_t>(j)]) * static_cast<double>(pmat(j, prev));
-      for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= static_cast<float>(proj * pmat(j, prev));
+
+    // fastPLS uses a one-vector incremental randomized refresh with two
+    // power iterations before each SIMPLS deflation step.
+    constexpr int power_iterations = 2;
+    for (int iteration = 0; iteration < power_iterations; ++iteration) {
+      const std::vector<float> response_projection = t_mat_vec_float(s, weight);
+      weight = mat_vec_float(s, response_projection);
     }
-    float nv = norm2_float(vvec);
-    if (nv <= 1e-6f) {
-      vvec = wa;
-      for (int prev = 0; prev < a; ++prev) {
-        double proj = 0.0;
-        for (int j = 0; j < x.cols; ++j) proj += static_cast<double>(vvec[static_cast<std::size_t>(j)]) * static_cast<double>(pmat(j, prev));
-        for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= static_cast<float>(proj * pmat(j, prev));
+    const float refresh_norm = norm2_float(weight);
+    if (!std::isfinite(refresh_norm) || refresh_norm <= 1.0e-10f) break;
+    for (float& value : weight) value /= refresh_norm;
+
+    std::vector<float> loading;
+    if (x_gram != nullptr && x_gram->rows == x.cols && x_gram->cols == x.cols) {
+      loading = mat_vec_float(*x_gram, weight);
+      const float score_norm_squared = dot_float(weight, loading);
+      if (!std::isfinite(score_norm_squared) || score_norm_squared <= 1.0e-20f) break;
+      const float inverse_score_norm = 1.0f / std::sqrt(score_norm_squared);
+      for (float& value : weight) value *= inverse_score_norm;
+      for (float& value : loading) value *= inverse_score_norm;
+    } else {
+      std::vector<float> scores(static_cast<std::size_t>(x.rows), 0.0f);
+      for (int i = 0; i < x.rows; ++i) {
+        float value = 0.0f;
+        for (int j = 0; j < x.cols; ++j) value += x(i, j) * weight[static_cast<std::size_t>(j)];
+        scores[static_cast<std::size_t>(i)] = value;
       }
-      nv = norm2_float(vvec);
+      const float score_norm = norm2_float(scores);
+      if (!std::isfinite(score_norm) || score_norm <= 1.0e-10f) break;
+      const float inverse_score_norm = 1.0f / score_norm;
+      for (float& value : scores) value *= inverse_score_norm;
+      for (float& value : weight) value *= inverse_score_norm;
+      loading = t_mat_vec_float(x, scores);
     }
-    if (nv <= 1e-6f) {
-      std::fill(vvec.begin(), vvec.end(), 0.0f);
-      vvec[static_cast<std::size_t>(a % x.cols)] = 1.0f;
-      for (int prev = 0; prev < a; ++prev) {
-        double proj = 0.0;
-        for (int j = 0; j < x.cols; ++j) proj += static_cast<double>(vvec[static_cast<std::size_t>(j)]) * static_cast<double>(pmat(j, prev));
-        for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= static_cast<float>(proj * pmat(j, prev));
-      }
-      nv = std::max(norm2_float(vvec), 1e-6f);
+    const std::vector<float> response_weight = t_mat_vec_float(s0, weight);
+    previous_weight = weight;
+
+    for (int previous = 0; previous < a; ++previous) {
+      float projection = 0.0f;
+      for (int j = 0; j < x.cols; ++j) projection += v_basis(j, previous) * loading[static_cast<std::size_t>(j)];
+      for (int j = 0; j < x.cols; ++j) loading[static_cast<std::size_t>(j)] -= projection * v_basis(j, previous);
     }
-    for (float& vv : vvec) vv /= nv;
+    const float loading_norm = norm2_float(loading);
+    if (!std::isfinite(loading_norm) || loading_norm <= 1.0e-10f) break;
+    for (float& value : loading) value /= loading_norm;
 
     for (int j = 0; j < x.cols; ++j) {
-      w(j, a) = wa[static_cast<std::size_t>(j)];
-      pmat(j, a) = vvec[static_cast<std::size_t>(j)];
+      weights(j, a) = weight[static_cast<std::size_t>(j)];
+      v_basis(j, a) = loading[static_cast<std::size_t>(j)];
     }
-    for (int j = 0; j < s.cols; ++j) qmat(j, a) = right[static_cast<std::size_t>(j)];
+    for (int j = 0; j < s.cols; ++j) y_weights(j, a) = response_weight[static_cast<std::size_t>(j)];
 
     std::vector<float> vs(static_cast<std::size_t>(s.cols), 0.0f);
     for (int c = 0; c < s.cols; ++c) {
-      double val = 0.0;
-      for (int j = 0; j < s.rows; ++j) val += static_cast<double>(vvec[static_cast<std::size_t>(j)]) * static_cast<double>(s(j, c));
-      vs[static_cast<std::size_t>(c)] = static_cast<float>(val);
+      float value = 0.0f;
+      for (int j = 0; j < s.rows; ++j) value += loading[static_cast<std::size_t>(j)] * s(j, c);
+      vs[static_cast<std::size_t>(c)] = value;
     }
     for (int j = 0; j < s.rows; ++j) {
       for (int c = 0; c < s.cols; ++c) {
-        s(j, c) -= vvec[static_cast<std::size_t>(j)] * vs[static_cast<std::size_t>(c)];
+        s(j, c) -= loading[static_cast<std::size_t>(j)] * vs[static_cast<std::size_t>(c)];
       }
     }
+    fitted_rank = a + 1;
   }
-  return PLSFitF{w, qmat};
+
+  if (fitted_rank < 1) {
+    throw std::runtime_error("fastPLS-compatible CPU float32 SIMPLS fit failed.");
+  }
+  if (fitted_rank == max_rank) return PLSFitF{std::move(weights), std::move(y_weights)};
+
+  DenseF fitted_weights(x.cols, fitted_rank);
+  DenseF fitted_y_weights(s.cols, fitted_rank);
+  for (int component = 0; component < fitted_rank; ++component) {
+    for (int feature = 0; feature < x.cols; ++feature) {
+      fitted_weights(feature, component) = weights(feature, component);
+    }
+    for (int response = 0; response < s.cols; ++response) {
+      fitted_y_weights(response, component) = y_weights(response, component);
+    }
+  }
+  return PLSFitF{std::move(fitted_weights), std::move(fitted_y_weights)};
 }
 
 PLSFitF fit_pls_components_labels_float(
   const DenseF& x,
   const std::vector<int>& y_train,
   const std::vector<int>& classes,
-  int max_components
+  int max_components,
+  const DenseF* x_gram = nullptr
 ) {
   const int max_rank = pls_component_limit(max_components, x.rows, x.cols);
-  return fit_pls_components_from_crossprod_float(x, centered_label_crossprod_float(x, y_train, classes), max_rank);
+  return fit_pls_components_from_crossprod_float(
+    x,
+    centered_label_crossprod_float(x, y_train, classes),
+    max_rank,
+    x_gram
+  );
 }
 
 PLSFitF fit_pls_components_labels_metal_float(
@@ -1962,6 +1966,41 @@ DenseF solve_linear_float(DenseF a, DenseF b) {
   return b;
 }
 
+bool cholesky_solve_float(const DenseF& matrix, const DenseF& rhs, DenseF& solution) {
+  if (matrix.rows != matrix.cols || rhs.rows != matrix.rows) return false;
+  const int n = matrix.rows;
+  DenseF lower(n, n);
+  for (int row = 0; row < n; ++row) {
+    for (int col = 0; col <= row; ++col) {
+      float value = matrix(row, col);
+      for (int k = 0; k < col; ++k) value -= lower(row, k) * lower(col, k);
+      if (row == col) {
+        if (!std::isfinite(value) || value <= 0.0f) return false;
+        lower(row, col) = std::sqrt(value);
+      } else {
+        const float diagonal = lower(col, col);
+        if (!std::isfinite(diagonal) || diagonal <= 0.0f) return false;
+        lower(row, col) = value / diagonal;
+      }
+    }
+  }
+
+  solution = rhs;
+  for (int column = 0; column < rhs.cols; ++column) {
+    for (int row = 0; row < n; ++row) {
+      float value = solution(row, column);
+      for (int k = 0; k < row; ++k) value -= lower(row, k) * solution(k, column);
+      solution(row, column) = value / lower(row, row);
+    }
+    for (int row = n - 1; row >= 0; --row) {
+      float value = solution(row, column);
+      for (int k = row + 1; k < n; ++k) value -= lower(k, row) * solution(k, column);
+      solution(row, column) = value / lower(row, row);
+    }
+  }
+  return true;
+}
+
 std::vector<int> predict_pls_lda_float(
   const DenseF& t_train,
   const std::vector<int>& y_train,
@@ -1984,30 +2023,42 @@ std::vector<int> predict_pls_lda_float(
   }
 
   DenseF pooled(ncomp, ncomp);
-  for (int i = 0; i < t_train.rows; ++i) {
-    const int c = encoded[static_cast<std::size_t>(i)];
-    for (int r = 0; r < ncomp; ++r) {
-      const float dr = t_train(i, r) - cent(c, r);
-      for (int col = 0; col < ncomp; ++col) {
-        const float dc = t_train(i, col) - cent(c, col);
-        pooled(r, col) += dr * dc;
-      }
-    }
-  }
   const float df = static_cast<float>(std::max(1, t_train.rows - cnum));
   float trace = 0.0f;
   for (int r = 0; r < ncomp; ++r) {
-    for (int col = 0; col < ncomp; ++col) pooled(r, col) /= df;
+    for (int col = 0; col <= r; ++col) {
+      float total = 0.0f;
+      for (int i = 0; i < t_train.rows; ++i) total += t_train(i, r) * t_train(i, col);
+      float between = 0.0f;
+      for (int c = 0; c < cnum; ++c) {
+        between += static_cast<float>(counts[static_cast<std::size_t>(c)]) * cent(c, r) * cent(c, col);
+      }
+      const float covariance = (total - between) / df;
+      pooled(r, col) = covariance;
+      pooled(col, r) = covariance;
+    }
     trace += pooled(r, r);
   }
-  const float ridge = 1e-8f * (std::isfinite(trace) && trace > 0.0f ? trace / static_cast<float>(std::max(1, ncomp)) : 1.0f);
-  for (int r = 0; r < ncomp; ++r) pooled(r, r) += ridge;
 
   DenseF rhs(ncomp, cnum);
   for (int c = 0; c < cnum; ++c) {
     for (int a = 0; a < ncomp; ++a) rhs(a, c) = cent(c, a);
   }
-  DenseF solved = solve_linear_float(pooled, rhs);
+  const float ridge_scale = std::isfinite(trace) && trace > 0.0f ?
+    trace / static_cast<float>(std::max(1, ncomp)) : 1.0f;
+  const float ridge_grid[] = {1e-8f, 1e-6f, 1e-5f, 1e-4f, 1e-3f, 1e-2f};
+  DenseF solved;
+  bool factorized = false;
+  for (float ridge : ridge_grid) {
+    DenseF covariance = pooled;
+    const float lambda = ridge * ridge_scale;
+    for (int component = 0; component < ncomp; ++component) covariance(component, component) += lambda;
+    if (cholesky_solve_float(covariance, rhs, solved)) {
+      factorized = true;
+      break;
+    }
+  }
+  if (!factorized) throw std::runtime_error("CPU float32 PLS-LDA Cholesky factorization failed.");
 
   DenseF linear(cnum, ncomp);
   std::vector<float> constants(static_cast<std::size_t>(cnum), 0.0f);
@@ -2784,7 +2835,7 @@ PLSCVResult run_plscv_host(
   result.true_labels = labels;
   const bool use_fold_cache = !options.cv.stratified;
   const PLSFoldXCacheF* fold_cache = use_fold_cache ?
-    &get_pls_fold_x_cache_float(x, labels, constrain, options, false) : nullptr;
+    &get_pls_fold_x_cache_float(x, labels, constrain, options, false, backend == Backend::CPU) : nullptr;
   result.fold_assignments = fold_cache != nullptr ?
     fold_cache->fold_assignments :
     detail::make_folds(labels, constrain, options.cv);
@@ -2806,12 +2857,14 @@ PLSCVResult run_plscv_host(
     const std::vector<int>* train = nullptr;
     const DenseF* x_train = nullptr;
     const DenseF* x_val = nullptr;
+    const DenseF* x_train_gram = nullptr;
     if (fold_cache != nullptr) {
       const PLSFoldDataF& fold_data = fold_cache->folds_data[fold_pos];
       validation = &fold_data.validation;
       train = &fold_data.train;
       x_train = &fold_data.x_train;
       x_val = &fold_data.x_val;
+      if (fold_data.x_train_gram.rows > 0) x_train_gram = &fold_data.x_train_gram;
     } else {
       validation_storage = detail::indices_where_fold(result.fold_assignments, fold, true);
       train_storage = detail::indices_where_fold(result.fold_assignments, fold, false);
@@ -2837,8 +2890,13 @@ PLSCVResult run_plscv_host(
       return;
     }
     PLSFitF fit = backend == Backend::Metal ?
-      fit_pls_components_labels_metal_float(*x_train, y_train_labels, fold_classes, options.max_components) :
-      fit_pls_components_labels_float(*x_train, y_train_labels, fold_classes, options.max_components);
+      fit_pls_components_labels_metal_float(
+        *x_train,
+        y_train_labels,
+        fold_classes,
+        options.max_components
+      ) :
+      fit_pls_components_labels_float(*x_train, y_train_labels, fold_classes, options.max_components, x_train_gram);
     const std::vector<int> eval_components = components_to_evaluate(options, fit.weights.cols);
     fold_evaluated_components[fold_pos] = eval_components.front();
     DenseF t_train_full = backend == Backend::Metal ?

@@ -27,6 +27,7 @@ NONSPATIAL_PANEL_FIGURE = (
     / "jmlr_nonspatial_panel_20260718"
     / "nonspatial_visualization_validation.png"
 )
+METREF_BACKEND_FIGURE = ROOT / "MetRef__pls_lda__cpu_cuda_optimized_20260720.png"
 
 
 TOKENS = {
@@ -223,6 +224,18 @@ SECTIONS = [
                 "mathematically feasible, rather than being replaced by an internal model-selection "
                 "shortcut. The library exposes no PLS-cKNN classifier; KODAMA optimization is limited "
                 "to KNN and PLS-LDA."
+            ),
+            (
+                "Latent-space LDA is fitted from sufficient statistics. For training scores T, "
+                "class counts n_c, class means mu_c, q retained components, and C active classes, "
+                "the pooled within-class covariance is [T' T - sum_c n_c mu_c mu_c'] / "
+                "max(1, n - C). Each discriminant direction solves Sigma w_c = mu_c by Cholesky "
+                "factorization and triangular substitution; Sigma is never explicitly inverted. "
+                "The diagonal regularizer is lambda = rho s, where s = trace(Sigma) / q when "
+                "finite and positive and s = 1 otherwise. The deterministic sequence rho in "
+                "{1e-8, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2} is advanced only when Cholesky fails. "
+                "Prediction retains the ordinary LDA discriminant t' w_c - 0.5 mu_c' w_c + "
+                "log(n_c / n); the sequence is a numerical safeguard, not a tuned parameter."
             ),
             (
                 "The library also exposes float32 randomized PCA as a preprocessing and embedding-"
@@ -474,6 +487,17 @@ CUDA_BACKEND_PARAGRAPHS = [
         "fold caches retain train/validation layouts and reusable Gram information."
     ),
     (
+        "The default rank-one randomized SIMPLS refresh uses two power iterations. CUDA dispatches "
+        "the resulting rank-one products as matrix-vector operations and omits the algebraically "
+        "redundant 1-by-1 block eigensolve. After the first component, the preceding weight is the "
+        "defined warm start, so the implementation also omits generation of a random vector that "
+        "would be overwritten before use; this removes launches without changing any SIMPLS value. "
+        "The multi-vector refresh remains available under the same deflation equations. Latent LDA "
+        "forms pooled covariance from score and class-sum "
+        "statistics, retries the trace-normalized ridge sequence only after a failed Cholesky "
+        "factorization, and copies back predicted codes rather than score matrices."
+    ),
+    (
         "The CUDA backend reduces allocation and transfer costs but the present release does not "
         "claim that the complete M-run ensemble is permanently device resident. Independent runs "
         "are scheduled without changing their seeds or proposal trajectories, and small control "
@@ -493,8 +517,9 @@ METAL_BACKEND_PARAGRAPHS = [
     (
         "The Metal PLS-LDA path uses float32 class-label cross-products and the same SIMPLS component "
         "limit as CPU and CUDA. Metal Performance Shaders execute the dominant Xw and X't matrix "
-        "products through MPSMatrixMultiplication. The comparatively small response-space power "
-        "iterations and SIMPLS deflation updates remain host operations. This division is stated "
+        "products through MPSMatrixMultiplication. The same two-iteration incremental refresh and "
+        "SIMPLS loading deflation are used on all three backends; the comparatively small response-"
+        "space products and deflation updates remain host operations. This division is stated "
         "explicitly because a native Metal backend does not imply that every scalar operation is a "
         "GPU kernel."
     ),
@@ -502,7 +527,9 @@ METAL_BACKEND_PARAGRAPHS = [
         "Metal is a first-class backend contract: it has named KNNCV, PLSLDACV, CoreKNN, CorePLSLDA, "
         "and KODAMAMatrix entry points, reports Metal in result metadata, and is covered by dedicated "
         "parity tests. Unsupported Metal operations fail explicitly instead of being relabeled CPU "
-        "execution. This makes Apple GPU results auditable in the same manner as CUDA results."
+        "execution. The R integration layer accepts backend = 'metal' explicitly and links the Metal, "
+        "MetalPerformanceShaders, and Foundation system frameworks without FAISS or cuVS link flags. "
+        "This makes Apple GPU results auditable in the same manner as CUDA results."
     ),
 ]
 
@@ -912,7 +939,7 @@ PILOT_EXPERIMENT_PARAGRAPHS = [
         "The current package-owned CUDA IVF-Flat path was checked on MNIST70k and MetRef with five-fold cosine KNNCV and k = 10. On MNIST70k it produced accuracy 0.973857 in 4.233 s with nlist = 237 and maximum nprobe = 32, compared with 0.973029 in 4.753 s for the recorded former FAISS/cuVS row. On MetRef it produced 0.816724 in 0.195 s, compared with 0.814433 in 0.297 s. These are implementation spot checks rather than repeated-run performance estimates."
     ),
     (
-        "The M = 100, Tcycle = 100 MetRef validation shows why cross-validated accuracy is reported together with label-quality diagnostics. Both optimizers reached best CV accuracy 1.000, but KNN selected only three classes and had ARI 0.052. PLS-LDA selected 21 classes against 22 reference classes, attained ARI 0.770, and increased truth-label UMAP silhouette from 0.129 for the classic graph to 0.783 for the KODAMA graph. These reference labels were never supplied to optimization. We therefore report CV accuracy, active classes, external-label agreement when available, and downstream compactness as complementary rather than interchangeable diagnostics."
+        "The current M = 100, Tcycle = 100 MetRef validation shows why cross-validated accuracy is reported together with label-quality diagnostics. Optimized CPU and CUDA PLS-LDA both reached maximum CV accuracy 1.000 and median CV accuracy 0.992366. The CV-selected CPU/CUDA runs contained 24/21 classes and attained ARI 0.7654/0.8322 against the 22 reference classes. With one exact k = 30 UMAP implementation, a shared original-data PCA initialization, and reference labels withheld until evaluation, truth-label silhouette increased from 0.119 for the classic graph to 0.8303/0.8441 for the CPU/CUDA KODAMA graphs. We therefore report CV accuracy, active classes, external-label agreement when available, and downstream compactness as complementary rather than interchangeable diagnostics."
     ),
     (
         "The dependency-distilled CUDA build links CUDA Toolkit libraries but no FAISS, cuVS, RAFT, or RMM soname. Binary wrappers therefore need to locate the CUDA runtime selected at build time, but do not need to provision the removed search libraries."
@@ -921,7 +948,7 @@ PILOT_EXPERIMENT_PARAGRAPHS = [
 
 
 BENCHMARK_PROTOCOL_ROWS = [
-    ("Date", "2026-07-19 UTC for current-CRAN and CI/coverage validation; 2026-07-18 UTC for CUDA visualization validation; M/Tcycle validation dated 2026-07-16 UTC; earlier broad kernel snapshot dated 2026-07-06 UTC"),
+    ("Date", "2026-07-20 UTC for current CPU/CUDA/Metal PLS-LDA validation; 2026-07-19 UTC for current-CRAN and CI/coverage validation; earlier release-validation snapshots are dated explicitly"),
     ("GPU", "NVIDIA GeForce RTX 5060 Ti, 16 GB device memory, driver 595.71.05"),
     ("Build validation", "Fresh CUDA 13.2 build succeeded; CTest passed 4/4 configured tests in 1.91 s"),
     ("Runtime", "CUDA Toolkit only for native search/PLS paths; no FAISS, cuVS, RAFT, RMM, or Armadillo link"),
@@ -937,8 +964,8 @@ METAL_VALIDATION_PARAGRAPHS = [
     (
         "The dependency-light backend experiment was run on macOS with CUDA and OpenMP disabled. "
         "The CPU build therefore measures the package-owned HNSW and float32 SIMPLS/LDA implementations, "
-        "while the Metal build links only Apple system frameworks. Exact CPU/Metal equality of the reported "
-        "classification metrics is the primary acceptance criterion; timings are secondary evidence."
+        "while the Metal build links only Apple system frameworks. CPU/Metal agreement within the documented "
+        "float32 tolerance is the primary acceptance criterion; timings are secondary evidence."
     ),
     (
         "Metal IVF-Flat remains an explicit option rather than an automatic replacement for exact search. "
@@ -952,9 +979,9 @@ METAL_VALIDATION_PARAGRAPHS = [
 
 METAL_VALIDATION_ROWS = [
     ("MetRef", "KNNCV", "11.145", "0.026", "425x", "accuracy 0.827033 / 0.827033"),
-    ("MetRef", "PLSLDACV, 50 components", "3.395", "1.054", "3.2x", "accuracy 0.991982 / 0.991982"),
+    ("MetRef", "PLSLDACV, 50 components, five-run median", "0.790", "0.202", "3.90x", "accuracy 0.990836 / 0.989691"),
     ("MetRef", "KODAMA KNN, M=10 T=20", "21.709", "0.171", "127x", "CV 0.978626; ARI 0.093922; 15 classes"),
-    ("MetRef", "KODAMA PLS-LDA, M=10 T=20", "178.403", "78.746", "2.27x", "CV 0.983206; ARI 0.835153; 32 classes"),
+    ("MetRef", "KODAMA PLS-LDA, M=8 T=20", "14.930", "6.900", "2.16x", "best CV 0.963359 / 0.969466; ARI 0.741026 / 0.849732"),
 ]
 
 
@@ -1107,7 +1134,7 @@ KODAMA_BACKEND_COMPARISON_ROWS = [
 
 PILOT_MATRIX_ROWS = [
     ("KNN", "3.115", "2.646", "1.0000/0.8809", "0.0517/0.0613", "9", "2-52"),
-    ("PLS-LDA", "584.089", "584.074", "1.0000/0.9924", "0.7700/0.7048", "24", "15-34"),
+    ("PLS-LDA", "177.131", "173.104", "1.0000/0.9924", "0.9171/0.7095", "24", "11-33"),
 ]
 
 
@@ -1187,7 +1214,7 @@ VISUALIZATION_COMPARISON_PARAGRAPHS = [
     ),
     (
         "The result is deliberately mixed. PLS-LDA increased truth-label silhouette on both embeddings "
-        "for MetRef (UMAP 0.105 to 0.815; openTSNE 0.067 to 0.530) and PBMC3K PCA50 "
+        "for MetRef (the current matched UMAP check changed 0.119 to 0.844; the earlier openTSNE check changed 0.067 to 0.530) and PBMC3K PCA50 "
         "(0.410 to 0.484; 0.349 to 0.402), but reduced it on OptDigits, USPS, and Macosko2015 retina. "
         "KNN reduced silhouette on all five datasets despite best CV accuracy between 0.9927 and "
         "1.0000. Thus a highly "
@@ -1206,7 +1233,7 @@ VISUALIZATION_COMPARISON_PARAGRAPHS = [
 VISUALIZATION_COMPARISON_ROWS = [
     ("MetRef", "KNN", "UMAP", "0.105 -> 0.016", "-0.090", "0.590 -> 0.575", "0.049 / 3", "3.381"),
     ("MetRef", "KNN", "openTSNE", "0.067 -> 0.018", "-0.049", "0.616 -> 0.608", "0.049 / 3", "3.381"),
-    ("MetRef", "PLS-LDA", "UMAP", "0.105 -> 0.815", "+0.709", "0.590 -> 0.966", "0.879 / 28", "589.633"),
+    ("MetRef", "PLS-LDA", "UMAP", "0.119 -> 0.844", "+0.725", "not recomputed", "0.832 / 21", "173.104"),
     ("MetRef", "PLS-LDA", "openTSNE", "0.067 -> 0.530", "+0.463", "0.616 -> 0.904", "0.879 / 28", "589.633"),
     ("PBMC3K PCA50", "KNN", "UMAP", "0.410 -> 0.387", "-0.023", "0.830 -> 0.796", "0.374 / 3", "2.967"),
     ("PBMC3K PCA50", "KNN", "openTSNE", "0.349 -> 0.336", "-0.013", "0.826 -> 0.805", "0.374 / 3", "2.967"),
@@ -1537,7 +1564,7 @@ IMPLEMENTATION_EVIDENCE_ROWS = [
         "Label-aware SIMPLS PLS-LDA",
         "src/plscv.cpp uses label/class inputs in CPU, CUDA, and Metal float32 SIMPLS paths; accelerator implementations avoid dense one-hot responses where possible.",
         "CPU/CUDA/Metal tests check PLSLDACV sizes, constrained folds, selected component reporting, backend metadata, and accuracy thresholds.",
-        "CUDA PLSLDACV rows report 27.2x speedup on MetRef; Metal reproduced 50-component MetRef accuracy exactly with a 3.2x speedup over the dependency-free CPU build.",
+        "The current MetRef M = 100, Tcycle = 100 PLS-LDA run required 340.451 s on four CPU cores and 177.131 s on CUDA, a 1.92x end-to-end speedup with identical median CV accuracy 0.992366. In a fresh five-run fixed-50-component check, median PLSLDACV time was 0.790 s on four Mac CPU threads and 0.202 s on Metal (3.90x), with accuracy 0.990836 and 0.989691; the one-sample difference is within the documented float32 backend tolerance. On chiamaka, the corresponding medians were 1.294 s on four CPU threads and 0.308 s on CUDA (4.20x), with accuracy differing by at most one sample.",
     ),
     (
         "Reusable fold and data buffers",
@@ -2174,6 +2201,8 @@ def build_docx() -> None:
 
     for heading, paragraphs in SECTIONS:
         level = 1 if heading[0].isdigit() else 2
+        if heading == "7. Limitations":
+            doc.add_page_break()
         doc.add_heading(heading, level=level)
         for paragraph in paragraphs:
             doc.add_paragraph(paragraph)
@@ -2197,6 +2226,7 @@ def build_docx() -> None:
                 "The public KODAMA.matrix routine is reproducible from the following option definitions and run-level procedure. "
                 "The description below names the C++ options because the R and Python wrappers should expose the same contract."
             )
+            doc.add_page_break()
             add_table(doc, ("Option", "Role in the algorithm"), KODAMA_PARAMETER_ROWS, [1.35, 5.1], font_size=8.0)
             doc.add_heading("Run-level optimization rule", level=3)
             add_numbered(doc, REPRODUCIBLE_ALGORITHM_STEPS)
@@ -2361,6 +2391,18 @@ def build_docx() -> None:
                 [0.85, 0.75, 0.75, 1.25, 1.2, 0.8, 0.85],
                 font_size=7.0,
             )
+            if METREF_BACKEND_FIGURE.exists():
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p.paragraph_format.space_before = Pt(6)
+                p.add_run().add_picture(str(METREF_BACKEND_FIGURE), width=Inches(6.45))
+                cap = doc.add_paragraph(
+                    "Figure 2. Matched MetRef UMAP validation after the float32 PLS-LDA optimization. "
+                    "Classic data, CPU KODAMA, and CUDA KODAMA use exact k = 30, the same original-data "
+                    "PCA initialization, seed, epochs, and CPU embedding implementation. Colors are "
+                    "external reference labels withheld from optimization."
+                )
+                cap.style = doc.styles["Caption"]
             doc.add_heading("Classic versus KODAMA visualization validation", level=3)
             for paragraph in VISUALIZATION_COMPARISON_PARAGRAPHS:
                 doc.add_paragraph(paragraph)
@@ -2381,7 +2423,7 @@ def build_docx() -> None:
                 caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 caption.paragraph_format.space_after = Pt(8)
                 run = caption.add_run(
-                    "Figure 2. Fixed M = 100 and Tcycle = 100 nonspatial visualization validation. "
+                    "Figure 3. Fixed M = 100 and Tcycle = 100 nonspatial visualization validation. "
                     "Panels A and B compare truth-label silhouette; panel C reports complete KODAMA.matrix "
                     "wall time on a logarithmic scale; panel D reports selected-run ARI. Reference labels "
                     "were used only after optimization."
@@ -2417,7 +2459,7 @@ def build_docx() -> None:
                     caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     caption.paragraph_format.space_after = Pt(8)
                     run = caption.add_run(
-                        "Figure 3. Sensitivity of KODAMA quality and runtime to Tcycle and M on named nonspatial datasets."
+                        "Figure 4. Sensitivity of KODAMA quality and runtime to Tcycle and M on named nonspatial datasets."
                     )
                     set_run_font(run, 9.0, False, TOKENS["muted"])
                 doc.add_heading("Agreement-graph convergence", level=3)
@@ -2438,7 +2480,7 @@ def build_docx() -> None:
                     caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     caption.paragraph_format.space_after = Pt(8)
                     run = caption.add_run(
-                        "Figure 4. Convergence of edge-agreement weights as independent KODAMA runs are added. "
+                        "Figure 5. Convergence of edge-agreement weights as independent KODAMA runs are added. "
                         "RMSE is measured against the M = 100 ensemble; the right panel shows the Bernoulli "
                         "worst-case Monte Carlo standard error."
                     )
@@ -3097,6 +3139,22 @@ def build_tex() -> None:
             body.append(r"}")
             body.append(r"\end{table}")
             body.append("")
+            if METREF_BACKEND_FIGURE.exists():
+                body.append(r"\begin{figure}[h]")
+                body.append(r"\centering")
+                body.append(
+                    r"\includegraphics[width=\linewidth]{"
+                    + tex_escape(METREF_BACKEND_FIGURE.name)
+                    + "}"
+                )
+                body.append(
+                    r"\caption{Matched MetRef UMAP validation after the float32 PLS--LDA optimization. "
+                    r"Classic data, CPU KODAMA, and CUDA KODAMA use exact $k=30$, the same original-data "
+                    r"PCA initialization, seed, epochs, and CPU embedding implementation. Colors are "
+                    r"external reference labels withheld from optimization.}"
+                )
+                body.append(r"\end{figure}")
+                body.append("")
             body.append(r"\subsubsection{Classic versus KODAMA visualization validation}")
             for paragraph in VISUALIZATION_COMPARISON_PARAGRAPHS:
                 body.append(tex_escape(paragraph))

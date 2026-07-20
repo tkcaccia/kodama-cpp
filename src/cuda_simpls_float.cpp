@@ -684,37 +684,59 @@ bool simpls_fit_cuda_float_fast_crossprod(
       ws.dGram.ensure(static_cast<std::size_t>(l) * static_cast<std::size_t>(l));
       ws.dOmega.ensure(static_cast<std::size_t>(l) * static_cast<std::size_t>(k_block));
 
-      check_curand(curandSetPseudoRandomGeneratorSeed(rng, static_cast<unsigned long long>(1 + a)), "curandSetPseudoRandomGeneratorSeed(float fast SIMPLS)");
-      check_curand(curandGenerateNormal(rng, ws.dY.data(), padded_random_elems_float(p, l), 0.0f, 1.0f), "curandGenerateNormal(float fast SIMPLS Y0)");
-      if (has_rr_prev) {
+      if (has_rr_prev && l == 1) {
         check_cublas(cublasScopy(blas, p, ws.dRvec.data(), 1, ws.dY.data(), 1), "cublasScopy(float fast SIMPLS rr warm start)");
+      } else {
+        check_curand(curandSetPseudoRandomGeneratorSeed(rng, static_cast<unsigned long long>(1 + a)), "curandSetPseudoRandomGeneratorSeed(float fast SIMPLS)");
+        check_curand(curandGenerateNormal(rng, ws.dY.data(), padded_random_elems_float(p, l), 0.0f, 1.0f), "curandGenerateNormal(float fast SIMPLS Y0)");
+        if (has_rr_prev) {
+          check_cublas(cublasScopy(blas, p, ws.dRvec.data(), 1, ws.dY.data(), 1), "cublasScopy(float fast SIMPLS rr warm start)");
+        }
       }
 
       for (int iter = 0; iter < power_iters; ++iter) {
-        check_cublas(
-          cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, m, l, p, &one, ws.dA.data(), p, ws.dY.data(), p, &zero, ws.dZmat.data(), m),
-          "cublasSgemm(float fast SIMPLS S'Y)"
-        );
-        check_cublas(
-          cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, p, l, m, &one, ws.dA.data(), p, ws.dZmat.data(), m, &zero, ws.dY.data(), p),
-          "cublasSgemm(float fast SIMPLS SZ)"
-        );
+        if (l == 1) {
+          check_cublas(
+            cublasSgemv(blas, CUBLAS_OP_T, p, m, &one, ws.dA.data(), p, ws.dY.data(), 1, &zero, ws.dZmat.data(), 1),
+            "cublasSgemv(float fast SIMPLS S'Y)"
+          );
+          check_cublas(
+            cublasSgemv(blas, CUBLAS_OP_N, p, m, &one, ws.dA.data(), p, ws.dZmat.data(), 1, &zero, ws.dY.data(), 1),
+            "cublasSgemv(float fast SIMPLS SZ)"
+          );
+        } else {
+          check_cublas(
+            cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, m, l, p, &one, ws.dA.data(), p, ws.dY.data(), p, &zero, ws.dZmat.data(), m),
+            "cublasSgemm(float fast SIMPLS S'Y)"
+          );
+          check_cublas(
+            cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, p, l, m, &one, ws.dA.data(), p, ws.dZmat.data(), m, &zero, ws.dY.data(), p),
+            "cublasSgemm(float fast SIMPLS SZ)"
+          );
+        }
       }
 
       orthonormalize_float_qr_inplace(ws, p, l, ws.dY.data());
-      check_cublas(
-        cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, l, m, p, &one, ws.dY.data(), p, ws.dA.data(), p, &zero, ws.dBsmall.data(), l),
-        "cublasSgemm(float fast SIMPLS Bsmall)"
-      );
-      check_cublas(
-        cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_T, l, l, m, &one, ws.dBsmall.data(), l, ws.dBsmall.data(), l, &zero, ws.dGram.data(), l),
-        "cublasSgemm(float fast SIMPLS Gram)"
-      );
-      finalize_float_left_block(ws, l, k_block);
-      check_cublas(
-        cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, p, k_block, l, &one, ws.dY.data(), p, ws.dOmega.data(), l, &zero, ws.dUblock.data(), p),
-        "cublasSgemm(float fast SIMPLS Ublock)"
-      );
+      if (l == 1) {
+        check_cublas(
+          cublasScopy(blas, p, ws.dY.data(), 1, ws.dUblock.data(), 1),
+          "cublasScopy(float fast SIMPLS rank-one Ublock)"
+        );
+      } else {
+        check_cublas(
+          cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, l, m, p, &one, ws.dY.data(), p, ws.dA.data(), p, &zero, ws.dBsmall.data(), l),
+          "cublasSgemm(float fast SIMPLS Bsmall)"
+        );
+        check_cublas(
+          cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_T, l, l, m, &one, ws.dBsmall.data(), l, ws.dBsmall.data(), l, &zero, ws.dGram.data(), l),
+          "cublasSgemm(float fast SIMPLS Gram)"
+        );
+        finalize_float_left_block(ws, l, k_block);
+        check_cublas(
+          cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, p, k_block, l, &one, ws.dY.data(), p, ws.dOmega.data(), l, &zero, ws.dUblock.data(), p),
+          "cublasSgemm(float fast SIMPLS Ublock)"
+        );
+      }
 
       for (int j = 0; j < k_block && a < max_ncomp; ++j) {
         check_cublas(cublasScopy(blas, p, ws.dUblock.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(p), 1, ws.dRvec.data(), 1),
@@ -732,8 +754,8 @@ bool simpls_fit_cuda_float_fast_crossprod(
           check_cublas(cublasSscal(blas, p, &inv_tnorm, ws.dPvec.data(), 1), "cublasSscal(float fast SIMPLS gram p)");
         } else {
           check_cublas(
-            cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, n, 1, p, &one, ws.dX.data(), n, ws.dRvec.data(), p, &zero, ws.dT.data(), n),
-            "cublasSgemm(float fast SIMPLS t=Xr)"
+            cublasSgemv(blas, CUBLAS_OP_N, n, p, &one, ws.dX.data(), n, ws.dRvec.data(), 1, &zero, ws.dT.data(), 1),
+            "cublasSgemv(float fast SIMPLS t=Xr)"
           );
           float tnorm = 0.0f;
           check_cublas(cublasSnrm2(blas, n, ws.dT.data(), 1, &tnorm), "cublasSnrm2(float fast SIMPLS t)");
@@ -743,32 +765,32 @@ bool simpls_fit_cuda_float_fast_crossprod(
           check_cublas(cublasSscal(blas, p, &inv_tnorm, ws.dRvec.data(), 1), "cublasSscal(float fast SIMPLS r)");
 
           check_cublas(
-            cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, p, 1, n, &one, ws.dX.data(), n, ws.dT.data(), n, &zero, ws.dPvec.data(), p),
-            "cublasSgemm(float fast SIMPLS p=X't)"
+            cublasSgemv(blas, CUBLAS_OP_T, n, p, &one, ws.dX.data(), n, ws.dT.data(), 1, &zero, ws.dPvec.data(), 1),
+            "cublasSgemv(float fast SIMPLS p=X't)"
           );
         }
         check_cublas(
-          cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, m, 1, p, &one, ws.dA0.data(), p, ws.dRvec.data(), p, &zero, ws.dQvec.data(), m),
-          "cublasSgemm(float fast SIMPLS q=S0'r)"
+          cublasSgemv(blas, CUBLAS_OP_T, p, m, &one, ws.dA0.data(), p, ws.dRvec.data(), 1, &zero, ws.dQvec.data(), 1),
+          "cublasSgemv(float fast SIMPLS q=S0'r)"
         );
 
         if (a > 0) {
           check_cublas(
-            cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, a, 1, p, &one, ws.dVV.data(), p, ws.dPvec.data(), p, &zero, ws.dCoeff.data(), a),
-            "cublasSgemm(float fast SIMPLS V'p)"
+            cublasSgemv(blas, CUBLAS_OP_T, p, a, &one, ws.dVV.data(), p, ws.dPvec.data(), 1, &zero, ws.dCoeff.data(), 1),
+            "cublasSgemv(float fast SIMPLS V'p)"
           );
           check_cublas(
-            cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, p, 1, a, &minus_one, ws.dVV.data(), p, ws.dCoeff.data(), a, &one, ws.dPvec.data(), p),
-            "cublasSgemm(float fast SIMPLS p-=Vcoeff)"
+            cublasSgemv(blas, CUBLAS_OP_N, p, a, &minus_one, ws.dVV.data(), p, ws.dCoeff.data(), 1, &one, ws.dPvec.data(), 1),
+            "cublasSgemv(float fast SIMPLS p-=Vcoeff)"
           );
           if (reorth_v == 1) {
             check_cublas(
-              cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, a, 1, p, &one, ws.dVV.data(), p, ws.dPvec.data(), p, &zero, ws.dCoeff.data(), a),
-              "cublasSgemm(float fast SIMPLS V'p reorth)"
+              cublasSgemv(blas, CUBLAS_OP_T, p, a, &one, ws.dVV.data(), p, ws.dPvec.data(), 1, &zero, ws.dCoeff.data(), 1),
+              "cublasSgemv(float fast SIMPLS V'p reorth)"
             );
             check_cublas(
-              cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, p, 1, a, &minus_one, ws.dVV.data(), p, ws.dCoeff.data(), a, &one, ws.dPvec.data(), p),
-              "cublasSgemm(float fast SIMPLS p-=Vcoeff reorth)"
+              cublasSgemv(blas, CUBLAS_OP_N, p, a, &minus_one, ws.dVV.data(), p, ws.dCoeff.data(), 1, &one, ws.dPvec.data(), 1),
+              "cublasSgemv(float fast SIMPLS p-=Vcoeff reorth)"
             );
           }
         }
@@ -780,8 +802,8 @@ bool simpls_fit_cuda_float_fast_crossprod(
         check_cublas(cublasSscal(blas, p, &inv_vnorm, ws.dPvec.data(), 1), "cublasSscal(float fast SIMPLS v)");
 
         check_cublas(
-          cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, m, 1, p, &one, ws.dA.data(), p, ws.dPvec.data(), p, &zero, ws.dVS.data(), m),
-          "cublasSgemm(float fast SIMPLS v'S)"
+          cublasSgemv(blas, CUBLAS_OP_T, p, m, &one, ws.dA.data(), p, ws.dPvec.data(), 1, &zero, ws.dVS.data(), 1),
+          "cublasSgemv(float fast SIMPLS v'S)"
         );
         check_cublas(
           cublasSger(blas, p, m, &minus_one, ws.dPvec.data(), 1, ws.dVS.data(), 1, ws.dA.data(), p),

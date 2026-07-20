@@ -86,6 +86,12 @@ Figure~\ref{fig:architecture} shows the ownership boundary. CPU provides package
 
 PLS--LDA avoids dense one-hot responses by computing $X^\top Y$ from class sums and compacting active labels each cycle. Fold indices and workspaces are reused. The requested feasible component count is evaluated without internal selection. Results record predictions, folds, confusion matrices, label ensembles, resources, search parameters, and the executing backend.
 
+For latent training scores $T\in\mathbb{R}^{n\times q}$, class counts $n_c$, means $\mu_c$, and $C$ active classes, the pooled within-class covariance is
+\begin{equation}
+  \Sigma=\frac{T^\top T-\sum_{c=1}^{C}n_c\mu_c\mu_c^\top}{\max(1,n-C)}.
+\end{equation}
+The implementation solves $\Sigma w_c=\mu_c$ by Cholesky factorization and triangular substitution, without explicitly inverting $\Sigma$. It adds $\lambda=\rho s$ to the diagonal, where $s=\operatorname{tr}(\Sigma)/q$ when finite and positive (otherwise $s=1$), and tries $\rho\in\{10^{-8},10^{-6},10^{-5},10^{-4},10^{-3},10^{-2}\}$ in order, advancing only after factorization failure. Prediction uses $\delta_c(t)=t^\top w_c-\tfrac12\mu_c^\top w_c+\log(n_c/n)$. Thus the ridge sequence is a deterministic numerical safeguard rather than a tuned model parameter.
+
 The alternative graph API lets KNN consume supplied neighbors; graph-only PLS--LDA uses a documented self-tuning normalized Laplacian. PCA is auxiliary. Pinned fastEmbedR UMAP/openTSNE kernels use matched classic/corrected contracts and direct float32 CSR graphs \citep{mcinnes2018umap,vandermaaten2008tsne}.
 
 \section{Validation and scope}
@@ -95,27 +101,29 @@ CTest checks numerical, float32, backend, graph, and frozen \texttt{0.1.0} API c
 \begin{table}[t]
 \caption{Selected implementation validation. Accuracy is CPU/accelerator; runtime is seconds.}
 \label{tab:validation}
-\centering\small
+\centering\scriptsize
 \begin{tabular}{llrrrr}
 \toprule
 Platform & Dataset/kernel & CPU & Accel. & Speedup & Accuracy \\
 \midrule
 CUDA & MNIST KNNCV & 76.769 & 4.753 & 16.2 & .974/.973 \\
-CUDA & MetRef PLSLDACV & 3.196 & 0.118 & 27.2 & .992/.992 \\
-CUDA & USPS PLSLDACV & 3.760 & 0.158 & 23.8 & .684/.687 \\
+CUDA & MetRef KODAMA, $M=T=100$ & 340.451 & 177.131 & 1.92 & .992/.992 \\
+CUDA & MetRef PLSLDACV & 1.294 & 0.308 & 4.20 & .992/.993 \\
 Metal & MetRef KNNCV & 11.145 & 0.026 & 425.0 & .827/.827 \\
-Metal & MetRef PLSLDACV & 3.395 & 1.054 & 3.2 & .992/.992 \\
+Metal & MetRef PLSLDACV & 0.790 & 0.202 & 3.90 & .991/.990 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-At matched MetRef KNN settings ($M=T=100$, \texttt{splitting}=50), legacy KODAMA R 2.4.1 took 610.5 seconds versus 965.3, 235.5, and 2.36 seconds for kodama-cpp CPU1, CPU4, and CUDA. A short non-parity check ($M=T=20$, 655 landmarks, graph $k=500$) took 344.914 seconds for KODAMA 3.3 CPU4 and 822.989 seconds for kodama-cpp PLS--LDA CPU4; selected ARI was .7004/.6430. CUDA is omitted because $k=500$ exceeds its limit of 256.
+Five-run MetRef PLSLDACV medians gave 3.90x Metal and 4.20x CUDA speedups over their four-thread hosts; accuracy differed by at most one of 873 samples. Complete $M=T=100$ KODAMA gave a 1.92x CUDA speedup. Rank-one matrix--vector operations and omission of overwritten random initialization reduce CUDA work without changing SIMPLS or LDA equations.
 
-Raw accuracy, proposal score, and external diagnostics remain separate because predictability can be too coarse. Raising $T$ from 20 to 100 improved median accuracy and fragmentation for USPS and MetRef PLS--LDA, but MetRef KNN stayed over-coarsened. At $M=100$, worst-case agreement-edge standard error is .05; all $M=50$ graphs correlated at least .9888 with $M=100$. ARI was nonmonotone and untuned. A five-dataset panel (largest $n=44{,}808$) retained positive and negative silhouette changes.
+Matched MetRef KNN ($M=T=100$) took 610.5 seconds in KODAMA R 2.4.1 and 965.3/235.5/2.36 seconds in kodama-cpp CPU1/CPU4/CUDA. A non-parity $M=T=20$ current-R/kodama-cpp PLS--LDA CPU4 check took 344.914/822.989 seconds (ARI .7004/.6430); CUDA was omitted at graph $k=500>256$.
+
+Raising $T$ from 20 to 100 improved median accuracy and fragmentation for USPS and MetRef PLS--LDA, while MetRef KNN stayed over-coarsened. At $M=100$, worst-case agreement-edge standard error is .05 and every $M=50$ graph correlated at least .9888 with $M=100$. ARI was nonmonotone; a five-dataset panel retained both positive and negative silhouette changes.
 
 \section{Availability and limitations}
 
-Version \texttt{0.1.0} is MIT licensed at \url{https://github.com/tkcaccia/kodama-cpp}; retained notices include a Metal Apache-2.0 exception. Provenance and API tests are archived, and documentation is at \url{https://tkcaccia.github.io/kodama-cpp/}; the final tag/DOI remain pending. Repeated CV is the main cost, and $M$ runs are not fully device-resident. Approximate ties may vary. CUDA graph construction supports $k\leq256$ and raises otherwise. Graph-only PLS--LDA is a spectral surrogate, not data-input PLS--LDA.
+Version \texttt{0.1.0} is MIT licensed at \url{https://github.com/tkcaccia/kodama-cpp}; Metal retains an Apache-2.0 exception. Provenance, API tests, and documentation are archived; the final DOI is pending. Repeated CV dominates and $M$ runs are not fully device resident. Approximate ties may vary; CUDA graph $k\leq256$. Graph-only PLS--LDA is a spectral surrogate.
 
 \newpage
 \bibliography{kodama_cpp_refs}

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -330,6 +331,135 @@ NeighborGraph self_knn_graph(
   return hnsw_graph(data, data, n, n, dim, neighbors, metric, n_threads, true, include_self);
 }
 
+class FaissCompatibleRandom {
+ public:
+  explicit FaissCompatibleRandom(std::uint64_t seed)
+      : generator_(static_cast<std::uint32_t>(seed)) {}
+
+  int integer(int maximum) {
+    return static_cast<int>(generator_() % static_cast<std::uint32_t>(maximum));
+  }
+
+  float uniform() {
+    return static_cast<float>(generator_()) / static_cast<float>(std::mt19937::max());
+  }
+
+ private:
+  std::mt19937 generator_;
+};
+
+std::vector<int> faiss_compatible_permutation(int rows, std::uint64_t seed) {
+  std::vector<int> permutation(static_cast<std::size_t>(rows));
+  std::iota(permutation.begin(), permutation.end(), 0);
+  FaissCompatibleRandom generator(seed);
+  for (int row = 0; row + 1 < rows; ++row) {
+    const int replacement = row + generator.integer(rows - row);
+    std::swap(
+      permutation[static_cast<std::size_t>(row)],
+      permutation[static_cast<std::size_t>(replacement)]
+    );
+  }
+  return permutation;
+}
+
+class FloatFenwickTree {
+ public:
+  explicit FloatFenwickTree(const std::vector<float>& values)
+      : tree_(values.size() + 1, 0.0f), values_(values.size(), 0.0f) {
+    for (std::size_t index = 0; index < values.size(); ++index) set(index, values[index]);
+  }
+
+  void set(std::size_t index, float value) {
+    const float delta = value - values_[index];
+    values_[index] = value;
+    for (++index; index < tree_.size(); index += index & (~index + 1)) tree_[index] += delta;
+  }
+
+  float total() const {
+    float result = 0.0f;
+    for (std::size_t index = values_.size(); index > 0; index -= index & (~index + 1)) result += tree_[index];
+    return result;
+  }
+
+  int select(float target) const {
+    std::size_t index = 0;
+    float prefix = 0.0f;
+    std::size_t step = 1;
+    while ((step << 1) < tree_.size()) step <<= 1;
+    for (; step > 0; step >>= 1) {
+      const std::size_t next = index + step;
+      if (next < tree_.size() && prefix + tree_[next] <= target) {
+        index = next;
+        prefix += tree_[next];
+      }
+    }
+    return index < values_.size() ? static_cast<int>(index) : -1;
+  }
+
+ private:
+  std::vector<float> tree_;
+  std::vector<float> values_;
+};
+
+void split_empty_kmeans_clusters(
+  int rows,
+  int dimensions,
+  int clusters,
+  std::vector<float>& cluster_sizes,
+  std::vector<float>& centroids
+) {
+  if (rows <= clusters) return;
+  constexpr float epsilon = 1.0f / 1024.0f;
+  FaissCompatibleRandom generator(1234u);
+  std::vector<float> donor_weights(static_cast<std::size_t>(clusters), 0.0f);
+  for (int cluster = 0; cluster < clusters; ++cluster) {
+    donor_weights[static_cast<std::size_t>(cluster)] = std::max(
+      0.0f,
+      cluster_sizes[static_cast<std::size_t>(cluster)] - 1.0f
+    );
+  }
+  FloatFenwickTree donor_tree(donor_weights);
+  for (int empty = 0; empty < clusters; ++empty) {
+    if (cluster_sizes[static_cast<std::size_t>(empty)] != 0.0f) continue;
+    const float total_weight = donor_tree.total();
+    int donor = total_weight > 0.0f ? donor_tree.select(generator.uniform() * total_weight) : -1;
+    if (donor < 0) {
+      donor = 0;
+      for (int cluster = 1; cluster < clusters; ++cluster) {
+        if (cluster_sizes[static_cast<std::size_t>(cluster)] >
+            cluster_sizes[static_cast<std::size_t>(donor)]) {
+          donor = cluster;
+        }
+      }
+    }
+
+    float* empty_centroid = centroids.data() + static_cast<std::size_t>(empty) * dimensions;
+    float* donor_centroid = centroids.data() + static_cast<std::size_t>(donor) * dimensions;
+    std::copy_n(donor_centroid, dimensions, empty_centroid);
+    for (int dimension = 0; dimension < dimensions; ++dimension) {
+      if ((dimension & 1) == 0) {
+        empty_centroid[dimension] *= 1.0f + epsilon;
+        donor_centroid[dimension] *= 1.0f - epsilon;
+      } else {
+        empty_centroid[dimension] *= 1.0f - epsilon;
+        donor_centroid[dimension] *= 1.0f + epsilon;
+      }
+    }
+    cluster_sizes[static_cast<std::size_t>(empty)] =
+      cluster_sizes[static_cast<std::size_t>(donor)] / 2.0f;
+    cluster_sizes[static_cast<std::size_t>(donor)] -=
+      cluster_sizes[static_cast<std::size_t>(empty)];
+    donor_tree.set(
+      static_cast<std::size_t>(empty),
+      std::max(0.0f, cluster_sizes[static_cast<std::size_t>(empty)] - 1.0f)
+    );
+    donor_tree.set(
+      static_cast<std::size_t>(donor),
+      std::max(0.0f, cluster_sizes[static_cast<std::size_t>(donor)] - 1.0f)
+    );
+  }
+}
+
 std::vector<int> kmeans_labels(
   const std::vector<float>& x,
   int n,
@@ -343,6 +473,19 @@ std::vector<int> kmeans_labels(
 ) {
   k = std::max(1, std::min(k, n));
 
+  if (backend == Backend::Metal) {
+#if defined(KODAMA_ENABLE_METAL)
+    std::vector<int> order(static_cast<std::size_t>(n));
+    std::iota(order.begin(), order.end(), 0);
+    std::shuffle(order.begin(), order.end(), rng);
+    return detail::metal_kmeans_labels(x, n, p, k, order, std::max(1, max_iter));
+#else
+    throw std::runtime_error("KODAMA Metal k-means requires an Apple Metal build.");
+#endif
+  }
+
+  const std::uint64_t kmeans_seed = rng() & 0x7fffffffULL;
+
 #ifdef KODAMA_ENABLE_CUDA
   if (backend == Backend::CUDA) {
     return detail::native_cuda_kmeans_labels(
@@ -351,7 +494,7 @@ std::vector<int> kmeans_labels(
       p,
       k,
       std::max(1, max_iter),
-      rng() & 0x7fffffffULL,
+      kmeans_seed,
       gpu_device
     );
   }
@@ -359,16 +502,7 @@ std::vector<int> kmeans_labels(
   (void)gpu_device;
 #endif
 
-  std::vector<int> order(static_cast<std::size_t>(n));
-  std::iota(order.begin(), order.end(), 0);
-  std::shuffle(order.begin(), order.end(), rng);
-  if (backend == Backend::Metal) {
-#if defined(KODAMA_ENABLE_METAL)
-    return detail::metal_kmeans_labels(x, n, p, k, order, std::max(1, max_iter));
-#else
-    throw std::runtime_error("KODAMA Metal k-means requires an Apple Metal build.");
-#endif
-  }
+  const std::vector<int> order = faiss_compatible_permutation(n, kmeans_seed + 1u);
   std::vector<float> centroids(static_cast<std::size_t>(k) * static_cast<std::size_t>(p), 0.0f);
   for (int cluster = 0; cluster < k; ++cluster) {
     std::copy_n(
@@ -378,59 +512,76 @@ std::vector<int> kmeans_labels(
     );
   }
 
-  std::vector<int> labels(static_cast<std::size_t>(n), 1);
-  std::vector<int> previous(static_cast<std::size_t>(n), -1);
-  std::vector<double> sums(static_cast<std::size_t>(k) * static_cast<std::size_t>(p), 0.0);
-  std::vector<int> counts(static_cast<std::size_t>(k), 0);
+  std::vector<int> assignments(static_cast<std::size_t>(n), -1);
+  std::vector<float> point_norms(static_cast<std::size_t>(n), 0.0f);
+  std::vector<float> centroid_norms(static_cast<std::size_t>(k), 0.0f);
+  for (int row = 0; row < n; ++row) {
+    const float* point = x.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(p);
+    float norm = 0.0f;
+    for (int feature = 0; feature < p; ++feature) norm += point[feature] * point[feature];
+    point_norms[static_cast<std::size_t>(row)] = norm;
+  }
+  std::vector<float> cluster_sizes(static_cast<std::size_t>(k), 0.0f);
   OmpThreadScope threads(n_threads);
-  for (int iteration = 0; iteration < std::max(1, max_iter); ++iteration) {
+
+  auto assign = [&]() {
+    for (int cluster = 0; cluster < k; ++cluster) {
+      const float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
+      float norm = 0.0f;
+      for (int feature = 0; feature < p; ++feature) norm += centroid[feature] * centroid[feature];
+      centroid_norms[static_cast<std::size_t>(cluster)] = norm;
+    }
     std::atomic<int> changed{0};
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
     for (int row = 0; row < n; ++row) {
       int best_cluster = 0;
-      double best_distance = std::numeric_limits<double>::infinity();
+      float best_distance = std::numeric_limits<float>::infinity();
       const float* point = x.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(p);
       for (int cluster = 0; cluster < k; ++cluster) {
         const float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
-        double distance = 0.0;
-        for (int feature = 0; feature < p; ++feature) {
-          const double delta = static_cast<double>(point[feature]) - static_cast<double>(centroid[feature]);
-          distance += delta * delta;
-        }
+        float dot = 0.0f;
+        for (int feature = 0; feature < p; ++feature) dot += point[feature] * centroid[feature];
+        const float distance = point_norms[static_cast<std::size_t>(row)] +
+          centroid_norms[static_cast<std::size_t>(cluster)] - 2.0f * dot;
         if (distance < best_distance || (distance == best_distance && cluster < best_cluster)) {
           best_distance = distance;
           best_cluster = cluster;
         }
       }
-      labels[static_cast<std::size_t>(row)] = best_cluster + 1;
-      if (previous[static_cast<std::size_t>(row)] != best_cluster) changed.fetch_add(1, std::memory_order_relaxed);
+      if (assignments[static_cast<std::size_t>(row)] != best_cluster) {
+        assignments[static_cast<std::size_t>(row)] = best_cluster;
+        changed.fetch_add(1, std::memory_order_relaxed);
+      }
     }
+    return changed.load(std::memory_order_relaxed);
+  };
 
-    std::fill(sums.begin(), sums.end(), 0.0);
-    std::fill(counts.begin(), counts.end(), 0);
+  for (int iteration = 0; iteration < std::max(1, max_iter); ++iteration) {
+    const int changed = assign();
+    std::fill(centroids.begin(), centroids.end(), 0.0f);
+    std::fill(cluster_sizes.begin(), cluster_sizes.end(), 0.0f);
     for (int row = 0; row < n; ++row) {
-      const int cluster = labels[static_cast<std::size_t>(row)] - 1;
-      ++counts[static_cast<std::size_t>(cluster)];
+      const int cluster = assignments[static_cast<std::size_t>(row)];
+      cluster_sizes[static_cast<std::size_t>(cluster)] += 1.0f;
       const float* point = x.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(p);
-      double* sum = sums.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
-      for (int feature = 0; feature < p; ++feature) sum[feature] += point[feature];
-      previous[static_cast<std::size_t>(row)] = cluster;
+      float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
+      for (int feature = 0; feature < p; ++feature) centroid[feature] += point[feature];
     }
     for (int cluster = 0; cluster < k; ++cluster) {
       float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
-      if (counts[static_cast<std::size_t>(cluster)] == 0) {
-        const int replacement = order[static_cast<std::size_t>((cluster + iteration) % n)];
-        std::copy_n(x.data() + static_cast<std::size_t>(replacement) * static_cast<std::size_t>(p), p, centroid);
-        continue;
-      }
-      const double scale = 1.0 / static_cast<double>(counts[static_cast<std::size_t>(cluster)]);
-      const double* sum = sums.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
-      for (int feature = 0; feature < p; ++feature) centroid[feature] = static_cast<float>(sum[feature] * scale);
+      const float size = cluster_sizes[static_cast<std::size_t>(cluster)];
+      if (size == 0.0f) continue;
+      const float scale = 1.0f / size;
+      for (int feature = 0; feature < p; ++feature) centroid[feature] *= scale;
     }
-    if (changed.load(std::memory_order_relaxed) == 0) break;
+    split_empty_kmeans_clusters(n, p, k, cluster_sizes, centroids);
+    if (changed == 0) break;
   }
+  assign();
+  std::vector<int> labels(static_cast<std::size_t>(n), 1);
+  for (int row = 0; row < n; ++row) labels[static_cast<std::size_t>(row)] = assignments[static_cast<std::size_t>(row)] + 1;
   return labels;
 }
 
@@ -1655,6 +1806,10 @@ KODAMAMatrixResult run_kodama_matrix(
 
   detail::Timer optimization_timer;
   const int workers = std::max(1, std::min(options.n_threads, options.runs));
+  KODAMAMatrixOptions iteration_options = options;
+  if (options.backend == Backend::CPU) {
+    iteration_options.n_threads = std::max(1, options.n_threads / workers);
+  }
   std::vector<IterationResult> iterations(static_cast<std::size_t>(options.runs));
 
   auto execute_run = [&](int run_id, IterationScratch& scratch) {
@@ -1672,7 +1827,7 @@ KODAMAMatrixResult run_kodama_matrix(
       constrain_is_identity,
       fixed,
       starting_labels,
-      options,
+      iteration_options,
       run_id,
       scratch
     );

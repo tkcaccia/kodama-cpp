@@ -42,8 +42,10 @@
       rpath_dirs <- unique(c(rpath_dirs, "/opt/homebrew/opt/llvm/lib"))
     }
     rpath_flags <- paste(paste0("-Wl,-rpath,", shQuote(rpath_dirs)), collapse = " ")
-    faiss_gpu_flag <- if (backend == "cuda" && any(file.exists(file.path(lib_dirs, "libfaiss_gpu.so")))) {
-      "-lfaiss_gpu"
+    accelerator_flags <- if (backend == "cuda") {
+      "-lcublas -lcusolver -lcurand -lcufft -lcudart"
+    } else if (backend == "metal") {
+      "-framework Metal -framework MetalPerformanceShaders -framework Foundation"
     } else {
       ""
     }
@@ -60,8 +62,7 @@
         shQuote(file.path(build, "libkodama_cpp.a")),
         lib_flags,
         rpath_flags,
-        "-lfaiss",
-        if (backend == "cuda") paste(faiss_gpu_flag, "-lcuvs -lcublas -lcusolver -lcurand -lcufft -lcudart") else "",
+        accelerator_flags,
         omp_flag,
         conda_stdcxx
       )
@@ -205,7 +206,7 @@ KODAMA.matrix.cpp <- local({
            spatial.constraint.mode = c("kmeans", "graph", "auto"),
            metrics = "euclidean",
            classifier = c("pls_lda", "knn"),
-           backend = c("cpu", "cuda"),
+           backend = c("cpu", "cuda", "metal"),
            seed = 1234L,
            progress = TRUE,
            apply.kodama.dissimilarity = TRUE,
@@ -253,8 +254,10 @@ KODAMA.matrix.cpp <- local({
         rpath_dirs <- unique(c(rpath_dirs, "/opt/homebrew/opt/llvm/lib"))
       }
       rpath_flags <- paste(paste0("-Wl,-rpath,", shQuote(rpath_dirs)), collapse = " ")
-      faiss_gpu_flag <- if (backend == "cuda" && any(file.exists(file.path(lib_dirs, "libfaiss_gpu.so")))) {
-        "-lfaiss_gpu"
+      accelerator_flags <- if (backend == "cuda") {
+        "-lcublas -lcusolver -lcurand -lcufft -lcudart"
+      } else if (backend == "metal") {
+        "-framework Metal -framework MetalPerformanceShaders -framework Foundation"
       } else {
         ""
       }
@@ -271,8 +274,7 @@ KODAMA.matrix.cpp <- local({
           shQuote(file.path(build, "libkodama_cpp.a")),
           lib_flags,
           rpath_flags,
-          "-lfaiss",
-          if (backend == "cuda") paste(faiss_gpu_flag, "-lcuvs -lcublas -lcusolver -lcurand -lcufft -lcudart") else "",
+          accelerator_flags,
           omp_flag,
           conda_stdcxx
         )
@@ -337,7 +339,7 @@ KODAMA.umap.cuda.cpp <- function(knn,
 
 KODAMA.umap.cpp <- function(data,
                             n.neighbors = 30L,
-                            backend = c("cuda", "cpu"),
+                            backend = c("cuda", "cpu", "metal"),
                             seed = 4L,
                             n.threads = 4L,
                             metric = "euclidean",
@@ -358,7 +360,7 @@ KODAMA.umap.cpp <- function(data,
 
 KODAMA.umap.knn.cpp <- function(knn,
                                 n.neighbors = NULL,
-                                backend = c("cuda", "cpu"),
+                                backend = c("cuda", "cpu", "metal"),
                                 seed = 4L,
                                 n.threads = 4L,
                                 use.visual.init = TRUE,
@@ -378,7 +380,7 @@ KODAMA.umap.knn.cpp <- function(knn,
   }
   knn <- .kodama_extract_knn(source)
   if (is.null(n.neighbors)) n.neighbors <- ncol(knn$indices)
-  width <- min(as.integer(round(n.neighbors) * 3L), ncol(knn$indices))
+  width <- min(as.integer(round(n.neighbors)), ncol(knn$indices))
   knn <- .kodama_prepare_visual_knn(knn, width, replace.inf = TRUE)
   kodama_umap_temp(
     indices = knn$indices,
@@ -421,7 +423,7 @@ KODAMA.opentsne.cuda.cpp <- function(knn,
 
 KODAMA.opentsne.cpp <- function(data,
                                 perplexity = 15,
-                                backend = c("cuda", "cpu"),
+                                backend = c("cuda", "cpu", "metal"),
                                 seed = 4L,
                                 n.threads = 4L,
                                 metric = "euclidean",
@@ -443,7 +445,7 @@ KODAMA.opentsne.cpp <- function(data,
 KODAMA.opentsne.knn.cpp <- function(knn,
                                     perplexity = 15,
                                     n.neighbors = NULL,
-                                    backend = c("cuda", "cpu"),
+                                    backend = c("cuda", "cpu", "metal"),
                                     seed = 4L,
                                     n.threads = 4L,
                                     Y.init = NULL,
@@ -537,7 +539,7 @@ KODAMA.opentsne.knn.cpp <- function(knn,
 KODAMA.knn.graph.cpp <- function(data,
                                  k = 30L,
                                  metric = "euclidean",
-                                 backend = c("cpu", "cuda"),
+                                 backend = c("cpu", "cuda", "metal"),
                                  n.cores = 4L,
                                  gpu.device = 0L,
                                  exclude.self = TRUE) {
@@ -582,7 +584,7 @@ KODAMA.graph.cluster.from.knn.cpp <- function(knn,
 }
 
 KODAMA.graph.cluster.cpp <- function(embedding,
-                                     graph.backend = c("cpu", "cuda"),
+                                     graph.backend = c("cpu", "cuda", "metal"),
                                      weight = c("distance", "adaptive", "binary", "snn"),
                                      metric = "euclidean",
                                      k = 30L,
