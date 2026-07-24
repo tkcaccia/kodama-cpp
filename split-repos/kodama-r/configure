@@ -109,6 +109,8 @@ if [ "$SYSTEM_NAME" != "Darwin" ]; then
     cublasLt cublas cusolver cusparse curand cufft cudart; do
     add_optional_lib "$lib_name"
   done
+else
+  PKG_LIBS_VALUE="$PKG_LIBS_VALUE -framework Metal -framework MetalPerformanceShaders -framework Foundation"
 fi
 
 PKG_LIBS_VALUE="$PKG_LIBS_VALUE $OMP_LIB"

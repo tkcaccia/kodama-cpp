@@ -26,7 +26,7 @@ R CMD INSTALL .
 Example CUDA install:
 
 ```sh
-export ENV_DIR=/path/to/faiss-cuda-env
+export ENV_DIR=/path/to/cuda-runtime-env
 export CONDA_PREFIX="$ENV_DIR"
 export LD_LIBRARY_PATH="$ENV_DIR/lib:$ENV_DIR/targets/x86_64-linux/lib:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
 
@@ -62,8 +62,28 @@ lab <- rep(1:3, length.out = nrow(x))
 KNNCV(x, lab, folds = 3, k = 5, backend = "cpu")$accuracy
 ```
 
-For CUDA, repeat with `backend = "cuda"` after confirming the same CUDA/FAISS
+For CUDA, repeat with `backend = "cuda"` after confirming the same CUDA Toolkit
 runtime paths are visible to the R session.
+
+## Apple Metal Install
+
+On macOS, build the core with Metal enabled and install the wrapper against
+that build:
+
+```sh
+cmake -S kodama-cpp -B kodama-cpp/build-metal \
+  -DKODAMA_ENABLE_CUDA=OFF \
+  -DKODAMA_ENABLE_METAL=ON
+cmake --build kodama-cpp/build-metal -j
+
+cd kodama-r
+KODAMA_CPP_ROOT="$(cd ../kodama-cpp && pwd)" \
+KODAMA_CPP_BUILD_DIR="$(cd ../kodama-cpp/build-metal && pwd)" \
+R CMD INSTALL .
+```
+
+Native KNN, PLS-LDA, Core, matrix, graph, and PCA entry points accept
+`backend = "metal"`. UMAP and openTSNE currently remain CPU/CUDA operations.
 
 ## CRAN-Style Local Check
 

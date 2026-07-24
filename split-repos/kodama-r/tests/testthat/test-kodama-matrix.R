@@ -73,16 +73,29 @@ test_that("public API wrappers are exposed", {
   expect_length(pls$predicted, nrow(x))
   expect_length(core_knn$clbest, nrow(x))
   expect_length(core_pls$clbest, nrow(x))
+  expect_identical(knncv$backend, "cpu")
+  expect_identical(pls$backend, "cpu")
+  expect_identical(core_knn$backend, "cpu")
+  expect_identical(core_pls$backend, "cpu")
   expect_equal(dim(pca$scores), c(nrow(x), 3L))
   expect_equal(dim(pca$loadings), c(ncol(x), 3L))
   expect_equal(pca$precision, "float32")
   expect_true(all(diff(pca$singular_values) <= 1e-5))
   expect_equal(dim(graph$indices), c(nrow(x), 5L))
+  expect_identical(graph$backend, "cpu")
   expect_equal(dim(emb), c(nrow(x), 2L))
   expect_equal(dim(emb_fuzzy), c(nrow(x), 2L))
   expect_true(all(is.finite(emb)))
   expect_true(all(is.finite(emb_fuzzy)))
   expect_length(clu$membership, nrow(x))
+  expect_error(
+    kodamaR:::kodama_umap_cpp(
+      graph$indices,
+      graph$distances,
+      backend = "metal"
+    ),
+    "not Metal"
+  )
 })
 
 test_that("diagnostics report wrapper runtime information", {

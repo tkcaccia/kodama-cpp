@@ -24,7 +24,7 @@ kodama_matrix(
   spatial.constraint.mode = c("kmeans", "graph", "auto"),
   metric = "euclidean",
   classifier = c("knn", "pls_lda"),
-  backend = c("cpu", "cuda"),
+  backend = c("cpu", "cuda", "metal"),
   seed = 1234L,
   visual.init = TRUE,
   progress = TRUE,
@@ -70,7 +70,7 @@ optional coordinate constraints are supplied.}
 
 \item{classifier}{Either \code{"knn"} or \code{"pls_lda"}.}
 
-\item{backend}{Either \code{"cpu"} or \code{"cuda"}.}
+\item{backend}{Execution backend: \code{"cpu"}, \code{"cuda"}, or \code{"metal"}.}
 
 \item{seed}{Integer random seed.}
 

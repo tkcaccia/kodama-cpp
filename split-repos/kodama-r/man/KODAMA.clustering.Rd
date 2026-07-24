@@ -10,7 +10,7 @@ KODAMA.clustering(
   weight = c("distance", "snn", "adaptive", "binary"),
   k = 30L,
   metric = c("euclidean", "cosine", "inner_product"),
-  graph.backend = c("cpu", "cuda"),
+  graph.backend = c("cpu", "cuda", "metal"),
   n.cores = 4L,
   n.iterations = 10L,
   random.walk.steps = 4L,
@@ -29,7 +29,8 @@ reports an error when it cannot produce the requested count exactly.}
 
 \item{metric}{Distance or similarity metric used when \code{x} is a matrix.}
 
-\item{graph.backend}{Backend used to construct a graph from an embedding.}
+\item{graph.backend}{Backend used to construct a graph from an embedding:
+\code{"cpu"}, \code{"cuda"}, or \code{"metal"}. Clustering itself runs on CPU.}
 
 \item{n.cores}{Number of CPU worker threads requested by the wrapper.}
 

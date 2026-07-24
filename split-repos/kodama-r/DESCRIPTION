@@ -7,9 +7,10 @@ Authors@R: c(
   )
 Author: Stefano Cacciatore [aut, cre]
 Maintainer: Stefano Cacciatore <tkcaccia@gmail.com>
-Description: Thin R bindings for the standalone kodama-cpp C++/CUDA library.
+Description: Thin R bindings for the standalone kodama-cpp C++ library.
     The package exposes KODAMA matrix optimization with KNN and PLS-LDA
-    classifiers while keeping all numerical kernels in kodama-cpp.
+    classifiers on CPU, NVIDIA CUDA, and Apple Metal while keeping all
+    numerical kernels in kodama-cpp.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -19,5 +20,7 @@ Imports:
 Suggests:
     testthat (>= 3.0.0)
 Config/testthat/edition: 3
-SystemRequirements: kodama-cpp; optional CUDA Toolkit runtime
+SystemRequirements: kodama-cpp; optional CUDA Toolkit or Apple Metal frameworks
+URL: https://github.com/tkcaccia/kodama-r
+BugReports: https://github.com/tkcaccia/kodama-r/issues
 Config/roxygen2/version: 8.0.0

@@ -14,7 +14,7 @@ CorePLSLDA(
   stratified = TRUE,
   seed = 1L,
   ncomp = min(50L, ncol(data)),
-  backend = c("cpu", "cuda"),
+  backend = c("cpu", "cuda", "metal"),
   n.cores = 4L,
   gpu.device = 0L
 )
@@ -39,7 +39,7 @@ proposal and fold groups.}
 
 \item{ncomp}{Number of SIMPLS latent components requested.}
 
-\item{backend}{Execution backend, either \code{"cpu"} or \code{"cuda"}.}
+\item{backend}{Execution backend: \code{"cpu"}, \code{"cuda"}, or \code{"metal"}.}
 
 \item{n.cores}{Number of CPU worker threads requested by the wrapper.}
 

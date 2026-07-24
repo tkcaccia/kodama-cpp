@@ -4,5 +4,6 @@ src/Makevars.win
 *.so
 *.dylib
 *.dll
+*.tar.gz
 *.Rcheck/
 .Rproj.user/

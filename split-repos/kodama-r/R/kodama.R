@@ -133,7 +133,7 @@ as_kodama_matrix_result <- function(result, parameters, visual_init = NULL) {
 #' @param seed Integer random seed for fold construction.
 #' @param k Number of neighbors used by the KNN classifier.
 #' @param metric Distance or similarity metric.
-#' @param backend Execution backend, either `"cpu"` or `"cuda"`.
+#' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
 #' @export
@@ -145,7 +145,7 @@ KNNCV <- function(data,
                   seed = 1L,
                   k = 10L,
                   metric = c("cosine", "inner_product", "euclidean"),
-                  backend = c("cpu", "cuda"),
+                  backend = c("cpu", "cuda", "metal"),
                   n.cores = 1L,
                   gpu.device = 0L) {
   metric <- match.arg(metric)
@@ -177,7 +177,7 @@ KNNCV <- function(data,
 #' @param ncomp Number of SIMPLS latent components requested.
 #' @param center Whether the C++ core centers the analysis matrix.
 #' @param scale Whether the C++ core scales the analysis matrix.
-#' @param backend Execution backend, either `"cpu"` or `"cuda"`.
+#' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
 #' @export
@@ -190,7 +190,7 @@ PLSLDACV <- function(data,
                      ncomp = min(50L, ncol(data)),
                      center = TRUE,
                      scale = TRUE,
-                     backend = c("cpu", "cuda"),
+                     backend = c("cpu", "cuda", "metal"),
                      n.cores = 1L,
                      gpu.device = 0L) {
   backend <- match.arg(backend)
@@ -223,7 +223,7 @@ PLSLDACV <- function(data,
 #' @param seed Integer random seed.
 #' @param k Number of neighbors used by the KNN classifier.
 #' @param metric Distance or similarity metric.
-#' @param backend Execution backend, either `"cpu"` or `"cuda"`.
+#' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
 #' @export
@@ -237,7 +237,7 @@ CoreKNN <- function(data,
                     seed = 1L,
                     k = 30L,
                     metric = c("euclidean", "cosine", "inner_product"),
-                    backend = c("cpu", "cuda"),
+                    backend = c("cpu", "cuda", "metal"),
                     n.cores = 4L,
                     gpu.device = 0L) {
   metric <- match.arg(metric)
@@ -271,7 +271,7 @@ CoreKNN <- function(data,
 #' @param stratified Whether to stratify folds by class labels.
 #' @param seed Integer random seed.
 #' @param ncomp Number of SIMPLS latent components requested.
-#' @param backend Execution backend, either `"cpu"` or `"cuda"`.
+#' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
 #' @export
@@ -284,7 +284,7 @@ CorePLSLDA <- function(data,
                        stratified = TRUE,
                        seed = 1L,
                        ncomp = min(50L, ncol(data)),
-                       backend = c("cpu", "cuda"),
+                       backend = c("cpu", "cuda", "metal"),
                        n.cores = 4L,
                        gpu.device = 0L) {
   backend <- match.arg(backend)
@@ -326,7 +326,7 @@ CorePLSLDA <- function(data,
 #' @param spatial.constraint.mode Constraint construction mode.
 #' @param metric Distance or similarity metric.
 #' @param classifier Either `"knn"` or `"pls_lda"`.
-#' @param backend Either `"cpu"` or `"cuda"`.
+#' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param seed Integer random seed.
 #' @param visual.init Whether to store a PCA-based initialization used by
 #'   `KODAMA.visualization` when no explicit `init` is supplied.
@@ -354,7 +354,7 @@ kodama_matrix <- function(data,
                           spatial.constraint.mode = c("kmeans", "graph", "auto"),
                           metric = "euclidean",
                           classifier = c("knn", "pls_lda"),
-                          backend = c("cpu", "cuda"),
+                          backend = c("cpu", "cuda", "metal"),
                           seed = 1234L,
                           visual.init = TRUE,
                           progress = TRUE,
@@ -449,7 +449,7 @@ KODAMA.matrix <- kodama_matrix
 #'   grouping.
 #' @param spatial.constraint.mode Spatial constraint strategy.
 #' @param classifier Either `"knn"` or `"pls_lda"`.
-#' @param backend Either `"cpu"` or `"cuda"`.
+#' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param graph.feature.mode Graph-to-feature transform for PLS-LDA and
 #'   graph-only initialization. The standard path is
 #'   `"laplacian_self_tuning"`.
@@ -480,7 +480,7 @@ kodama_matrix_graph <- function(indices,
                                 spatial.graph.mix = FALSE,
                                 spatial.constraint.mode = c("kmeans", "graph", "auto"),
                                 classifier = c("knn", "pls_lda"),
-                                backend = c("cpu", "cuda"),
+                                backend = c("cpu", "cuda", "metal"),
                                 graph.feature.mode = "laplacian_self_tuning",
                                 graph.feature.components = 0L,
                                 graph.feature.steps = 3L,
@@ -655,7 +655,7 @@ print.kodama_diagnostics <- function(x, ...) {
 #' @param data Numeric matrix with samples in rows and variables in columns.
 #' @param k Number of nearest neighbors to retain.
 #' @param metric Distance or similarity metric.
-#' @param backend Execution backend, either `"cpu"` or `"cuda"`.
+#' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
 #' @aliases KODAMA.makeSNNGraph makeSNNGraph
@@ -663,7 +663,7 @@ print.kodama_diagnostics <- function(x, ...) {
 KODAMA.graph <- function(data,
                          k = 30L,
                          metric = c("euclidean", "cosine", "inner_product"),
-                         backend = c("cpu", "cuda"),
+                         backend = c("cpu", "cuda", "metal"),
                          n.cores = 4L,
                          gpu.device = 0L) {
   metric <- match.arg(metric)
@@ -811,7 +811,8 @@ KODAMA.visualization <- function(x,
 #' @param weight Graph edge-weighting rule.
 #' @param k Number of neighbors used when `x` is an embedding matrix.
 #' @param metric Distance or similarity metric used when `x` is a matrix.
-#' @param graph.backend Backend used to construct a graph from an embedding.
+#' @param graph.backend Backend used to construct a graph from an embedding:
+#'   `"cpu"`, `"cuda"`, or `"metal"`. Clustering itself runs on CPU.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param n.iterations Number of clustering refinement iterations.
 #' @param random.walk.steps Number of random-walk steps.
@@ -822,14 +823,14 @@ KODAMA.clustering <- function(x,
                               weight = c("distance", "snn", "adaptive", "binary"),
                               k = 30L,
                               metric = c("euclidean", "cosine", "inner_product"),
-                              graph.backend = c("cpu", "cuda"),
+                              graph.backend = c("cpu", "cuda", "metal"),
                               n.cores = 4L,
                               n.iterations = 10L,
                               random.walk.steps = 4L,
                               gpu.device = 0L) {
   weight <- match.arg(weight)
   metric <- match.arg(metric)
-  graph.backend <- match.arg(graph.backend, c("cpu", "cuda"))
+  graph.backend <- match.arg(graph.backend)
   graph <- extract_kodama_graph(x)
   if (!is.null(graph)) {
     return(kodama_graph_cluster_cpp(

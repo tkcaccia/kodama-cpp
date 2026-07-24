@@ -604,7 +604,13 @@ Rcpp::List core_impl_cpp(
   kodama::CoreResult result = classifier == kodama::CoreClassifier::KNN ?
     kodama::CoreKNN(view, labels, constraints, fixed, options) :
     kodama::CorePLSLDA(view, labels, constraints, fixed, options);
-  return core_to_r(result);
+  Rcpp::List out = core_to_r(result);
+  out["backend"] = kodama::to_string(
+    classifier == kodama::CoreClassifier::KNN ?
+      options.knn.backend :
+      options.pls.backend
+  );
+  return out;
 }
 
 // [[Rcpp::export]]
@@ -666,7 +672,9 @@ Rcpp::List kodama_knn_graph_cpp(
     kodama::MatrixView{x.data(), static_cast<std::size_t>(n), static_cast<std::size_t>(p)},
     options
   );
-  return graph_to_r(graph, n);
+  Rcpp::List out = graph_to_r(graph, n);
+  out["backend"] = kodama::to_string(options.backend);
+  return out;
 }
 
 // [[Rcpp::export]]
@@ -742,6 +750,9 @@ Rcpp::NumericMatrix kodama_umap_cpp(
   }
   const kodama::NeighborGraph graph = graph_from_r(indices, distances);
   const kodama::Backend selected = parse_backend(backend);
+  if (selected == kodama::Backend::Metal) {
+    Rcpp::stop("KODAMA UMAP currently supports CPU and CUDA backends, not Metal.");
+  }
   const kodama::EmbeddingResult result = selected == kodama::Backend::CUDA ?
     kodama::KODAMAUMAP_CUDA(graph, options) :
     kodama::KODAMAUMAP_CPU(graph, options);
@@ -799,6 +810,9 @@ Rcpp::NumericMatrix kodama_opentsne_cpp(
   }
   const kodama::NeighborGraph graph = graph_from_r(indices, distances);
   const kodama::Backend selected = parse_backend(backend);
+  if (selected == kodama::Backend::Metal) {
+    Rcpp::stop("KODAMA openTSNE currently supports CPU and CUDA backends, not Metal.");
+  }
   const kodama::EmbeddingResult result = selected == kodama::Backend::CUDA ?
     kodama::KODAMAOpenTSNE_CUDA(graph, options) :
     kodama::KODAMAOpenTSNE_CPU(graph, options);

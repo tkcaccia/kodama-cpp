@@ -13,7 +13,7 @@ KNNCV(
   seed = 1L,
   k = 10L,
   metric = c("cosine", "inner_product", "euclidean"),
-  backend = c("cpu", "cuda"),
+  backend = c("cpu", "cuda", "metal"),
   n.cores = 1L,
   gpu.device = 0L
 )
@@ -36,7 +36,7 @@ fold groups.}
 
 \item{metric}{Distance or similarity metric.}
 
-\item{backend}{Execution backend, either \code{"cpu"} or \code{"cuda"}.}
+\item{backend}{Execution backend: \code{"cpu"}, \code{"cuda"}, or \code{"metal"}.}
 
 \item{n.cores}{Number of CPU worker threads requested by the wrapper.}
 

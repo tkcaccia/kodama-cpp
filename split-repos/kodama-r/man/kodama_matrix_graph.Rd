@@ -25,7 +25,7 @@ kodama_matrix_graph(
   spatial.graph.mix = FALSE,
   spatial.constraint.mode = c("kmeans", "graph", "auto"),
   classifier = c("knn", "pls_lda"),
-  backend = c("cpu", "cuda"),
+  backend = c("cpu", "cuda", "metal"),
   graph.feature.mode = "laplacian_self_tuning",
   graph.feature.components = 0L,
   graph.feature.steps = 3L,
@@ -80,7 +80,7 @@ grouping.}
 
 \item{classifier}{Either \code{"knn"} or \code{"pls_lda"}.}
 
-\item{backend}{Either \code{"cpu"} or \code{"cuda"}.}
+\item{backend}{Execution backend: \code{"cpu"}, \code{"cuda"}, or \code{"metal"}.}
 
 \item{graph.feature.mode}{Graph-to-feature transform for PLS-LDA and
 graph-only initialization. The standard path is

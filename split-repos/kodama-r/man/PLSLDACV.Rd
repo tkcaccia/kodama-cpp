@@ -14,7 +14,7 @@ PLSLDACV(
   ncomp = min(50L, ncol(data)),
   center = TRUE,
   scale = TRUE,
-  backend = c("cpu", "cuda"),
+  backend = c("cpu", "cuda", "metal"),
   n.cores = 1L,
   gpu.device = 0L
 )
@@ -39,7 +39,7 @@ fold groups.}
 
 \item{scale}{Whether the C++ core scales the analysis matrix.}
 
-\item{backend}{Execution backend, either \code{"cpu"} or \code{"cuda"}.}
+\item{backend}{Execution backend: \code{"cpu"}, \code{"cuda"}, or \code{"metal"}.}
 
 \item{n.cores}{Number of CPU worker threads requested by the wrapper.}
 
