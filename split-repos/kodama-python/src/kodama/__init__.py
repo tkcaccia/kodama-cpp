@@ -295,7 +295,7 @@ def visualization(
     n_epochs=200,
     n_iter=500,
     perplexity=30.0,
-    graph_mode="binary",
+    graph_mode="fuzzy",
     seed=None,
     **kwargs,
 ):

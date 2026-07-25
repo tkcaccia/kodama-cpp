@@ -308,9 +308,9 @@ manuscript/              JMLR manuscript sources and artifacts
 ## Implementation notes
 
 The CPU and CUDA UMAP/openTSNE implementations track fastEmbedR commit
-`c98b9ecd124d442f20f849ce1be7f5bd4c13d0db`. UMAP supports the current
-fastEmbedR symmetric binary graph and an explicit fuzzy graph mode. The
-openTSNE default perplexity is 30.
+`c98b9ecd124d442f20f849ce1be7f5bd4c13d0db`. UMAP uses fuzzy graph weighting
+by default and retains symmetric binary graph weighting as an explicit
+compatibility mode. The openTSNE default perplexity is 30.
 
 CUDA nearest-neighbor search is package-owned and provides exact and
 recall-tuned IVF-Flat paths. Metal provides exact search and an explicit

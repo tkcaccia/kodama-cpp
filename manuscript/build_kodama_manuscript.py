@@ -248,7 +248,8 @@ SECTIONS = [
             ),
             (
                 "UMAP and openTSNE are direct standalone ports of the pinned current fastEmbedR "
-                "implementation. UMAP builds binary or fuzzy graphs directly in float32 CSR form, "
+                "implementation. UMAP builds fuzzy graphs by default, with binary weighting "
+                "available explicitly; both are constructed directly in float32 CSR form, "
                 "including the smooth-kNN bandwidth calculation and epochs-per-sample schedule; "
                 "openTSNE uses the matching sparse affinities and exact or FFT-grid repulsion. "
                 "The CUDA path reuses pooled workspaces, and neither path links fastEmbedR or R."
@@ -592,7 +593,7 @@ API_ROWS = [
     (
         "Visualization",
         "KODAMA.visualization",
-        "Current fastEmbedR UMAP and openTSNE ports from standard or KODAMA-corrected neighbor graphs; direct float32 CSR construction and binary/fuzzy UMAP graph modes are explicit.",
+        "Current fastEmbedR UMAP and openTSNE ports from standard or KODAMA-corrected neighbor graphs; direct float32 CSR construction uses fuzzy UMAP weighting by default, with binary weighting explicit.",
     ),
     (
         "Graph and clustering",

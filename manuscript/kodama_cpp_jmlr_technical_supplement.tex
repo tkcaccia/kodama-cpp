@@ -155,7 +155,7 @@ Latent-space LDA is fitted from sufficient statistics. For training scores T, cl
 
 The library also exposes float32 randomized PCA as a preprocessing and embedding-initialization primitive. A Gaussian range sketch, backend-specific automatic oversampling and power-iteration policy, orthonormal basis, and compact eigensolve produce scores, loadings, singular values, and explained variance. CPU, CUDA, and Metal entry points share this contract. The implementation follows the current fastEmbedR/fastPLS strategy but is standalone and does not link either package, Armadillo, Eigen, or RAFT.
 
-UMAP and openTSNE are direct standalone ports of the pinned current fastEmbedR implementation. UMAP builds binary or fuzzy graphs directly in float32 CSR form, including the smooth-kNN bandwidth calculation and epochs-per-sample schedule; openTSNE uses the matching sparse affinities and exact or FFT-grid repulsion. The CUDA path reuses pooled workspaces, and neither path links fastEmbedR or R.
+UMAP and openTSNE are direct standalone ports of the pinned current fastEmbedR implementation. UMAP builds fuzzy graphs by default, with binary weighting available explicitly; both are constructed directly in float32 CSR form, including the smooth-kNN bandwidth calculation and epochs-per-sample schedule. OpenTSNE uses the matching sparse affinities and exact or FFT-grid repulsion. The CUDA path reuses pooled workspaces, and neither path links fastEmbedR or R.
 
 For graph inputs, where neighbor indices and distances are supplied by the caller, KODAMA keeps the KNN optimizer directly on the supplied graph and avoids rebuilding the neighbor search. If the PLS-LDA optimizer is requested without the original feature matrix, the graph is converted into a PLS-compatible float32 representation with the standard self-tuning normalized Laplacian transform: local row-wise distance scales define edge weights, the graph is symmetrized and degree-normalized, and randomized power iterations produce features for the same PLS-LDA core. This is the only supported graph-to-feature path in the public API.
 
@@ -221,7 +221,7 @@ Core optimization & CoreKNN, CorePLSLDA & Independent label-evolution runs that 
 KODAMA matrix & KODAMA.matrix / KODAMAMatrix & Landmark selection, splitting, M runs, optimized label vectors, KODAMA dissimilarity, and graph output. \\
 Graph-input KODAMA & KODAMA.matrix.graph / KODAMAMatrixFromGraph & Runs the same KNN or PLS-LDA KODAMA optimizer from supplied neighbor indices/distances; KNN reuses the graph directly and PLS-LDA uses self-tuning Laplacian features when the data matrix is unavailable. \\
 Principal components & PCA / KODAMA.pca & Float32 randomized PCA scores, loadings, singular values, explained variance, preprocessing vectors, backend identity, and runtime on CPU, CUDA, or Metal. \\
-Visualization & KODAMA.visualization & Current fastEmbedR UMAP and openTSNE ports from standard or KODAMA-corrected neighbor graphs; direct float32 CSR construction and binary/fuzzy UMAP graph modes are explicit. \\
+Visualization & KODAMA.visualization & Current fastEmbedR UMAP and openTSNE ports from standard or KODAMA-corrected neighbor graphs; direct float32 CSR construction uses fuzzy UMAP weighting by default, with binary weighting explicit. \\
 Graph and clustering & makeSNNGraph equivalent and random-walk clustering & CPU, CUDA, or Metal neighbor-graph construction followed by an explicit CPU random-walk clustering kernel. \\
 \bottomrule
 \end{tabularx}

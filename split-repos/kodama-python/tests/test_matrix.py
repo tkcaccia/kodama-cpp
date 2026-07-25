@@ -56,13 +56,12 @@ def test_public_api_cpu():
     core_pls = kodama.CorePLSLDA(x, labels, cycles=1, folds=3, ncomp=2, backend="cpu")
     pca = kodama.PCA(x, ncomp=3, backend="cpu", seed=4)
     graph = kodama.graph(x, k=5, backend="cpu")
-    emb = kodama.visualization(
+    emb_default = kodama.visualization(
         graph,
         method="UMAP",
         k=5,
         n_epochs=3,
         backend="cpu",
-        graph_mode="binary",
     )
     emb_fuzzy = kodama.visualization(
         graph,
@@ -71,6 +70,14 @@ def test_public_api_cpu():
         n_epochs=3,
         backend="cpu",
         graph_mode="fuzzy",
+    )
+    emb_binary = kodama.visualization(
+        graph,
+        method="UMAP",
+        k=5,
+        n_epochs=3,
+        backend="cpu",
+        graph_mode="binary",
     )
     clu = kodama.clustering(graph, n_iterations=2, random_walk_steps=2)
 
@@ -84,10 +91,13 @@ def test_public_api_cpu():
     assert pca["precision"] == "float32"
     assert np.all(np.diff(pca["singular_values"]) <= 1e-5)
     assert graph["indices"].shape == (60, 5)
-    assert emb.shape == (60, 2)
+    assert emb_default.shape == (60, 2)
     assert emb_fuzzy.shape == (60, 2)
-    assert np.all(np.isfinite(emb))
+    assert emb_binary.shape == (60, 2)
+    np.testing.assert_array_equal(emb_default, emb_fuzzy)
+    assert np.all(np.isfinite(emb_default))
     assert np.all(np.isfinite(emb_fuzzy))
+    assert np.all(np.isfinite(emb_binary))
     assert clu["membership"].shape == (60,)
 
 

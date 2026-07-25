@@ -8,7 +8,9 @@ All notable changes to kodama-cpp are documented here. The project follows
 - Replaced the CPU/CUDA UMAP and openTSNE implementation with the current
   fastEmbedR kernels, including direct float32 CSR graph construction, the
   current smooth-kNN bandwidth rule, pooled CUDA workspaces, and the symmetric
-  binary UMAP graph default; fuzzy UMAP weighting remains selectable.
+  binary and fuzzy UMAP graph modes.
+- Made fuzzy weighting the default UMAP graph mode across the C++, R, and
+  Python APIs; binary weighting remains explicitly selectable.
 - Added a standalone float32 randomized PCA API with CPU, CUDA, and Metal
   entry points plus thin R and Python bindings.
 - Complete the tagged release archive, checksum, and archival DOI.

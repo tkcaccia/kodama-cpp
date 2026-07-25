@@ -521,6 +521,10 @@ int main() {
   require(km_res.knn.indices.front() >= 1, "KODAMAMatrix neighbor indices should be one-based for R compatibility.");
 
   kodama::UMAPOptions umap_options;
+  require(
+    umap_options.graph_mode == kodama::UMAPGraphMode::Fuzzy,
+    "Fuzzy UMAP graph weighting should be the C++ default."
+  );
   umap_options.n_neighbors = std::min(12, km_res.knn.neighbors);
   umap_options.n_epochs = 5;
   umap_options.n_threads = 2;

@@ -1070,7 +1070,7 @@ PYBIND11_MODULE(_core, m) {
     py::arg("seed") = 1234,
     py::arg("backend") = "cpu",
     py::arg("gpu_device") = 0,
-    py::arg("graph_mode") = "binary"
+    py::arg("graph_mode") = "fuzzy"
   );
   m.def(
     "opentsne",

@@ -66,7 +66,6 @@ um = kodama.visualization(
     "UMAP",
     k=30,
     backend="cuda",
-    graph_mode="binary",
 )
 clu = kodama.clustering(um, n_iterations=10, random_walk_steps=4)
 ```
@@ -74,6 +73,8 @@ clu = kodama.clustering(um, n_iterations=10, random_walk_steps=4)
 `kodama.matrix()` returns a `KodamaMatrixResult`, which is still a normal
 dictionary with the raw C++ fields (`res`, `acc`, `knn`, `timing`). Convenience
 properties expose `best_labels`, `best_run`, `class_counts`, and `parameters`.
+UMAP uses fuzzy graph weighting by default; pass `graph_mode="binary"` only
+when binary graph compatibility is required.
 
 ## Benchmark
 

@@ -369,7 +369,7 @@ struct UMAPOptions {
   int n_threads = 1;
   int seed = 1234;
   int gpu_device = 0;
-  UMAPGraphMode graph_mode = UMAPGraphMode::Binary;
+  UMAPGraphMode graph_mode = UMAPGraphMode::Fuzzy;
   std::vector<float> init;
 };
 
