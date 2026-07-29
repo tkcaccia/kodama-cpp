@@ -48,6 +48,40 @@ int main() {
 `result.acc` stores its raw cross-validated accuracy. Select a run from those
 internal scores, not from external reference labels.
 
+## Reuse a CUDA or Metal IVF index
+
+Use an explicit resident handle when several searches share one training
+matrix:
+
+```cpp
+kodama::KNNOptions ivf;
+ivf.backend = kodama::Backend::CUDA; // or Backend::Metal
+ivf.metric = kodama::DistanceMetric::Euclidean;
+ivf.ivf_nlist = 256;
+ivf.ivf_nprobe = 32;
+
+auto index = kodama::BuildResidentIVFIndex(
+  kodama::MatrixView{x.data(), n, p},
+  ivf
+);
+
+kodama::ResidentIVFSearchStats stats;
+auto self_graph = kodama::SearchResidentIVFIndexSelf(
+  index, 30, true, &stats
+);
+auto query_graph = kodama::SearchResidentIVFIndex(
+  index,
+  kodama::MatrixView{query.data(), query_n, p},
+  30,
+  &stats
+);
+```
+
+The move-only handle owns the device training matrix, projection, centroids,
+and inverted lists. Self-search does not upload the training matrix again;
+external queries upload only their query rows. Neighbor identifiers returned
+by both calls are one-based.
+
 ## R wrapper
 
 Build the core first, then install the thin wrapper from the checkout:

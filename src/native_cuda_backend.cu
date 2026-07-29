@@ -149,6 +149,27 @@ class CublasHandle {
   cublasHandle_t handle_ = nullptr;
 };
 
+}  // namespace
+
+struct NativeCudaIVFIndex::Impl {
+  int rows = 0;
+  int dimensions = 0;
+  int projected_dimensions = 0;
+  int nlist = 0;
+  int device = 0;
+  DistanceMetric metric = DistanceMetric::Euclidean;
+  CudaBuffer<float> train;
+  CudaBuffer<float> projected_train;
+  CudaBuffer<float> centroids;
+  CudaBuffer<std::uint32_t> list_offsets;
+  CudaBuffer<int> list_ids;
+  CudaBuffer<std::uint32_t> feature_offsets;
+  CudaBuffer<std::uint32_t> feature_ids;
+  CudaBuffer<std::int8_t> feature_signs;
+};
+
+namespace {
+
 __device__ bool better_pair(float distance_a, int id_a, float distance_b, int id_b) {
   return distance_a < distance_b || (distance_a == distance_b && id_a < id_b);
 }
@@ -340,10 +361,12 @@ __global__ void accumulate_centroids_kernel(
   const int* assignments,
   float* sums,
   unsigned int* counts,
+  const unsigned int* changed,
   int rows,
   int dimensions,
   int clusters
 ) {
+  if (*changed == 0) return;
   const std::size_t id = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const std::size_t total = static_cast<std::size_t>(rows) * dimensions;
   if (id >= total) return;
@@ -360,12 +383,14 @@ __global__ void finalize_centroids_kernel(
   const float* sums,
   const unsigned int* counts,
   const int* initial_indices,
+  const unsigned int* changed,
   float* centroids,
   int rows,
   int dimensions,
   int clusters,
   int iteration
 ) {
+  if (*changed == 0) return;
   const std::size_t id = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const std::size_t total = static_cast<std::size_t>(clusters) * dimensions;
   if (id >= total) return;
@@ -378,6 +403,49 @@ __global__ void finalize_centroids_kernel(
     const int replacement = initial_indices[(cluster + iteration) % rows];
     centroids[id] = data[static_cast<std::size_t>(replacement) * dimensions + dimension];
   }
+}
+
+__global__ void count_ivf_assignments_kernel(
+  const int* assignments,
+  std::uint32_t* counts,
+  int rows,
+  int clusters
+) {
+  const int row = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (row >= rows) return;
+  const int cluster = assignments[row];
+  if (cluster >= 0 && cluster < clusters) atomicAdd(counts + cluster, 1u);
+}
+
+__global__ void prefix_ivf_counts_kernel(
+  const std::uint32_t* counts,
+  std::uint32_t* offsets,
+  std::uint32_t* cursor,
+  int clusters
+) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  std::uint32_t running = 0;
+  offsets[0] = 0;
+  for (int cluster = 0; cluster < clusters; ++cluster) {
+    cursor[cluster] = running;
+    running += counts[cluster];
+    offsets[cluster + 1] = running;
+  }
+}
+
+__global__ void scatter_ivf_ids_kernel(
+  const int* assignments,
+  std::uint32_t* cursor,
+  int* list_ids,
+  int rows,
+  int clusters
+) {
+  const int row = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (row >= rows) return;
+  const int cluster = assignments[row];
+  if (cluster < 0 || cluster >= clusters) return;
+  const std::uint32_t position = atomicAdd(cursor + cluster, 1u);
+  list_ids[position] = row;
 }
 
 __global__ void ivf_topk_kernel(
@@ -585,7 +653,12 @@ struct KMeansOutput {
   std::vector<int> assignments;
 };
 
-KMeansOutput run_kmeans_device(
+struct DeviceKMeansOutput {
+  CudaBuffer<float> centroids;
+  CudaBuffer<int> assignments;
+};
+
+DeviceKMeansOutput run_kmeans_device(
   const float* device_data,
   int rows,
   int dimensions,
@@ -660,9 +733,7 @@ KMeansOutput run_kmeans_device(
       score_batch_rows
     );
 
-    unsigned int changed = 0;
-    device_changed.copy_to_host(&changed, 1);
-    if (changed == 0 || iteration + 1 >= max_iterations) break;
+    if (iteration + 1 >= max_iterations) break;
 
     cuda_check(cudaMemset(device_sums.get(), 0, centroid_items * sizeof(float)), "cudaMemset k-means sums");
     cuda_check(cudaMemset(device_counts.get(), 0, static_cast<std::size_t>(clusters) * sizeof(unsigned int)),
@@ -672,6 +743,7 @@ KMeansOutput run_kmeans_device(
       device_assignments.get(),
       device_sums.get(),
       device_counts.get(),
+      device_changed.get(),
       rows,
       dimensions,
       clusters
@@ -682,6 +754,7 @@ KMeansOutput run_kmeans_device(
       device_sums.get(),
       device_counts.get(),
       device_initial_indices.get(),
+      device_changed.get(),
       device_centroids.get(),
       rows,
       dimensions,
@@ -691,12 +764,53 @@ KMeansOutput run_kmeans_device(
     cuda_check(cudaGetLastError(), "native CUDA k-means centroid update");
   }
 
-  KMeansOutput output;
-  output.centroids.resize(centroid_items);
-  output.assignments.resize(static_cast<std::size_t>(rows));
-  device_centroids.copy_to_host(output.centroids.data(), output.centroids.size());
-  device_assignments.copy_to_host(output.assignments.data(), output.assignments.size());
-  return output;
+  return DeviceKMeansOutput{
+    std::move(device_centroids),
+    std::move(device_assignments)
+  };
+}
+
+struct DeviceIVFLists {
+  CudaBuffer<std::uint32_t> offsets;
+  CudaBuffer<int> ids;
+};
+
+DeviceIVFLists build_ivf_lists_device(
+  const int* device_assignments,
+  int rows,
+  int clusters
+) {
+  CudaBuffer<std::uint32_t> counts(static_cast<std::size_t>(clusters));
+  CudaBuffer<std::uint32_t> cursor(static_cast<std::size_t>(clusters));
+  CudaBuffer<std::uint32_t> offsets(static_cast<std::size_t>(clusters) + 1);
+  CudaBuffer<int> ids(static_cast<std::size_t>(rows));
+  cuda_check(
+    cudaMemset(counts.get(), 0, static_cast<std::size_t>(clusters) * sizeof(std::uint32_t)),
+    "cudaMemset IVF list counts"
+  );
+  count_ivf_assignments_kernel<<<blocks_for(static_cast<std::size_t>(rows)), 256>>>(
+    device_assignments,
+    counts.get(),
+    rows,
+    clusters
+  );
+  cuda_check(cudaGetLastError(), "native CUDA IVF list counting");
+  prefix_ivf_counts_kernel<<<1, 1>>>(
+    counts.get(),
+    offsets.get(),
+    cursor.get(),
+    clusters
+  );
+  cuda_check(cudaGetLastError(), "native CUDA IVF list prefix sum");
+  scatter_ivf_ids_kernel<<<blocks_for(static_cast<std::size_t>(rows)), 256>>>(
+    device_assignments,
+    cursor.get(),
+    ids.get(),
+    rows,
+    clusters
+  );
+  cuda_check(cudaGetLastError(), "native CUDA IVF list scatter");
+  return DeviceIVFLists{std::move(offsets), std::move(ids)};
 }
 
 class FaissCompatibleRandom {
@@ -1138,7 +1252,172 @@ double recall_at_k(
     static_cast<double>(static_cast<std::size_t>(rows) * static_cast<std::size_t>(k));
 }
 
+NativeKNNResult search_cuda_ivf_device(
+  const float* device_train,
+  const float* device_query,
+  const float* device_projected_query,
+  const float* device_centroids,
+  const std::uint32_t* device_list_offsets,
+  const int* device_list_ids,
+  int train_rows,
+  int query_rows,
+  int dimensions,
+  int projected_dimensions,
+  int nlist,
+  int k,
+  DistanceMetric metric,
+  int requested_nprobe,
+  double target_recall,
+  int device,
+  const std::vector<int>& query_train_indices,
+  NativeCudaIVFStats* stats
+) {
+  if (requested_nprobe > kMaximumCudaProbe) {
+    throw std::invalid_argument("Native CUDA IVF supports nprobe <= 256.");
+  }
+  const int available = train_rows - (query_train_indices.empty() ? 0 : 1);
+  k = std::min(k, std::max(0, available));
+  NativeKNNResult output;
+  output.queries = query_rows;
+  output.neighbors = k;
+  output.indices.assign(static_cast<std::size_t>(query_rows) * k, -1);
+  output.distances.assign(
+    static_cast<std::size_t>(query_rows) * k,
+    std::numeric_limits<float>::infinity()
+  );
+  if (query_rows == 0 || k == 0) return output;
+
+  CudaDeviceScope device_scope(device);
+  const std::vector<int> exclusions = normalized_exclusions(query_train_indices, query_rows);
+  CudaBuffer<int> device_exclusions(exclusions.size());
+  device_exclusions.copy_from_host(exclusions.data(), exclusions.size());
+
+  const int max_probe = std::min(nlist, kMaximumCudaProbe);
+  int nprobe = requested_nprobe > 0 ? requested_nprobe :
+    std::max(1, 2 * static_cast<int>(std::ceil(std::sqrt(static_cast<double>(nlist)))));
+  nprobe = std::max(1, std::min(nprobe, max_probe));
+  target_recall = std::max(0.0, std::min(1.0, target_recall));
+
+  const int pilot_rows = std::min(query_rows, 128);
+  const std::size_t pilot_items = static_cast<std::size_t>(pilot_rows) * k;
+  CudaBuffer<int> device_pilot_exact_ids(pilot_items);
+  CudaBuffer<float> device_pilot_exact_distances(pilot_items);
+  CudaBuffer<int> device_pilot_ivf_ids(pilot_items);
+  CudaBuffer<float> device_pilot_ivf_distances(pilot_items);
+  launch_exact(
+    device_train,
+    device_query,
+    device_exclusions.get(),
+    device_pilot_exact_ids.get(),
+    device_pilot_exact_distances.get(),
+    train_rows,
+    pilot_rows,
+    dimensions,
+    k,
+    metric
+  );
+  std::vector<int> pilot_exact(pilot_items, -1);
+  std::vector<int> pilot_ivf(pilot_items, -1);
+  device_pilot_exact_ids.copy_to_host(pilot_exact.data(), pilot_exact.size());
+
+  auto evaluate_probe = [&](int probes) {
+    launch_ivf(
+      device_train,
+      device_query,
+      device_projected_query,
+      device_centroids,
+      device_list_offsets,
+      device_list_ids,
+      device_exclusions.get(),
+      device_pilot_ivf_ids.get(),
+      device_pilot_ivf_distances.get(),
+      train_rows,
+      pilot_rows,
+      dimensions,
+      projected_dimensions,
+      nlist,
+      probes,
+      k,
+      metric
+    );
+    device_pilot_ivf_ids.copy_to_host(pilot_ivf.data(), pilot_ivf.size());
+    return recall_at_k(pilot_exact, pilot_ivf, pilot_rows, k);
+  };
+
+  double pilot_recall = 0.0;
+  if (requested_nprobe <= 0) {
+    int low_fail = nprobe - 1;
+    int high = nprobe;
+    while (true) {
+      pilot_recall = evaluate_probe(high);
+      if (pilot_recall >= target_recall || high >= max_probe) break;
+      low_fail = high;
+      high = std::min(max_probe, std::max(high + 1, static_cast<int>(std::ceil(high * 1.5))));
+    }
+    if (pilot_recall >= target_recall) {
+      while (high - low_fail > 1) {
+        const int middle = low_fail + (high - low_fail) / 2;
+        const double middle_recall = evaluate_probe(middle);
+        if (middle_recall >= target_recall) {
+          high = middle;
+          pilot_recall = middle_recall;
+        } else {
+          low_fail = middle;
+        }
+      }
+    }
+    nprobe = high;
+  } else {
+    pilot_recall = evaluate_probe(nprobe);
+  }
+
+  CudaBuffer<int> device_output_ids(output.indices.size());
+  CudaBuffer<float> device_output_distances(output.distances.size());
+  launch_ivf(
+    device_train,
+    device_query,
+    device_projected_query,
+    device_centroids,
+    device_list_offsets,
+    device_list_ids,
+    device_exclusions.get(),
+    device_output_ids.get(),
+    device_output_distances.get(),
+    train_rows,
+    query_rows,
+    dimensions,
+    projected_dimensions,
+    nlist,
+    nprobe,
+    k,
+    metric
+  );
+  device_output_ids.copy_to_host(output.indices.data(), output.indices.size());
+  device_output_distances.copy_to_host(output.distances.data(), output.distances.size());
+  if (stats != nullptr) {
+    stats->nlist = nlist;
+    stats->nprobe = nprobe;
+    stats->pilot_recall = pilot_recall;
+  }
+  return output;
+}
+
 }  // namespace
+
+NativeCudaIVFIndex::NativeCudaIVFIndex() = default;
+NativeCudaIVFIndex::~NativeCudaIVFIndex() = default;
+NativeCudaIVFIndex::NativeCudaIVFIndex(NativeCudaIVFIndex&&) noexcept = default;
+NativeCudaIVFIndex& NativeCudaIVFIndex::operator=(NativeCudaIVFIndex&&) noexcept = default;
+NativeCudaIVFIndex::NativeCudaIVFIndex(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+bool NativeCudaIVFIndex::valid() const noexcept { return impl_ != nullptr; }
+int NativeCudaIVFIndex::rows() const noexcept { return impl_ == nullptr ? 0 : impl_->rows; }
+int NativeCudaIVFIndex::dimensions() const noexcept { return impl_ == nullptr ? 0 : impl_->dimensions; }
+int NativeCudaIVFIndex::nlist() const noexcept { return impl_ == nullptr ? 0 : impl_->nlist; }
+int NativeCudaIVFIndex::device() const noexcept { return impl_ == nullptr ? -1 : impl_->device; }
+DistanceMetric NativeCudaIVFIndex::metric() const noexcept {
+  return impl_ == nullptr ? DistanceMetric::Euclidean : impl_->metric;
+}
 
 bool native_cuda_backend_available(int device) {
   int count = 0;
@@ -1291,7 +1570,7 @@ NativeKNNResult native_cuda_ivf_knn_search(
   );
   cuda_check(cudaGetLastError(), "native CUDA IVF signed-hash projection");
 
-  KMeansOutput clustering = run_kmeans_device(
+  DeviceKMeansOutput clustering = run_kmeans_device(
     device_projected_train.get(),
     train_rows,
     projected_dimensions,
@@ -1299,30 +1578,11 @@ NativeKNNResult native_cuda_ivf_knn_search(
     8,
     4u
   );
-  std::vector<std::uint32_t> list_offsets(static_cast<std::size_t>(nlist) + 1, 0);
-  for (int assignment : clustering.assignments) {
-    if (assignment >= 0 && assignment < nlist) {
-      ++list_offsets[static_cast<std::size_t>(assignment) + 1];
-    }
-  }
-  for (int list = 0; list < nlist; ++list) {
-    list_offsets[static_cast<std::size_t>(list) + 1] += list_offsets[static_cast<std::size_t>(list)];
-  }
-  std::vector<std::uint32_t> cursor = list_offsets;
-  std::vector<int> list_ids(static_cast<std::size_t>(train_rows), -1);
-  for (int row = 0; row < train_rows; ++row) {
-    const int assignment = clustering.assignments[static_cast<std::size_t>(row)];
-    if (assignment >= 0 && assignment < nlist) {
-      list_ids[cursor[static_cast<std::size_t>(assignment)]++] = row;
-    }
-  }
-
-  CudaBuffer<float> device_centroids(clustering.centroids.size());
-  CudaBuffer<std::uint32_t> device_list_offsets(list_offsets.size());
-  CudaBuffer<int> device_list_ids(list_ids.size());
-  device_centroids.copy_from_host(clustering.centroids.data(), clustering.centroids.size());
-  device_list_offsets.copy_from_host(list_offsets.data(), list_offsets.size());
-  device_list_ids.copy_from_host(list_ids.data(), list_ids.size());
+  DeviceIVFLists lists = build_ivf_lists_device(
+    clustering.assignments.get(),
+    train_rows,
+    nlist
+  );
 
   const int pilot_rows = std::min(query_rows, 128);
   const std::size_t pilot_items = static_cast<std::size_t>(pilot_rows) * k;
@@ -1351,9 +1611,9 @@ NativeKNNResult native_cuda_ivf_knn_search(
       device_train.get(),
       device_query.get(),
       device_projected_query.get(),
-      device_centroids.get(),
-      device_list_offsets.get(),
-      device_list_ids.get(),
+      clustering.centroids.get(),
+      lists.offsets.get(),
+      lists.ids.get(),
       device_exclusions.get(),
       device_pilot_ivf_ids.get(),
       device_pilot_ivf_distances.get(),
@@ -1403,9 +1663,9 @@ NativeKNNResult native_cuda_ivf_knn_search(
     device_train.get(),
     device_query.get(),
     device_projected_query.get(),
-    device_centroids.get(),
-    device_list_offsets.get(),
-    device_list_ids.get(),
+    clustering.centroids.get(),
+    lists.offsets.get(),
+    lists.ids.get(),
     device_exclusions.get(),
     device_output_ids.get(),
     device_output_distances.get(),
@@ -1426,6 +1686,199 @@ NativeKNNResult native_cuda_ivf_knn_search(
     stats->pilot_recall = pilot_recall;
   }
   return output;
+}
+
+NativeCudaIVFIndex native_cuda_build_ivf_index(
+  const std::vector<float>& train,
+  int train_rows,
+  int dimensions,
+  DistanceMetric metric,
+  int requested_nlist,
+  int device
+) {
+  if (train_rows < 1 || dimensions < 1 ||
+      train.size() != static_cast<std::size_t>(train_rows) * dimensions) {
+    throw std::invalid_argument("Invalid native CUDA IVF training matrix.");
+  }
+  if (requested_nlist > kMaximumCudaLists) {
+    throw std::invalid_argument("Native CUDA IVF supports nlist <= 4096.");
+  }
+  int nlist = requested_nlist > 0 ? requested_nlist : static_cast<int>(
+    std::ceil(std::sqrt(static_cast<double>(train_rows)))
+  );
+  nlist = std::max(1, std::min({nlist, kMaximumCudaLists, train_rows}));
+  if (requested_nlist <= 0) nlist = std::min(nlist, kMaximumCudaProbe);
+  const int projected_dimensions = projection_dimension(dimensions);
+
+  std::vector<std::uint32_t> feature_offsets;
+  std::vector<std::uint32_t> feature_ids;
+  std::vector<std::int8_t> feature_signs;
+  make_projection_map(
+    dimensions,
+    projected_dimensions,
+    feature_offsets,
+    feature_ids,
+    feature_signs
+  );
+
+  CudaDeviceScope device_scope(device);
+  auto impl = std::make_unique<NativeCudaIVFIndex::Impl>();
+  impl->rows = train_rows;
+  impl->dimensions = dimensions;
+  impl->projected_dimensions = projected_dimensions;
+  impl->nlist = nlist;
+  impl->device = device;
+  impl->metric = metric;
+  impl->train = CudaBuffer<float>(train.size());
+  impl->projected_train = CudaBuffer<float>(
+    static_cast<std::size_t>(train_rows) * projected_dimensions
+  );
+  impl->feature_offsets = CudaBuffer<std::uint32_t>(feature_offsets.size());
+  impl->feature_ids = CudaBuffer<std::uint32_t>(feature_ids.size());
+  impl->feature_signs = CudaBuffer<std::int8_t>(feature_signs.size());
+  impl->train.copy_from_host(train.data(), train.size());
+  impl->feature_offsets.copy_from_host(feature_offsets.data(), feature_offsets.size());
+  impl->feature_ids.copy_from_host(feature_ids.data(), feature_ids.size());
+  impl->feature_signs.copy_from_host(feature_signs.data(), feature_signs.size());
+
+  const std::size_t projected_items =
+    static_cast<std::size_t>(train_rows) * projected_dimensions;
+  signed_hash_project_kernel<<<blocks_for(projected_items), 256>>>(
+    impl->train.get(),
+    impl->feature_offsets.get(),
+    impl->feature_ids.get(),
+    impl->feature_signs.get(),
+    impl->projected_train.get(),
+    train_rows,
+    dimensions,
+    projected_dimensions
+  );
+  cuda_check(cudaGetLastError(), "native CUDA resident IVF train projection");
+
+  DeviceKMeansOutput clustering = run_kmeans_device(
+    impl->projected_train.get(),
+    train_rows,
+    projected_dimensions,
+    nlist,
+    8,
+    4u
+  );
+  DeviceIVFLists lists = build_ivf_lists_device(
+    clustering.assignments.get(),
+    train_rows,
+    nlist
+  );
+  impl->centroids = std::move(clustering.centroids);
+  impl->list_offsets = std::move(lists.offsets);
+  impl->list_ids = std::move(lists.ids);
+  cuda_check(cudaDeviceSynchronize(), "finish native CUDA resident IVF construction");
+  return NativeCudaIVFIndex(std::move(impl));
+}
+
+NativeKNNResult native_cuda_ivf_index_search(
+  const NativeCudaIVFIndex& index,
+  const std::vector<float>& query,
+  int query_rows,
+  int k,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  NativeCudaIVFStats* stats
+) {
+  if (!index.valid()) throw std::invalid_argument("Native CUDA IVF index is empty.");
+  if (query_rows < 1) {
+    throw std::invalid_argument("Native CUDA IVF search requires at least one query.");
+  }
+  const NativeCudaIVFIndex::Impl& impl = *index.impl_;
+  if (query.size() != static_cast<std::size_t>(query_rows) * impl.dimensions) {
+    throw std::invalid_argument("Native CUDA IVF query matrix size mismatch.");
+  }
+  if (!query_train_indices.empty() &&
+      static_cast<int>(query_train_indices.size()) != query_rows) {
+    throw std::invalid_argument("Native CUDA IVF exclusion vector size mismatch.");
+  }
+  if (k < 1 || k > kMaximumCudaK) {
+    throw std::invalid_argument("Native CUDA IVF supports 1 <= k <= 256.");
+  }
+
+  CudaDeviceScope device_scope(impl.device);
+  CudaBuffer<float> device_query(query.size());
+  CudaBuffer<float> device_projected_query(
+    static_cast<std::size_t>(query_rows) * impl.projected_dimensions
+  );
+  device_query.copy_from_host(query.data(), query.size());
+  const std::size_t projected_items =
+    static_cast<std::size_t>(query_rows) * impl.projected_dimensions;
+  signed_hash_project_kernel<<<blocks_for(projected_items), 256>>>(
+    device_query.get(),
+    impl.feature_offsets.get(),
+    impl.feature_ids.get(),
+    impl.feature_signs.get(),
+    device_projected_query.get(),
+    query_rows,
+    impl.dimensions,
+    impl.projected_dimensions
+  );
+  cuda_check(cudaGetLastError(), "native CUDA resident IVF query projection");
+  return search_cuda_ivf_device(
+    impl.train.get(),
+    device_query.get(),
+    device_projected_query.get(),
+    impl.centroids.get(),
+    impl.list_offsets.get(),
+    impl.list_ids.get(),
+    impl.rows,
+    query_rows,
+    impl.dimensions,
+    impl.projected_dimensions,
+    impl.nlist,
+    k,
+    impl.metric,
+    requested_nprobe,
+    target_recall,
+    impl.device,
+    query_train_indices,
+    stats
+  );
+}
+
+NativeKNNResult native_cuda_ivf_index_self_search(
+  const NativeCudaIVFIndex& index,
+  int k,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  NativeCudaIVFStats* stats
+) {
+  if (!index.valid()) throw std::invalid_argument("Native CUDA IVF index is empty.");
+  const NativeCudaIVFIndex::Impl& impl = *index.impl_;
+  if (!query_train_indices.empty() &&
+      static_cast<int>(query_train_indices.size()) != impl.rows) {
+    throw std::invalid_argument("Native CUDA IVF exclusion vector size mismatch.");
+  }
+  if (k < 1 || k > kMaximumCudaK) {
+    throw std::invalid_argument("Native CUDA IVF supports 1 <= k <= 256.");
+  }
+  return search_cuda_ivf_device(
+    impl.train.get(),
+    impl.train.get(),
+    impl.projected_train.get(),
+    impl.centroids.get(),
+    impl.list_offsets.get(),
+    impl.list_ids.get(),
+    impl.rows,
+    impl.rows,
+    impl.dimensions,
+    impl.projected_dimensions,
+    impl.nlist,
+    k,
+    impl.metric,
+    requested_nprobe,
+    target_recall,
+    impl.device,
+    query_train_indices,
+    stats
+  );
 }
 
 std::vector<int> native_cuda_kmeans_labels(

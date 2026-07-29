@@ -37,6 +37,14 @@ int main() {
       const kodama::NeighborGraph&, const kodama::OpenTSNEOptions&);
   using PCAFn = kodama::PCAResult (*)(
       kodama::MatrixView, const kodama::PCAOptions&);
+  using ResidentIVFBuildFn = kodama::ResidentIVFIndex (*)(
+      kodama::MatrixView, const kodama::KNNOptions&);
+  using ResidentIVFSearchFn = kodama::NeighborGraph (*)(
+      const kodama::ResidentIVFIndex&, kodama::MatrixView, int,
+      kodama::ResidentIVFSearchStats*);
+  using ResidentIVFSelfSearchFn = kodama::NeighborGraph (*)(
+      const kodama::ResidentIVFIndex&, int, bool,
+      kodama::ResidentIVFSearchStats*);
 
   const KNNFn knn[] = {
       &kodama::KNNCV, &kodama::KNNCV_CPU, &kodama::KNNCV_CUDA,
@@ -70,10 +78,17 @@ int main() {
       &kodama::KODAMAOpenTSNE_CPU, &kodama::KODAMAOpenTSNE_CUDA};
   const PCAFn pca[] = {
       &kodama::PCA, &kodama::PCA_CPU, &kodama::PCA_CUDA, &kodama::PCA_METAL};
+  const ResidentIVFBuildFn resident_ivf_build =
+      &kodama::BuildResidentIVFIndex;
+  const ResidentIVFSearchFn resident_ivf_search =
+      &kodama::SearchResidentIVFIndex;
+  const ResidentIVFSelfSearchFn resident_ivf_self_search =
+      &kodama::SearchResidentIVFIndexSelf;
 
   return knn[0] && pls[0] && core[0] && matrix[0] && matrix_graph[0] &&
                  matrix_data_graph[0] && graph[0] && cluster[0] && umap[0] &&
-                 tsne[0] && pca[0]
+                 tsne[0] && pca[0] && resident_ivf_build &&
+                 resident_ivf_search && resident_ivf_self_search
              ? 0
              : 1;
 }

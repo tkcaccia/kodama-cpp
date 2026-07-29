@@ -189,6 +189,20 @@ kernel void signed_hash_project(
   projected[row * params.projected_dimensions + tid] = value;
 }
 
+kernel void gather_kmeans_centroids(
+    device const float* data [[buffer(0)]],
+    device const int* initial_point_indices [[buffer(1)]],
+    device float* centroids [[buffer(2)]],
+    constant KMeansParams& params [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]) {
+  const uint total = params.clusters * params.dimensions;
+  if (gid >= total) return;
+  const uint cluster = gid / params.dimensions;
+  const uint dimension = gid - cluster * params.dimensions;
+  const uint row = uint(initial_point_indices[cluster]);
+  centroids[gid] = data[row * params.dimensions + dimension];
+}
+
 kernel void ivf_topk_train_query(
     device const float* train [[buffer(0)]],
     device const float* query [[buffer(1)]],
@@ -426,6 +440,60 @@ kernel void finalize_kmeans_centroids(
     centroids[gid] = data[replacement * params.dimensions + dimension];
   }
 }
+
+kernel void clear_ivf_list_counts(
+    device atomic_uint* counts [[buffer(0)]],
+    constant KMeansParams& params [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]) {
+  if (gid < params.clusters) {
+    atomic_store_explicit(&counts[gid], 0u, memory_order_relaxed);
+  }
+}
+
+kernel void count_ivf_assignments(
+    device const int* assignments [[buffer(0)]],
+    device atomic_uint* counts [[buffer(1)]],
+    constant KMeansParams& params [[buffer(2)]],
+    uint row [[thread_position_in_grid]]) {
+  if (row >= params.rows) return;
+  const int cluster = assignments[row];
+  if (cluster >= 0 && uint(cluster) < params.clusters) {
+    atomic_fetch_add_explicit(&counts[cluster], 1u, memory_order_relaxed);
+  }
+}
+
+kernel void prefix_ivf_list_counts(
+    device const atomic_uint* counts [[buffer(0)]],
+    device uint* offsets [[buffer(1)]],
+    device atomic_uint* cursor [[buffer(2)]],
+    constant KMeansParams& params [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]) {
+  if (gid != 0) return;
+  uint running = 0;
+  offsets[0] = 0;
+  for (uint cluster = 0; cluster < params.clusters; ++cluster) {
+    atomic_store_explicit(&cursor[cluster], running, memory_order_relaxed);
+    running += atomic_load_explicit(&counts[cluster], memory_order_relaxed);
+    offsets[cluster + 1] = running;
+  }
+}
+
+kernel void scatter_ivf_list_ids(
+    device const int* assignments [[buffer(0)]],
+    device atomic_uint* cursor [[buffer(1)]],
+    device int* list_ids [[buffer(2)]],
+    constant KMeansParams& params [[buffer(3)]],
+    uint row [[thread_position_in_grid]]) {
+  if (row >= params.rows) return;
+  const int cluster = assignments[row];
+  if (cluster < 0 || uint(cluster) >= params.clusters) return;
+  const uint position = atomic_fetch_add_explicit(
+    &cursor[cluster],
+    1u,
+    memory_order_relaxed
+  );
+  list_ids[position] = int(row);
+}
 )METAL";
 
 struct ExactParamsHost {
@@ -470,13 +538,38 @@ struct MetalState {
   id<MTLLibrary> library = nil;
   id<MTLComputePipelineState> exact_pipeline = nil;
   id<MTLComputePipelineState> project_pipeline = nil;
+  id<MTLComputePipelineState> gather_centroids_pipeline = nil;
   id<MTLComputePipelineState> ivf_pipeline = nil;
   id<MTLComputePipelineState> clear_changed_pipeline = nil;
   id<MTLComputePipelineState> assign_kmeans_pipeline = nil;
   id<MTLComputePipelineState> clear_kmeans_pipeline = nil;
   id<MTLComputePipelineState> accumulate_kmeans_pipeline = nil;
   id<MTLComputePipelineState> finalize_kmeans_pipeline = nil;
+  id<MTLComputePipelineState> clear_ivf_counts_pipeline = nil;
+  id<MTLComputePipelineState> count_ivf_pipeline = nil;
+  id<MTLComputePipelineState> prefix_ivf_pipeline = nil;
+  id<MTLComputePipelineState> scatter_ivf_pipeline = nil;
 };
+
+}  // namespace
+
+struct NativeMetalIVFIndex::Impl {
+  int rows = 0;
+  int dimensions = 0;
+  int projected_dimensions = 0;
+  int nlist = 0;
+  DistanceMetric metric = DistanceMetric::Euclidean;
+  id<MTLBuffer> train = nil;
+  id<MTLBuffer> projected_train = nil;
+  id<MTLBuffer> centroids = nil;
+  id<MTLBuffer> list_offsets = nil;
+  id<MTLBuffer> list_ids = nil;
+  id<MTLBuffer> feature_offsets = nil;
+  id<MTLBuffer> feature_ids = nil;
+  id<MTLBuffer> feature_signs = nil;
+};
+
+namespace {
 
 id<MTLDevice> select_metal_device() {
   id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -518,12 +611,17 @@ MetalState& metal_state() {
       };
       state.exact_pipeline = make_pipeline(@"exact_topk_train_query");
       state.project_pipeline = make_pipeline(@"signed_hash_project");
+      state.gather_centroids_pipeline = make_pipeline(@"gather_kmeans_centroids");
       state.ivf_pipeline = make_pipeline(@"ivf_topk_train_query");
       state.clear_changed_pipeline = make_pipeline(@"clear_kmeans_changed");
       state.assign_kmeans_pipeline = make_pipeline(@"assign_kmeans_centroid");
       state.clear_kmeans_pipeline = make_pipeline(@"clear_kmeans_accumulators");
       state.accumulate_kmeans_pipeline = make_pipeline(@"accumulate_kmeans_centroids");
       state.finalize_kmeans_pipeline = make_pipeline(@"finalize_kmeans_centroids");
+      state.clear_ivf_counts_pipeline = make_pipeline(@"clear_ivf_list_counts");
+      state.count_ivf_pipeline = make_pipeline(@"count_ivf_assignments");
+      state.prefix_ivf_pipeline = make_pipeline(@"prefix_ivf_list_counts");
+      state.scatter_ivf_pipeline = make_pipeline(@"scatter_ivf_list_ids");
     } catch (...) {
       initialization_error = std::current_exception();
     }
@@ -536,6 +634,75 @@ void wait_for_command(id<MTLCommandBuffer> command, const char* context) {
   [command commit];
   [command waitUntilCompleted];
   if (command.status == MTLCommandBufferStatusError) throw metal_error(context, command.error);
+}
+
+struct MetalIVFLists {
+  id<MTLBuffer> offsets = nil;
+  id<MTLBuffer> ids = nil;
+};
+
+MetalIVFLists build_metal_ivf_lists(
+  MetalState& state,
+  id<MTLBuffer> assignments,
+  id<MTLBuffer> parameters,
+  int rows,
+  int clusters
+) {
+  id<MTLBuffer> counts = [state.device
+    newBufferWithLength:static_cast<std::size_t>(clusters) * sizeof(std::uint32_t)
+    options:MTLResourceStorageModePrivate];
+  id<MTLBuffer> cursor = [state.device
+    newBufferWithLength:static_cast<std::size_t>(clusters) * sizeof(std::uint32_t)
+    options:MTLResourceStorageModePrivate];
+  id<MTLBuffer> offsets = [state.device
+    newBufferWithLength:(static_cast<std::size_t>(clusters) + 1) * sizeof(std::uint32_t)
+    options:MTLResourceStorageModePrivate];
+  id<MTLBuffer> ids = [state.device
+    newBufferWithLength:static_cast<std::size_t>(rows) * sizeof(int)
+    options:MTLResourceStorageModePrivate];
+  if (counts == nil || cursor == nil || offsets == nil || ids == nil) {
+    throw std::runtime_error("Failed to allocate Metal IVF list buffers.");
+  }
+
+  id<MTLCommandBuffer> command = [state.queue commandBuffer];
+  id<MTLComputeCommandEncoder> clear_encoder = [command computeCommandEncoder];
+  [clear_encoder setComputePipelineState:state.clear_ivf_counts_pipeline];
+  [clear_encoder setBuffer:counts offset:0 atIndex:0];
+  [clear_encoder setBuffer:parameters offset:0 atIndex:1];
+  [clear_encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(clusters), 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  [clear_encoder endEncoding];
+
+  id<MTLComputeCommandEncoder> count_encoder = [command computeCommandEncoder];
+  [count_encoder setComputePipelineState:state.count_ivf_pipeline];
+  [count_encoder setBuffer:assignments offset:0 atIndex:0];
+  [count_encoder setBuffer:counts offset:0 atIndex:1];
+  [count_encoder setBuffer:parameters offset:0 atIndex:2];
+  [count_encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  [count_encoder endEncoding];
+
+  id<MTLComputeCommandEncoder> prefix_encoder = [command computeCommandEncoder];
+  [prefix_encoder setComputePipelineState:state.prefix_ivf_pipeline];
+  [prefix_encoder setBuffer:counts offset:0 atIndex:0];
+  [prefix_encoder setBuffer:offsets offset:0 atIndex:1];
+  [prefix_encoder setBuffer:cursor offset:0 atIndex:2];
+  [prefix_encoder setBuffer:parameters offset:0 atIndex:3];
+  [prefix_encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+  [prefix_encoder endEncoding];
+
+  id<MTLComputeCommandEncoder> scatter_encoder = [command computeCommandEncoder];
+  [scatter_encoder setComputePipelineState:state.scatter_ivf_pipeline];
+  [scatter_encoder setBuffer:assignments offset:0 atIndex:0];
+  [scatter_encoder setBuffer:cursor offset:0 atIndex:1];
+  [scatter_encoder setBuffer:ids offset:0 atIndex:2];
+  [scatter_encoder setBuffer:parameters offset:0 atIndex:3];
+  [scatter_encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  [scatter_encoder endEncoding];
+  wait_for_command(command, "Metal IVF list construction failed");
+  return MetalIVFLists{offsets, ids};
 }
 
 NSUInteger matrix_row_bytes(int columns) {
@@ -671,7 +838,228 @@ double recall_at_k(
     static_cast<double>(static_cast<std::size_t>(rows) * static_cast<std::size_t>(k));
 }
 
+NativeKNNResult search_metal_ivf_buffers(
+  id<MTLBuffer> train,
+  id<MTLBuffer> query,
+  id<MTLBuffer> projected_query,
+  id<MTLBuffer> centroids,
+  id<MTLBuffer> list_offsets,
+  id<MTLBuffer> list_ids,
+  int train_rows,
+  int query_rows,
+  int dimensions,
+  int projected_dimensions,
+  int nlist,
+  int k,
+  DistanceMetric metric,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  MetalIVFStats* stats
+) {
+  if (requested_nprobe > kMaximumMetalProbe) {
+    throw std::invalid_argument("Metal IVF supports nprobe <= 128.");
+  }
+  const int available = train_rows - (query_train_indices.empty() ? 0 : 1);
+  k = std::min(k, std::max(0, available));
+  if (k > kMaximumMetalK) throw std::invalid_argument("Metal IVF supports k <= 128.");
+  NativeKNNResult output;
+  output.queries = query_rows;
+  output.neighbors = k;
+  output.indices.assign(static_cast<std::size_t>(query_rows) * static_cast<std::size_t>(k), -1);
+  output.distances.assign(
+    static_cast<std::size_t>(query_rows) * static_cast<std::size_t>(k),
+    std::numeric_limits<float>::infinity()
+  );
+  if (query_rows == 0 || k == 0) return output;
+
+  std::vector<int> exclusions = query_train_indices;
+  if (exclusions.empty()) exclusions.assign(static_cast<std::size_t>(query_rows), -1);
+  target_recall = std::max(0.0, std::min(1.0, target_recall));
+  const int max_probe = std::min(nlist, kMaximumMetalProbe);
+  int nprobe = requested_nprobe > 0 ? requested_nprobe : std::min(8, max_probe);
+  nprobe = std::max(1, std::min(nprobe, max_probe));
+
+  @autoreleasepool {
+    MetalState& state = metal_state();
+    id<MTLBuffer> exclusion_buffer = [state.device
+      newBufferWithBytes:exclusions.data()
+      length:exclusions.size() * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    if (exclusion_buffer == nil) {
+      throw std::runtime_error("Failed to allocate Metal IVF exclusion buffer.");
+    }
+
+    auto run_exact = [&](int rows, id<MTLBuffer> ids, id<MTLBuffer> distances) {
+      const ExactParamsHost parameters{
+        static_cast<std::uint32_t>(train_rows),
+        static_cast<std::uint32_t>(rows),
+        static_cast<std::uint32_t>(dimensions),
+        static_cast<std::uint32_t>(k),
+        metric == DistanceMetric::Euclidean ? 0u : 1u
+      };
+      id<MTLBuffer> parameter_buffer = [state.device
+        newBufferWithBytes:&parameters
+        length:sizeof(parameters)
+        options:MTLResourceStorageModeShared];
+      id<MTLCommandBuffer> command = [state.queue commandBuffer];
+      id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+      [encoder setComputePipelineState:state.exact_pipeline];
+      [encoder setBuffer:train offset:0 atIndex:0];
+      [encoder setBuffer:query offset:0 atIndex:1];
+      [encoder setBuffer:exclusion_buffer offset:0 atIndex:2];
+      [encoder setBuffer:ids offset:0 atIndex:3];
+      [encoder setBuffer:distances offset:0 atIndex:4];
+      [encoder setBuffer:parameter_buffer offset:0 atIndex:5];
+      [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+      [encoder endEncoding];
+      wait_for_command(command, "Metal resident IVF exact pilot failed");
+    };
+
+    auto run_search = [&](int rows, int probes, id<MTLBuffer> ids, id<MTLBuffer> distances) {
+      const IVFSearchParamsHost parameters{
+        static_cast<std::uint32_t>(train_rows),
+        static_cast<std::uint32_t>(rows),
+        static_cast<std::uint32_t>(dimensions),
+        static_cast<std::uint32_t>(projected_dimensions),
+        static_cast<std::uint32_t>(nlist),
+        static_cast<std::uint32_t>(probes),
+        static_cast<std::uint32_t>(k),
+        metric == DistanceMetric::Euclidean ? 0u : 1u
+      };
+      id<MTLBuffer> parameter_buffer = [state.device
+        newBufferWithBytes:&parameters
+        length:sizeof(parameters)
+        options:MTLResourceStorageModeShared];
+      id<MTLCommandBuffer> command = [state.queue commandBuffer];
+      id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+      [encoder setComputePipelineState:state.ivf_pipeline];
+      [encoder setBuffer:train offset:0 atIndex:0];
+      [encoder setBuffer:query offset:0 atIndex:1];
+      [encoder setBuffer:projected_query offset:0 atIndex:2];
+      [encoder setBuffer:centroids offset:0 atIndex:3];
+      [encoder setBuffer:list_offsets offset:0 atIndex:4];
+      [encoder setBuffer:list_ids offset:0 atIndex:5];
+      [encoder setBuffer:exclusion_buffer offset:0 atIndex:6];
+      [encoder setBuffer:ids offset:0 atIndex:7];
+      [encoder setBuffer:distances offset:0 atIndex:8];
+      [encoder setBuffer:parameter_buffer offset:0 atIndex:9];
+      [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+      [encoder endEncoding];
+      wait_for_command(command, "Metal resident IVF search failed");
+    };
+
+    const int pilot_rows = std::min(query_rows, 128);
+    const std::size_t pilot_items = static_cast<std::size_t>(pilot_rows) * k;
+    id<MTLBuffer> exact_ids = [state.device
+      newBufferWithLength:pilot_items * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    id<MTLBuffer> exact_distances = [state.device
+      newBufferWithLength:pilot_items * sizeof(float)
+      options:MTLResourceStorageModeShared];
+    id<MTLBuffer> approximate_ids = [state.device
+      newBufferWithLength:pilot_items * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    id<MTLBuffer> approximate_distances = [state.device
+      newBufferWithLength:pilot_items * sizeof(float)
+      options:MTLResourceStorageModeShared];
+    if (exact_ids == nil || exact_distances == nil ||
+        approximate_ids == nil || approximate_distances == nil) {
+      throw std::runtime_error("Failed to allocate Metal resident IVF pilot buffers.");
+    }
+    run_exact(pilot_rows, exact_ids, exact_distances);
+    std::vector<int> pilot_exact(pilot_items, -1);
+    std::memcpy(
+      pilot_exact.data(),
+      [exact_ids contents],
+      pilot_items * sizeof(int)
+    );
+    auto evaluate_probe = [&](int probes) {
+      run_search(pilot_rows, probes, approximate_ids, approximate_distances);
+      return recall_at_k(
+        pilot_exact,
+        static_cast<const int*>([approximate_ids contents]),
+        pilot_rows,
+        k
+      );
+    };
+
+    double pilot_recall = 0.0;
+    if (requested_nprobe <= 0) {
+      int low_fail = nprobe - 1;
+      int high = nprobe;
+      while (true) {
+        pilot_recall = evaluate_probe(high);
+        if (pilot_recall >= target_recall || high >= max_probe) break;
+        low_fail = high;
+        high = std::min(
+          max_probe,
+          std::max(high + 1, static_cast<int>(std::ceil(static_cast<double>(high) * 1.5)))
+        );
+      }
+      if (pilot_recall >= target_recall) {
+        while (high - low_fail > 1) {
+          const int middle = low_fail + (high - low_fail) / 2;
+          const double middle_recall = evaluate_probe(middle);
+          if (middle_recall >= target_recall) {
+            high = middle;
+            pilot_recall = middle_recall;
+          } else {
+            low_fail = middle;
+          }
+        }
+      }
+      nprobe = high;
+    } else {
+      pilot_recall = evaluate_probe(nprobe);
+    }
+
+    id<MTLBuffer> output_ids = [state.device
+      newBufferWithLength:output.indices.size() * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    id<MTLBuffer> output_distances = [state.device
+      newBufferWithLength:output.distances.size() * sizeof(float)
+      options:MTLResourceStorageModeShared];
+    if (output_ids == nil || output_distances == nil) {
+      throw std::runtime_error("Failed to allocate Metal resident IVF output buffers.");
+    }
+    run_search(query_rows, nprobe, output_ids, output_distances);
+    std::memcpy(
+      output.indices.data(),
+      [output_ids contents],
+      output.indices.size() * sizeof(int)
+    );
+    std::memcpy(
+      output.distances.data(),
+      [output_distances contents],
+      output.distances.size() * sizeof(float)
+    );
+    if (stats != nullptr) {
+      stats->nlist = nlist;
+      stats->nprobe = nprobe;
+      stats->pilot_recall = pilot_recall;
+    }
+  }
+  return output;
+}
+
 }  // namespace
+
+NativeMetalIVFIndex::NativeMetalIVFIndex() = default;
+NativeMetalIVFIndex::~NativeMetalIVFIndex() = default;
+NativeMetalIVFIndex::NativeMetalIVFIndex(NativeMetalIVFIndex&&) noexcept = default;
+NativeMetalIVFIndex& NativeMetalIVFIndex::operator=(NativeMetalIVFIndex&&) noexcept = default;
+NativeMetalIVFIndex::NativeMetalIVFIndex(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+bool NativeMetalIVFIndex::valid() const noexcept { return impl_ != nullptr; }
+int NativeMetalIVFIndex::rows() const noexcept { return impl_ == nullptr ? 0 : impl_->rows; }
+int NativeMetalIVFIndex::dimensions() const noexcept { return impl_ == nullptr ? 0 : impl_->dimensions; }
+int NativeMetalIVFIndex::nlist() const noexcept { return impl_ == nullptr ? 0 : impl_->nlist; }
+DistanceMetric NativeMetalIVFIndex::metric() const noexcept {
+  return impl_ == nullptr ? DistanceMetric::Euclidean : impl_->metric;
+}
 
 bool metal_backend_available() {
   @autoreleasepool {
@@ -945,30 +1333,16 @@ NativeKNNResult metal_ivf_knn_search(
     encode_projection(query_buffer, projected_query_buffer, query_project_params_buffer, query_rows);
     wait_for_command(project_command, "Metal IVF projection failed");
 
-    const float* projected_train = static_cast<const float*>([projected_train_buffer contents]);
     std::vector<int> initial_indices(static_cast<std::size_t>(train_rows));
     std::iota(initial_indices.begin(), initial_indices.end(), 0);
     std::mt19937 generator(4u);
     std::shuffle(initial_indices.begin(), initial_indices.end(), generator);
-    std::vector<float> centroids(
-      static_cast<std::size_t>(nlist) * static_cast<std::size_t>(projected_dimensions),
-      0.0f
-    );
-    for (int centroid = 0; centroid < nlist; ++centroid) {
-      std::copy_n(
-        projected_train + static_cast<std::size_t>(initial_indices[static_cast<std::size_t>(centroid)]) *
-          static_cast<std::size_t>(projected_dimensions),
-        projected_dimensions,
-        centroids.data() + static_cast<std::size_t>(centroid) * static_cast<std::size_t>(projected_dimensions)
-      );
-    }
     std::vector<int> assignments(static_cast<std::size_t>(train_rows), -1);
     const std::size_t centroid_items =
       static_cast<std::size_t>(nlist) * static_cast<std::size_t>(projected_dimensions);
     id<MTLBuffer> centroid_buffer = [state.device
-      newBufferWithBytes:centroids.data()
-      length:centroids.size() * sizeof(float)
-      options:MTLResourceStorageModeShared];
+      newBufferWithLength:centroid_items * sizeof(float)
+      options:MTLResourceStorageModePrivate];
     id<MTLBuffer> assignment_buffer = [state.device
       newBufferWithBytes:assignments.data()
       length:assignments.size() * sizeof(int)
@@ -1002,6 +1376,18 @@ NativeKNNResult metal_ivf_knn_search(
     require_buffer(changed_buffer, "changed count");
     require_buffer(initial_index_buffer, "initial indices");
     require_buffer(kmeans_params_buffer, "kmeans parameters");
+
+    id<MTLCommandBuffer> gather_command = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> gather_encoder = [gather_command computeCommandEncoder];
+    [gather_encoder setComputePipelineState:state.gather_centroids_pipeline];
+    [gather_encoder setBuffer:projected_train_buffer offset:0 atIndex:0];
+    [gather_encoder setBuffer:initial_index_buffer offset:0 atIndex:1];
+    [gather_encoder setBuffer:centroid_buffer offset:0 atIndex:2];
+    [gather_encoder setBuffer:kmeans_params_buffer offset:0 atIndex:3];
+    [gather_encoder dispatchThreads:MTLSizeMake(centroid_items, 1, 1)
+                       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [gather_encoder endEncoding];
+    wait_for_command(gather_command, "Metal IVF centroid initialization failed");
 
     for (int iteration = 0; iteration < 4; ++iteration) {
       const std::uint32_t iteration_value = static_cast<std::uint32_t>(iteration);
@@ -1061,34 +1447,13 @@ NativeKNNResult metal_ivf_knn_search(
       wait_for_command(command, "Metal IVF training failed");
     }
 
-    std::memcpy(assignments.data(), [assignment_buffer contents], assignments.size() * sizeof(int));
-    std::vector<std::uint32_t> list_offsets(static_cast<std::size_t>(nlist) + 1, 0);
-    for (int assignment : assignments) {
-      if (assignment >= 0 && assignment < nlist) {
-        ++list_offsets[static_cast<std::size_t>(assignment) + 1];
-      }
-    }
-    for (int list = 0; list < nlist; ++list) {
-      list_offsets[static_cast<std::size_t>(list) + 1] += list_offsets[static_cast<std::size_t>(list)];
-    }
-    std::vector<std::uint32_t> cursor = list_offsets;
-    std::vector<int> list_ids(static_cast<std::size_t>(train_rows), -1);
-    for (int row = 0; row < train_rows; ++row) {
-      const int assignment = assignments[static_cast<std::size_t>(row)];
-      if (assignment >= 0 && assignment < nlist) {
-        list_ids[cursor[static_cast<std::size_t>(assignment)]++] = row;
-      }
-    }
-    id<MTLBuffer> list_offset_buffer = [state.device
-      newBufferWithBytes:list_offsets.data()
-      length:list_offsets.size() * sizeof(std::uint32_t)
-      options:MTLResourceStorageModeShared];
-    id<MTLBuffer> list_id_buffer = [state.device
-      newBufferWithBytes:list_ids.data()
-      length:list_ids.size() * sizeof(int)
-      options:MTLResourceStorageModeShared];
-    require_buffer(list_offset_buffer, "list offsets");
-    require_buffer(list_id_buffer, "list ids");
+    const MetalIVFLists lists = build_metal_ivf_lists(
+      state,
+      assignment_buffer,
+      kmeans_params_buffer,
+      train_rows,
+      nlist
+    );
 
     auto run_search = [&](int rows, int probes, id<MTLBuffer> ids, id<MTLBuffer> distances) {
       const IVFSearchParamsHost parameters{
@@ -1112,8 +1477,8 @@ NativeKNNResult metal_ivf_knn_search(
       [encoder setBuffer:query_buffer offset:0 atIndex:1];
       [encoder setBuffer:projected_query_buffer offset:0 atIndex:2];
       [encoder setBuffer:centroid_buffer offset:0 atIndex:3];
-      [encoder setBuffer:list_offset_buffer offset:0 atIndex:4];
-      [encoder setBuffer:list_id_buffer offset:0 atIndex:5];
+      [encoder setBuffer:lists.offsets offset:0 atIndex:4];
+      [encoder setBuffer:lists.ids offset:0 atIndex:5];
       [encoder setBuffer:exclusion_buffer offset:0 atIndex:6];
       [encoder setBuffer:ids offset:0 atIndex:7];
       [encoder setBuffer:distances offset:0 atIndex:8];
@@ -1195,6 +1560,372 @@ NativeKNNResult metal_ivf_knn_search(
     stats->pilot_recall = pilot_recall;
   }
   return output;
+}
+
+NativeMetalIVFIndex metal_build_ivf_index(
+  const std::vector<float>& train,
+  int train_rows,
+  int dimensions,
+  DistanceMetric metric,
+  int requested_nlist
+) {
+  if (train_rows < 1 || dimensions < 1 ||
+      train.size() != static_cast<std::size_t>(train_rows) * static_cast<std::size_t>(dimensions)) {
+    throw std::invalid_argument("Invalid Metal IVF training matrix.");
+  }
+  if (requested_nlist > kMaximumMetalLists) {
+    throw std::invalid_argument("Metal IVF supports nlist <= 1024.");
+  }
+  int nlist = requested_nlist > 0 ? requested_nlist : static_cast<int>(
+    std::ceil(4.0 * std::sqrt(static_cast<double>(train_rows)))
+  );
+  nlist = std::max(1, std::min({nlist, kMaximumMetalLists, train_rows}));
+  const int projected_dimensions = metal_projection_dimension(dimensions);
+
+  std::vector<std::uint32_t> feature_offsets(
+    static_cast<std::size_t>(projected_dimensions) + 1,
+    0
+  );
+  std::vector<std::vector<std::pair<std::uint32_t, std::int8_t>>> feature_buckets(
+    static_cast<std::size_t>(projected_dimensions)
+  );
+  for (int dimension = 0; dimension < dimensions; ++dimension) {
+    const std::uint32_t hash = static_cast<std::uint32_t>(dimension + 1) * 2654435761u;
+    const int bucket = static_cast<int>(
+      hash & static_cast<std::uint32_t>(projected_dimensions - 1)
+    );
+    const std::int8_t sign =
+      ((hash >> 17u) & 1u) != 0u ? std::int8_t(1) : std::int8_t(-1);
+    feature_buckets[static_cast<std::size_t>(bucket)].push_back(
+      {static_cast<std::uint32_t>(dimension), sign}
+    );
+  }
+  std::vector<std::uint32_t> feature_ids;
+  std::vector<std::int8_t> feature_signs;
+  feature_ids.reserve(static_cast<std::size_t>(dimensions));
+  feature_signs.reserve(static_cast<std::size_t>(dimensions));
+  for (int bucket = 0; bucket < projected_dimensions; ++bucket) {
+    feature_offsets[static_cast<std::size_t>(bucket)] =
+      static_cast<std::uint32_t>(feature_ids.size());
+    for (const auto& feature : feature_buckets[static_cast<std::size_t>(bucket)]) {
+      feature_ids.push_back(feature.first);
+      feature_signs.push_back(feature.second);
+    }
+  }
+  feature_offsets.back() = static_cast<std::uint32_t>(feature_ids.size());
+
+  std::vector<int> initial_indices(static_cast<std::size_t>(train_rows));
+  std::iota(initial_indices.begin(), initial_indices.end(), 0);
+  std::mt19937 generator(4u);
+  std::shuffle(initial_indices.begin(), initial_indices.end(), generator);
+
+  @autoreleasepool {
+    MetalState& state = metal_state();
+    auto impl = std::make_unique<NativeMetalIVFIndex::Impl>();
+    impl->rows = train_rows;
+    impl->dimensions = dimensions;
+    impl->projected_dimensions = projected_dimensions;
+    impl->nlist = nlist;
+    impl->metric = metric;
+    impl->train = [state.device
+      newBufferWithBytes:train.data()
+      length:train.size() * sizeof(float)
+      options:MTLResourceStorageModeShared];
+    impl->feature_offsets = [state.device
+      newBufferWithBytes:feature_offsets.data()
+      length:feature_offsets.size() * sizeof(std::uint32_t)
+      options:MTLResourceStorageModeShared];
+    impl->feature_ids = [state.device
+      newBufferWithBytes:feature_ids.data()
+      length:feature_ids.size() * sizeof(std::uint32_t)
+      options:MTLResourceStorageModeShared];
+    impl->feature_signs = [state.device
+      newBufferWithBytes:feature_signs.data()
+      length:feature_signs.size() * sizeof(std::int8_t)
+      options:MTLResourceStorageModeShared];
+    impl->projected_train = [state.device
+      newBufferWithLength:
+        static_cast<std::size_t>(train_rows) *
+        static_cast<std::size_t>(projected_dimensions) *
+        sizeof(float)
+      options:MTLResourceStorageModePrivate];
+    if (impl->train == nil || impl->feature_offsets == nil ||
+        impl->feature_ids == nil || impl->feature_signs == nil ||
+        impl->projected_train == nil) {
+      throw std::runtime_error("Failed to allocate resident Metal IVF input buffers.");
+    }
+
+    const ProjectParamsHost project_parameters{
+      static_cast<std::uint32_t>(train_rows),
+      static_cast<std::uint32_t>(dimensions),
+      static_cast<std::uint32_t>(projected_dimensions)
+    };
+    id<MTLBuffer> project_parameter_buffer = [state.device
+      newBufferWithBytes:&project_parameters
+      length:sizeof(project_parameters)
+      options:MTLResourceStorageModeShared];
+    const KMeansParamsHost kmeans_parameters{
+      static_cast<std::uint32_t>(train_rows),
+      static_cast<std::uint32_t>(projected_dimensions),
+      static_cast<std::uint32_t>(nlist)
+    };
+    id<MTLBuffer> kmeans_parameter_buffer = [state.device
+      newBufferWithBytes:&kmeans_parameters
+      length:sizeof(kmeans_parameters)
+      options:MTLResourceStorageModeShared];
+    id<MTLBuffer> initial_index_buffer = [state.device
+      newBufferWithBytes:initial_indices.data()
+      length:initial_indices.size() * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    const std::size_t centroid_items =
+      static_cast<std::size_t>(nlist) * static_cast<std::size_t>(projected_dimensions);
+    impl->centroids = [state.device
+      newBufferWithLength:centroid_items * sizeof(float)
+      options:MTLResourceStorageModePrivate];
+    id<MTLBuffer> assignments = [state.device
+      newBufferWithLength:static_cast<std::size_t>(train_rows) * sizeof(int)
+      options:MTLResourceStorageModePrivate];
+    id<MTLBuffer> sums = [state.device
+      newBufferWithLength:centroid_items * sizeof(float)
+      options:MTLResourceStorageModePrivate];
+    id<MTLBuffer> counts = [state.device
+      newBufferWithLength:static_cast<std::size_t>(nlist) * sizeof(std::uint32_t)
+      options:MTLResourceStorageModePrivate];
+    id<MTLBuffer> changed = [state.device
+      newBufferWithLength:sizeof(std::uint32_t)
+      options:MTLResourceStorageModePrivate];
+    if (project_parameter_buffer == nil || kmeans_parameter_buffer == nil ||
+        initial_index_buffer == nil || impl->centroids == nil ||
+        assignments == nil || sums == nil || counts == nil || changed == nil) {
+      throw std::runtime_error("Failed to allocate resident Metal IVF training buffers.");
+    }
+
+    id<MTLCommandBuffer> command = [state.queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    [blit fillBuffer:assignments
+                range:NSMakeRange(0, static_cast<std::size_t>(train_rows) * sizeof(int))
+                value:0xff];
+    [blit endEncoding];
+
+    id<MTLComputeCommandEncoder> project_encoder = [command computeCommandEncoder];
+    [project_encoder setComputePipelineState:state.project_pipeline];
+    [project_encoder setBuffer:impl->train offset:0 atIndex:0];
+    [project_encoder setBuffer:impl->feature_offsets offset:0 atIndex:1];
+    [project_encoder setBuffer:impl->feature_ids offset:0 atIndex:2];
+    [project_encoder setBuffer:impl->feature_signs offset:0 atIndex:3];
+    [project_encoder setBuffer:impl->projected_train offset:0 atIndex:4];
+    [project_encoder setBuffer:project_parameter_buffer offset:0 atIndex:5];
+    [project_encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(train_rows), 1, 1)
+                         threadsPerThreadgroup:
+                           MTLSizeMake(static_cast<NSUInteger>(projected_dimensions), 1, 1)];
+    [project_encoder endEncoding];
+
+    id<MTLComputeCommandEncoder> gather_encoder = [command computeCommandEncoder];
+    [gather_encoder setComputePipelineState:state.gather_centroids_pipeline];
+    [gather_encoder setBuffer:impl->projected_train offset:0 atIndex:0];
+    [gather_encoder setBuffer:initial_index_buffer offset:0 atIndex:1];
+    [gather_encoder setBuffer:impl->centroids offset:0 atIndex:2];
+    [gather_encoder setBuffer:kmeans_parameter_buffer offset:0 atIndex:3];
+    [gather_encoder dispatchThreads:MTLSizeMake(centroid_items, 1, 1)
+                       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [gather_encoder endEncoding];
+
+    for (int iteration = 0; iteration < 4; ++iteration) {
+      const std::uint32_t iteration_value = static_cast<std::uint32_t>(iteration);
+      id<MTLComputeCommandEncoder> changed_encoder = [command computeCommandEncoder];
+      [changed_encoder setComputePipelineState:state.clear_changed_pipeline];
+      [changed_encoder setBuffer:changed offset:0 atIndex:0];
+      [changed_encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [changed_encoder endEncoding];
+
+      id<MTLComputeCommandEncoder> assignment_encoder = [command computeCommandEncoder];
+      [assignment_encoder setComputePipelineState:state.assign_kmeans_pipeline];
+      [assignment_encoder setBuffer:impl->projected_train offset:0 atIndex:0];
+      [assignment_encoder setBuffer:impl->centroids offset:0 atIndex:1];
+      [assignment_encoder setBuffer:assignments offset:0 atIndex:2];
+      [assignment_encoder setBuffer:changed offset:0 atIndex:3];
+      [assignment_encoder setBuffer:kmeans_parameter_buffer offset:0 atIndex:4];
+      [assignment_encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(train_rows), 1, 1)
+                           threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+      [assignment_encoder endEncoding];
+
+      if (iteration < 3) {
+        id<MTLComputeCommandEncoder> clear_encoder = [command computeCommandEncoder];
+        [clear_encoder setComputePipelineState:state.clear_kmeans_pipeline];
+        [clear_encoder setBuffer:sums offset:0 atIndex:0];
+        [clear_encoder setBuffer:counts offset:0 atIndex:1];
+        [clear_encoder setBuffer:kmeans_parameter_buffer offset:0 atIndex:2];
+        [clear_encoder dispatchThreads:
+          MTLSizeMake(std::max<std::size_t>(centroid_items, nlist), 1, 1)
+                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [clear_encoder endEncoding];
+
+        id<MTLComputeCommandEncoder> accumulate_encoder = [command computeCommandEncoder];
+        [accumulate_encoder setComputePipelineState:state.accumulate_kmeans_pipeline];
+        [accumulate_encoder setBuffer:impl->projected_train offset:0 atIndex:0];
+        [accumulate_encoder setBuffer:assignments offset:0 atIndex:1];
+        [accumulate_encoder setBuffer:sums offset:0 atIndex:2];
+        [accumulate_encoder setBuffer:counts offset:0 atIndex:3];
+        [accumulate_encoder setBuffer:kmeans_parameter_buffer offset:0 atIndex:4];
+        [accumulate_encoder dispatchThreads:
+          MTLSizeMake(
+            static_cast<std::size_t>(train_rows) *
+            static_cast<std::size_t>(projected_dimensions),
+            1,
+            1
+          )
+                         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [accumulate_encoder endEncoding];
+
+        id<MTLComputeCommandEncoder> finalize_encoder = [command computeCommandEncoder];
+        [finalize_encoder setComputePipelineState:state.finalize_kmeans_pipeline];
+        [finalize_encoder setBuffer:impl->projected_train offset:0 atIndex:0];
+        [finalize_encoder setBuffer:sums offset:0 atIndex:1];
+        [finalize_encoder setBuffer:counts offset:0 atIndex:2];
+        [finalize_encoder setBuffer:impl->centroids offset:0 atIndex:3];
+        [finalize_encoder setBuffer:initial_index_buffer offset:0 atIndex:4];
+        [finalize_encoder setBuffer:kmeans_parameter_buffer offset:0 atIndex:5];
+        [finalize_encoder setBytes:&iteration_value length:sizeof(iteration_value) atIndex:6];
+        [finalize_encoder dispatchThreads:MTLSizeMake(centroid_items, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [finalize_encoder endEncoding];
+      }
+    }
+    wait_for_command(command, "Resident Metal IVF training failed");
+
+    const MetalIVFLists lists = build_metal_ivf_lists(
+      state,
+      assignments,
+      kmeans_parameter_buffer,
+      train_rows,
+      nlist
+    );
+    impl->list_offsets = lists.offsets;
+    impl->list_ids = lists.ids;
+    return NativeMetalIVFIndex(std::move(impl));
+  }
+}
+
+NativeKNNResult metal_ivf_index_search(
+  const NativeMetalIVFIndex& index,
+  const std::vector<float>& query,
+  int query_rows,
+  int k,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  MetalIVFStats* stats
+) {
+  if (!index.valid()) throw std::invalid_argument("Metal IVF index is empty.");
+  if (query_rows < 1) {
+    throw std::invalid_argument("Metal IVF search requires at least one query.");
+  }
+  const NativeMetalIVFIndex::Impl& impl = *index.impl_;
+  if (query.size() !=
+        static_cast<std::size_t>(query_rows) * static_cast<std::size_t>(impl.dimensions)) {
+    throw std::invalid_argument("Metal IVF query matrix size mismatch.");
+  }
+  if (!query_train_indices.empty() &&
+      static_cast<int>(query_train_indices.size()) != query_rows) {
+    throw std::invalid_argument("Metal IVF exclusion vector size mismatch.");
+  }
+
+  @autoreleasepool {
+    MetalState& state = metal_state();
+    id<MTLBuffer> query_buffer = [state.device
+      newBufferWithBytes:query.data()
+      length:query.size() * sizeof(float)
+      options:MTLResourceStorageModeShared];
+    id<MTLBuffer> projected_query = [state.device
+      newBufferWithLength:
+        static_cast<std::size_t>(query_rows) *
+        static_cast<std::size_t>(impl.projected_dimensions) *
+        sizeof(float)
+      options:MTLResourceStorageModePrivate];
+    const ProjectParamsHost parameters{
+      static_cast<std::uint32_t>(query_rows),
+      static_cast<std::uint32_t>(impl.dimensions),
+      static_cast<std::uint32_t>(impl.projected_dimensions)
+    };
+    id<MTLBuffer> parameter_buffer = [state.device
+      newBufferWithBytes:&parameters
+      length:sizeof(parameters)
+      options:MTLResourceStorageModeShared];
+    if (query_buffer == nil || projected_query == nil || parameter_buffer == nil) {
+      throw std::runtime_error("Failed to allocate resident Metal IVF query buffers.");
+    }
+    if (query_rows > 0) {
+      id<MTLCommandBuffer> command = [state.queue commandBuffer];
+      id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+      [encoder setComputePipelineState:state.project_pipeline];
+      [encoder setBuffer:query_buffer offset:0 atIndex:0];
+      [encoder setBuffer:impl.feature_offsets offset:0 atIndex:1];
+      [encoder setBuffer:impl.feature_ids offset:0 atIndex:2];
+      [encoder setBuffer:impl.feature_signs offset:0 atIndex:3];
+      [encoder setBuffer:projected_query offset:0 atIndex:4];
+      [encoder setBuffer:parameter_buffer offset:0 atIndex:5];
+      [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(query_rows), 1, 1)
+                   threadsPerThreadgroup:
+                     MTLSizeMake(static_cast<NSUInteger>(impl.projected_dimensions), 1, 1)];
+      [encoder endEncoding];
+      wait_for_command(command, "Resident Metal IVF query projection failed");
+    }
+    return search_metal_ivf_buffers(
+      impl.train,
+      query_buffer,
+      projected_query,
+      impl.centroids,
+      impl.list_offsets,
+      impl.list_ids,
+      impl.rows,
+      query_rows,
+      impl.dimensions,
+      impl.projected_dimensions,
+      impl.nlist,
+      k,
+      impl.metric,
+      requested_nprobe,
+      target_recall,
+      query_train_indices,
+      stats
+    );
+  }
+}
+
+NativeKNNResult metal_ivf_index_self_search(
+  const NativeMetalIVFIndex& index,
+  int k,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  MetalIVFStats* stats
+) {
+  if (!index.valid()) throw std::invalid_argument("Metal IVF index is empty.");
+  const NativeMetalIVFIndex::Impl& impl = *index.impl_;
+  if (!query_train_indices.empty() &&
+      static_cast<int>(query_train_indices.size()) != impl.rows) {
+    throw std::invalid_argument("Metal IVF exclusion vector size mismatch.");
+  }
+  return search_metal_ivf_buffers(
+    impl.train,
+    impl.train,
+    impl.projected_train,
+    impl.centroids,
+    impl.list_offsets,
+    impl.list_ids,
+    impl.rows,
+    impl.rows,
+    impl.dimensions,
+    impl.projected_dimensions,
+    impl.nlist,
+    k,
+    impl.metric,
+    requested_nprobe,
+    target_recall,
+    query_train_indices,
+    stats
+  );
 }
 
 std::vector<int> metal_kmeans_labels(

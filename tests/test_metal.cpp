@@ -60,6 +60,54 @@ int main() {
     return 1;
   }
 
+  kodama::KNNOptions resident_options = options;
+  resident_options.backend = kodama::Backend::Metal;
+  resident_options.index_type = kodama::KNNIndexType::MetalIVFFlat;
+  resident_options.ivf_nlist = 4;
+  resident_options.ivf_nprobe = 4;
+  kodama::ResidentIVFIndex resident = kodama::BuildResidentIVFIndex(
+    kodama::MatrixView{x.data(), samples, dimensions},
+    resident_options
+  );
+  if (!resident.valid() || resident.backend() != kodama::Backend::Metal ||
+      resident.rows() != samples || resident.dimensions() != dimensions ||
+      resident.nlist() != 4 || resident.build_seconds() < 0.0) {
+    std::cerr << "Resident Metal IVF index metadata failed.\n";
+    return 1;
+  }
+  kodama::ResidentIVFSearchStats resident_stats;
+  const kodama::NeighborGraph resident_first =
+    kodama::SearchResidentIVFIndexSelf(resident, 3, true, &resident_stats);
+  const kodama::NeighborGraph resident_second =
+    kodama::SearchResidentIVFIndexSelf(resident, 3, true);
+  if (resident_stats.backend != kodama::Backend::Metal ||
+      resident_stats.nlist != 4 || resident_stats.nprobe != 4 ||
+      resident_first.indices != resident_second.indices ||
+      resident_first.distances != resident_second.distances) {
+    std::cerr << "Resident Metal IVF reuse was not deterministic.\n";
+    return 1;
+  }
+  const kodama::NeighborGraph resident_query = kodama::SearchResidentIVFIndex(
+    resident,
+    kodama::MatrixView{x.data(), 5, dimensions},
+    3
+  );
+  if (resident_query.neighbors != 3 || resident_query.indices.size() != 15 ||
+      resident_query.indices.front() != 1) {
+    std::cerr << "Resident Metal IVF external-query search failed.\n";
+    return 1;
+  }
+  for (int row = 0; row < samples; ++row) {
+    for (int column = 0; column < resident_first.neighbors; ++column) {
+      const int neighbor =
+        resident_first.indices[static_cast<std::size_t>(row * resident_first.neighbors + column)];
+      if (neighbor == row + 1) {
+        std::cerr << "Resident Metal IVF self-exclusion failed.\n";
+        return 1;
+      }
+    }
+  }
+
   kodama::GraphClusterOptions graph_options;
   graph_options.backend = kodama::Backend::Metal;
   graph_options.metric = kodama::DistanceMetric::Euclidean;

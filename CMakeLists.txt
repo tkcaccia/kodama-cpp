@@ -29,6 +29,7 @@ add_library(kodama_cpp
   src/native_knn.cpp
   src/pca.cpp
   src/plscv.cpp
+  src/resident_ivf.cpp
   src/visualization.cpp
 )
 
@@ -202,6 +203,8 @@ if(KODAMA_BUILD_EXAMPLES)
   target_link_libraries(kodama_core_sanity_bin PRIVATE kodama_cpp)
   add_executable(kodama_native_backend_benchmark benchmarks/run_native_backend_benchmark.cpp)
   target_link_libraries(kodama_native_backend_benchmark PRIVATE kodama_cpp)
+  add_executable(kodama_resident_ivf_benchmark benchmarks/run_resident_ivf_benchmark.cpp)
+  target_link_libraries(kodama_resident_ivf_benchmark PRIVATE kodama_cpp)
   add_executable(kodama_backend_benchmark_bin benchmarks/run_kodama_backend_bin.cpp)
   target_link_libraries(kodama_backend_benchmark_bin PRIVATE kodama_cpp)
   if(KODAMA_ENABLE_CUDA)

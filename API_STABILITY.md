@@ -15,6 +15,9 @@ The `0.1.0` source-compatibility surface comprises:
 - matrix construction: `KODAMAMatrix`, `KODAMAMatrixFromGraph`, and
   `KODAMAMatrixFromGraphData`;
 - graph construction: `KODAMAKNNGraph`;
+- reusable accelerator search: `ResidentIVFIndex`,
+  `BuildResidentIVFIndex`, `SearchResidentIVFIndex`, and
+  `SearchResidentIVFIndexSelf`;
 - principal components: `PCA`, `PCA_CPU`, `PCA_CUDA`, and `PCA_METAL`;
 - visualization: `KODAMAUMAP_CPU`, `KODAMAUMAP_CUDA`,
   `KODAMAOpenTSNE_CPU`, and `KODAMAOpenTSNE_CUDA`;

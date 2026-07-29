@@ -1,3 +1,61 @@
-JMLR MLOSS cover letter for kodama-cpp
+Cover Letter: JMLR Machine Learning Open Source Software
 
-This plain-text companion is generated with the formatted DOCX. Fields marked AUTHOR ACTION REQUIRED must be completed before submission: final v0.1.0 commit, archival DOI, current community metrics, coauthor consent, funding, competing interests, 3-5 action editors, and 3-5 reviewers.
+kodama-cpp: Cross-Validated Accuracy Maximization on CPU, CUDA, and Apple Metal
+
+Dear Editors of the Journal of Machine Learning Research,
+
+We submit kodama-cpp for consideration in the Machine Learning Open Source Software track. The software is a standalone C++17 implementation of KODAMA with explicit CPU, NVIDIA CUDA, and Apple Metal backends and thin R and Python wrappers.
+
+Submission identity
+
+Open-source license: MIT project code with compatible retained third-party terms; see PROVENANCE.md and THIRD_PARTY_NOTICES.md
+
+Project URL: https://github.com/tkcaccia/kodama-cpp
+
+R wrapper URL: https://github.com/tkcaccia/kodama-r
+
+Python binding source: https://github.com/tkcaccia/kodama-cpp/tree/main/split-repos/kodama-python (standalone repository publication pending)
+
+Software version: 0.1.0 release candidate
+
+Reviewed baseline: 9da48ee03d4ce76d50adf7cae0189b8ea7d65c62
+
+Reviewed R-wrapper baseline: 4d5506bde8918162dae0ad1d19c4f6f7a4df64ba
+
+Final release commit: AUTHOR ACTION REQUIRED: insert the full v0.1.0 tagged commit
+
+Archived source: AUTHOR ACTION REQUIRED: deposit the tagged source archive, insert its URL and checksum, and add a DOI if assigned
+
+Significance and software contribution
+
+The submission preserves KODAMA's cross-validated label-predictability objective while moving its repeated work into one typed float32 core. It contributes package-owned nearest-neighbor, SIMPLS/LDA, graph, and visualization paths; strict and observable CPU/CUDA/Metal execution; matrix and supplied-graph entry points; and a common API for R and Python. The repository contains installation instructions, API examples, tests, benchmark drivers, a public API snapshot, and a machine-checkable licensing/provenance audit.
+
+Prior publications and delta
+
+The KODAMA method was published by Cacciatore, Luchinat, and Tenori in PNAS (2014), and the historical R package was described by Cacciatore et al. in Bioinformatics (2017). Prior publication of the method is disclosed. This submission concerns the new standalone software: a C++17 core independent of R, native CUDA and Metal backends, float32 and label-aware SIMPLS/LDA, package-owned neighbor search, graph-input APIs, strict backend metadata, and separately maintained R/Python bindings. The detailed delta is recorded in docs/previous-version-delta.md. The two prior papers will be supplied as supplementary material.
+
+Evidence of use and openness
+
+KODAMA has an established public predecessor: a peer-reviewed method paper, a peer-reviewed R-package paper, a maintained public R package, documentation, and public source history. The CRANlogs public API reports 48,480 KODAMA downloads from 2017-01-01 through 2026-07-26, including 4,526 during 2025-07-27--2026-07-26 (https://cranlogs.r-pkg.org/downloads/total/2017-01-01:2026-07-26/KODAMA and https://cranlogs.r-pkg.org/downloads/total/2025-07-27:2026-07-26/KODAMA). These counts concern the predecessor R package, not the new implementation. kodama-cpp itself is a new repository and, on 2026-07-27, had zero GitHub stars, forks, releases, and public issues; these figures are disclosed rather than presented as adoption. AUTHOR ACTION REQUIRED: refresh the dated counts and add any independently verifiable user or downstream-package evidence available immediately before submission. The repository provides an issue tracker, contribution guide, changelog, API-stability policy, reproducible tests, and release checklist.
+
+Required author declarations
+
+Coauthor consent: AUTHOR ACTION REQUIRED. Confirm that all seven authors know of and consent to this submission.
+
+Funding supporting this work during the previous 36 months: AUTHOR ACTION REQUIRED.
+
+Competing interests and recent collaborations with JMLR action editors: AUTHOR ACTION REQUIRED.
+
+Suggested action editors: AUTHOR ACTION REQUIRED. Supply 3-5 conflict-free JMLR action editors with brief relevance statements.
+
+Suggested reviewers: AUTHOR ACTION REQUIRED. Supply 3-5 conflict-free reviewers with brief relevance statements.
+
+Keywords
+
+KODAMA; cross-validation; unsupervised learning; heterogeneous computing; manifold learning
+
+Sincerely,
+
+Stefano Cacciatore
+Corresponding author
+stefano.cacciatore@icgeb.org

@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -273,6 +274,63 @@ struct NeighborGraph {
   int neighbors = 0;
 };
 
+struct ResidentIVFSearchStats {
+  Backend backend = Backend::CPU;
+  int nlist = 0;
+  int nprobe = 0;
+  double pilot_recall = 0.0;
+  double search_seconds = 0.0;
+};
+
+/**
+ * Move-only owner of an accelerator-resident IVF-Flat index.
+ *
+ * The training matrix, projected matrix, centroids, inverted-list offsets,
+ * and inverted-list identifiers remain allocated on the selected CUDA or
+ * Metal device until this object is destroyed.
+ */
+class ResidentIVFIndex {
+ public:
+  ResidentIVFIndex();
+  ~ResidentIVFIndex();
+  ResidentIVFIndex(ResidentIVFIndex&&) noexcept;
+  ResidentIVFIndex& operator=(ResidentIVFIndex&&) noexcept;
+
+  ResidentIVFIndex(const ResidentIVFIndex&) = delete;
+  ResidentIVFIndex& operator=(const ResidentIVFIndex&) = delete;
+
+  bool valid() const noexcept;
+  Backend backend() const noexcept;
+  DistanceMetric metric() const noexcept;
+  int rows() const noexcept;
+  int dimensions() const noexcept;
+  int nlist() const noexcept;
+  double build_seconds() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  explicit ResidentIVFIndex(std::unique_ptr<Impl> impl);
+
+  friend ResidentIVFIndex BuildResidentIVFIndex(
+    MatrixView,
+    const KNNOptions&
+  );
+  friend NeighborGraph SearchResidentIVFIndex(
+    const ResidentIVFIndex&,
+    MatrixView,
+    int,
+    ResidentIVFSearchStats*
+  );
+  friend NeighborGraph SearchResidentIVFIndexSelf(
+    const ResidentIVFIndex&,
+    int,
+    bool,
+    ResidentIVFSearchStats*
+  );
+};
+
 struct GraphClusterOptions {
   Backend backend = Backend::CPU;
   GraphWeightType weight_type = GraphWeightType::Distance;
@@ -331,11 +389,16 @@ struct KODAMAMatrixResult {
   std::vector<double> v;
   std::vector<int> res;
   std::vector<int> res_constrain;
+  std::vector<int> landmark_occupied_strata;
+  std::vector<int> landmark_represented_strata;
+  std::vector<int> landmark_grid_bins;
+  std::vector<double> landmark_seconds;
   NeighborGraph base_knn;
   NeighborGraph knn;
   int runs = 0;
   int samples = 0;
   int cycles = 0;
+  int effective_landmarks = 0;
   int n_threads = 1;
   Backend backend = Backend::CPU;
   bool gpu_auto_workers = false;
@@ -796,6 +859,35 @@ NeighborGraph KODAMAKNNGraph_METAL(
 NeighborGraph KODAMAKNNGraph(
   MatrixView x,
   const GraphClusterOptions& options = GraphClusterOptions()
+);
+
+ResidentIVFIndex BuildResidentIVFIndex(
+  MatrixView train,
+  const KNNOptions& options = KNNOptions()
+);
+
+/**
+ * Search an existing accelerator-resident IVF index.
+ *
+ * Query rows are uploaded for this call. Returned neighbor identifiers are
+ * one-based, matching NeighborGraph throughout the public API.
+ */
+NeighborGraph SearchResidentIVFIndex(
+  const ResidentIVFIndex& index,
+  MatrixView query,
+  int k,
+  ResidentIVFSearchStats* stats = nullptr
+);
+
+/**
+ * Search the resident training matrix against itself without uploading it
+ * again. Self-neighbors are excluded when exclude_self is true.
+ */
+NeighborGraph SearchResidentIVFIndexSelf(
+  const ResidentIVFIndex& index,
+  int k,
+  bool exclude_self = true,
+  ResidentIVFSearchStats* stats = nullptr
 );
 
 GraphClusterResult KODAMAGraphCluster_CPU(

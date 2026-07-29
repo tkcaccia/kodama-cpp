@@ -60,6 +60,31 @@ not a replacement for the repeated benchmark protocol used by the manuscript.
 The accepted automatic rule begins at `2 * ceil(sqrt(nlist))` probes and then
 increases the budget if the exact pilot does not meet its recall target.
 
+### Device-side IVF construction and explicit resident indexes
+
+CUDA and Metal IVF construction no longer downloads assignments to construct
+centroids or inverted lists. Assignment accumulation, empty-cluster repair,
+list counting, prefix offsets, and row-ID scatter are accelerator kernels.
+The move-only `ResidentIVFIndex` owns the training matrix, projected matrix,
+centroids, offsets, and IDs until its destructor releases them. There is no
+implicit process-global cache.
+
+The focused benchmark used a deterministic 50,000 by 32 float32 matrix,
+`k=30`, five timed searches after one warm-up, and fixed probe counts. It compared rebuilding before
+every search with one build followed by repeated searches:
+
+| Backend | Queries/call | nlist | nprobe | Rebuild each call (s) | Reused search (s) | Speedup | Neighbor overlap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Metal | 50,000 | 256 | 32 | 0.8695 | 0.8091 | 1.07x | 1.000 |
+| CUDA | 50,000 | 1,024 | 64 | 0.1984 | 0.1765 | 1.12x | 1.000 |
+| Metal | 1,000 | 256 | 32 | 0.1179 | 0.0306 | 3.86x | 1.000 |
+| CUDA | 1,000 | 1,024 | 64 | 0.0318 | 0.0092 | 3.45x | 1.000 |
+
+These are systems microbenchmarks, not dataset-level accuracy estimates. The
+full self-search rows show that query work dominates once every sample needs
+neighbors; the batched rows isolate the saved construction and training-data
+transfer. Reproduce them with `kodama_resident_ivf_benchmark`.
+
 ### Portable installed target
 
 The installed static Metal target exports framework names rather than local

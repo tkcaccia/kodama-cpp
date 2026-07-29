@@ -515,10 +515,50 @@ int main() {
   require(km_res.v.size() == static_cast<std::size_t>(km_options.runs * km_options.cycles), "KODAMAMatrix trace size mismatch.");
   require(km_res.res.size() == static_cast<std::size_t>(km_options.runs * d.n), "KODAMAMatrix result label size mismatch.");
   require(km_res.res_constrain.size() == static_cast<std::size_t>(km_options.runs * d.n), "KODAMAMatrix constrain size mismatch.");
+  require(km_res.effective_landmarks == km_options.landmarks, "KODAMAMatrix effective landmark count mismatch.");
+  require(km_res.landmark_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix landmark timing size mismatch.");
+  require(km_res.landmark_grid_bins == std::vector<int>(static_cast<std::size_t>(km_options.runs), 0), "Nonspatial KODAMAMatrix unexpectedly used a spatial grid.");
+  for (int run = 0; run < km_options.runs; ++run) {
+    require(km_res.landmark_occupied_strata[static_cast<std::size_t>(run)] == km_options.splitting, "Nonspatial landmark stratum count mismatch.");
+    require(km_res.landmark_represented_strata[static_cast<std::size_t>(run)] == km_options.splitting, "Nonspatial landmark sampling omitted a well-supported stratum.");
+  }
   require(km_res.knn.neighbors > 0, "KODAMAMatrix HNSW neighbor count was not recorded.");
   require(km_res.knn.indices.size() == static_cast<std::size_t>(d.n * km_res.knn.neighbors), "KODAMAMatrix neighbor index size mismatch.");
   require(km_res.knn.distances.size() == km_res.knn.indices.size(), "KODAMAMatrix neighbor distance size mismatch.");
   require(km_res.knn.indices.front() >= 1, "KODAMAMatrix neighbor indices should be one-based for R compatibility.");
+
+  kodama::KODAMAMatrixOptions km_spatial_options = km_options;
+  km_spatial_options.runs = 1;
+  km_spatial_options.cycles = 1;
+  km_spatial_options.landmarks = 20;
+  km_spatial_options.n_threads = 1;
+  km_spatial_options.knn.n_threads = 1;
+  km_spatial_options.spatial_cols = 2;
+  km_spatial_options.spatial_resolution = 0.2;
+  km_spatial_options.spatial.resize(static_cast<std::size_t>(d.n) * 2);
+  for (int row = 0; row < d.n; ++row) {
+    km_spatial_options.spatial[static_cast<std::size_t>(row) * 2] = static_cast<float>(row % 15);
+    km_spatial_options.spatial[static_cast<std::size_t>(row) * 2 + 1] = static_cast<float>(row / 15);
+  }
+  kodama::KODAMAMatrixResult km_spatial_res = kodama::KODAMAMatrix_CPU(
+    fview,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    km_spatial_options
+  );
+  require(km_spatial_res.effective_landmarks == 20, "Spatial KODAMAMatrix effective landmark count mismatch.");
+  require(km_spatial_res.landmark_grid_bins == std::vector<int>{5}, "Spatial landmark grid did not derive the expected bin count.");
+  require(km_spatial_res.landmark_occupied_strata == std::vector<int>{25}, "Spatial landmark grid occupied-cell count mismatch.");
+  require(km_spatial_res.landmark_represented_strata == std::vector<int>{20}, "Spatial quota sampling did not omit exactly the unsupported cells.");
+  kodama::KODAMAMatrixResult km_spatial_repeat = kodama::KODAMAMatrix_CPU(
+    fview,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    km_spatial_options
+  );
+  require(km_spatial_repeat.res == km_spatial_res.res, "Spatial landmark sampling is not repeatable for a fixed seed.");
 
   kodama::UMAPOptions umap_options;
   require(
@@ -697,6 +737,62 @@ int main() {
   require(cuda_core_kres.cycles_completed >= 1, "Float32 CUDA Core KNN did not run any cycles.");
   require(cuda_core_kres.accbest >= initial_knn_acc, "Float32 CUDA Core KNN decreased best CV accuracy.");
 
+  kodama::KNNOptions resident_cuda_options = knn;
+  resident_cuda_options.backend = kodama::Backend::CUDA;
+  resident_cuda_options.index_type = kodama::KNNIndexType::CudaIVFFlat;
+  resident_cuda_options.metric = kodama::DistanceMetric::Euclidean;
+  resident_cuda_options.ivf_nlist = 8;
+  resident_cuda_options.ivf_nprobe = 8;
+  kodama::ResidentIVFIndex resident_cuda =
+    kodama::BuildResidentIVFIndex(fview, resident_cuda_options);
+  require(resident_cuda.valid(), "Resident CUDA IVF index is invalid.");
+  require(resident_cuda.backend() == kodama::Backend::CUDA,
+          "Resident CUDA IVF index reported the wrong backend.");
+  require(resident_cuda.rows() == d.n && resident_cuda.dimensions() == d.p,
+          "Resident CUDA IVF index dimensions are incorrect.");
+  require(resident_cuda.nlist() == 8, "Resident CUDA IVF nlist mismatch.");
+  kodama::ResidentIVFSearchStats resident_cuda_stats;
+  const kodama::NeighborGraph resident_cuda_first =
+    kodama::SearchResidentIVFIndexSelf(
+      resident_cuda,
+      3,
+      true,
+      &resident_cuda_stats
+    );
+  const kodama::NeighborGraph resident_cuda_second =
+    kodama::SearchResidentIVFIndexSelf(resident_cuda, 3, true);
+  require(resident_cuda_stats.backend == kodama::Backend::CUDA,
+          "Resident CUDA IVF search reported the wrong backend.");
+  require(resident_cuda_stats.nlist == 8 && resident_cuda_stats.nprobe == 8,
+          "Resident CUDA IVF search parameters mismatch.");
+  require(resident_cuda_first.indices == resident_cuda_second.indices,
+          "Resident CUDA IVF index reuse changed neighbor indices.");
+  require(resident_cuda_first.distances == resident_cuda_second.distances,
+          "Resident CUDA IVF index reuse changed neighbor distances.");
+  const kodama::NeighborGraph resident_cuda_query =
+    kodama::SearchResidentIVFIndex(
+      resident_cuda,
+      kodama::MatrixView{
+        xf.data(),
+        5,
+        static_cast<std::size_t>(d.p)
+      },
+      3
+    );
+  require(resident_cuda_query.neighbors == 3 &&
+          resident_cuda_query.indices.size() == 15,
+          "Resident CUDA IVF external-query shape mismatch.");
+  require(resident_cuda_query.indices.front() == 1,
+          "Resident CUDA IVF external query did not retain the nearest row.");
+  for (int row = 0; row < d.n; ++row) {
+    for (int column = 0; column < resident_cuda_first.neighbors; ++column) {
+      const int neighbor = resident_cuda_first.indices[
+        static_cast<std::size_t>(row * resident_cuda_first.neighbors + column)
+      ];
+      require(neighbor != row + 1, "Resident CUDA IVF self-exclusion failed.");
+    }
+  }
+
   kodama::KODAMAMatrixOptions cuda_km_options = km_options;
   cuda_km_options.backend = kodama::Backend::CUDA;
   cuda_km_options.runs = 1;
@@ -715,6 +811,25 @@ int main() {
   require(cuda_km_res.samples == d.n, "CUDA KODAMAMatrix sample count mismatch.");
   require(cuda_km_res.res.size() == static_cast<std::size_t>(d.n), "CUDA KODAMAMatrix result size mismatch.");
   require(cuda_km_res.knn.indices.size() == static_cast<std::size_t>(d.n * cuda_km_res.knn.neighbors), "CUDA KODAMAMatrix graph size mismatch.");
+  require(cuda_km_res.effective_landmarks == cuda_km_options.landmarks, "CUDA KODAMAMatrix effective landmark count mismatch.");
+  require(cuda_km_res.landmark_occupied_strata == std::vector<int>{cuda_km_options.splitting}, "CUDA nonspatial landmark stratum count mismatch.");
+  require(cuda_km_res.landmark_represented_strata == std::vector<int>{cuda_km_options.splitting}, "CUDA nonspatial landmark coverage mismatch.");
+
+  kodama::KODAMAMatrixOptions cuda_spatial_options = km_spatial_options;
+  cuda_spatial_options.backend = kodama::Backend::CUDA;
+  cuda_spatial_options.knn.backend = kodama::Backend::CUDA;
+  cuda_spatial_options.knn.index_type = kodama::KNNIndexType::CudaExact;
+  kodama::KODAMAMatrixResult cuda_spatial_res = kodama::KODAMAMatrix_CUDA(
+    fview,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    cuda_spatial_options
+  );
+  require(cuda_spatial_res.effective_landmarks == km_spatial_res.effective_landmarks, "CUDA spatial effective landmark count differs from CPU.");
+  require(cuda_spatial_res.landmark_grid_bins == km_spatial_res.landmark_grid_bins, "CUDA spatial landmark grid differs from CPU.");
+  require(cuda_spatial_res.landmark_occupied_strata == km_spatial_res.landmark_occupied_strata, "CUDA spatial occupied-cell count differs from CPU.");
+  require(cuda_spatial_res.landmark_represented_strata == km_spatial_res.landmark_represented_strata, "CUDA spatial represented-cell count differs from CPU.");
 #endif
 
 #if defined(KODAMA_ENABLE_METAL)

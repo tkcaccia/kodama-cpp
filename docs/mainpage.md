@@ -28,5 +28,7 @@ diagnostics.
 - `CoreKNN` and `CorePLSLDA`: one label-vector optimization.
 - `KODAMAMatrix`: complete independent-run ensemble and graph correction.
 - `KODAMAMatrixFromGraph`: alternative input when only a KNN graph is available.
+- `BuildResidentIVFIndex` and `SearchResidentIVFIndex`: explicit CUDA/Metal
+  ownership for repeated searches without rebuilding the IVF index.
 - `KODAMAKNNGraph`, `PCA`, `KODAMAUMAP_CPU/CUDA`, and
   `KODAMAOpenTSNE_CPU/CUDA`: graph and visualization primitives.

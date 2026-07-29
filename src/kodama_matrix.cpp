@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -583,6 +584,158 @@ std::vector<int> kmeans_labels(
   std::vector<int> labels(static_cast<std::size_t>(n), 1);
   for (int row = 0; row < n; ++row) labels[static_cast<std::size_t>(row)] = assignments[static_cast<std::size_t>(row)] + 1;
   return labels;
+}
+
+struct IndexedStrata {
+  std::vector<int> offsets;
+  std::vector<int> rows;
+};
+
+IndexedStrata index_strata(const std::vector<int>& labels, int strata) {
+  if (strata < 1) throw std::invalid_argument("Landmark strata count must be positive.");
+  IndexedStrata out;
+  out.offsets.assign(static_cast<std::size_t>(strata) + 1, 0);
+  out.rows.resize(labels.size());
+  for (int label : labels) {
+    if (label < 1 || label > strata) throw std::invalid_argument("Landmark stratum label is out of range.");
+    ++out.offsets[static_cast<std::size_t>(label)];
+  }
+  for (int stratum = 1; stratum <= strata; ++stratum) {
+    out.offsets[static_cast<std::size_t>(stratum)] +=
+      out.offsets[static_cast<std::size_t>(stratum - 1)];
+  }
+  std::vector<int> cursor = out.offsets;
+  for (std::size_t row = 0; row < labels.size(); ++row) {
+    const int stratum = labels[row] - 1;
+    out.rows[static_cast<std::size_t>(cursor[static_cast<std::size_t>(stratum)]++)] =
+      static_cast<int>(row);
+  }
+  return out;
+}
+
+struct LandmarkSample {
+  std::vector<int> rows;
+  int occupied_strata = 0;
+  int represented_strata = 0;
+  int grid_bins = 0;
+};
+
+LandmarkSample quota_sample_landmarks(
+  const std::vector<int>& offsets,
+  const std::vector<int>& rows,
+  int target,
+  std::mt19937_64& rng,
+  bool preserve_strata_order
+) {
+  if (offsets.size() < 2 || offsets.front() != 0 ||
+      offsets.back() != static_cast<int>(rows.size())) {
+    throw std::invalid_argument("Invalid landmark strata index.");
+  }
+  const int samples = static_cast<int>(rows.size());
+  target = std::max(1, std::min(target, samples));
+  const int strata = static_cast<int>(offsets.size()) - 1;
+  std::vector<int> quota(static_cast<std::size_t>(strata), 0);
+  std::vector<long double> fractional(static_cast<std::size_t>(strata), 0.0L);
+  std::vector<int> order;
+  order.reserve(static_cast<std::size_t>(strata));
+
+  int assigned = 0;
+  for (int stratum = 0; stratum < strata; ++stratum) {
+    const int count =
+      offsets[static_cast<std::size_t>(stratum + 1)] -
+      offsets[static_cast<std::size_t>(stratum)];
+    if (count <= 0) continue;
+    order.push_back(stratum);
+    const long double expected =
+      static_cast<long double>(target) * static_cast<long double>(count) /
+      static_cast<long double>(samples);
+    const int base = std::min(count, static_cast<int>(std::floor(expected)));
+    quota[static_cast<std::size_t>(stratum)] = base;
+    fractional[static_cast<std::size_t>(stratum)] = expected - static_cast<long double>(base);
+    assigned += base;
+  }
+
+  if (!preserve_strata_order) std::shuffle(order.begin(), order.end(), rng);
+  const int residual_slots = target - assigned;
+  if (residual_slots > 0) {
+    const long double offset = std::generate_canonical<long double, 64>(rng);
+    long double cumulative = 0.0L;
+    int selected = 0;
+    std::vector<char> rounded_up(static_cast<std::size_t>(strata), 0);
+    for (int stratum : order) {
+      cumulative += fractional[static_cast<std::size_t>(stratum)];
+      const long double next = offset + static_cast<long double>(selected);
+      if (selected < residual_slots && next < cumulative) {
+        ++quota[static_cast<std::size_t>(stratum)];
+        rounded_up[static_cast<std::size_t>(stratum)] = 1;
+        ++selected;
+      }
+    }
+
+    // Floating-point summation can miss only the final boundary. Fill such slots
+    // by the largest unrounded residuals, preserving exact sample size.
+    while (selected < residual_slots) {
+      int best = -1;
+      long double best_fraction = -1.0L;
+      for (int stratum : order) {
+        if (rounded_up[static_cast<std::size_t>(stratum)]) continue;
+        const long double value = fractional[static_cast<std::size_t>(stratum)];
+        if (value > best_fraction) {
+          best_fraction = value;
+          best = stratum;
+        }
+      }
+      if (best < 0) throw std::runtime_error("Unable to complete the landmark quota allocation.");
+      ++quota[static_cast<std::size_t>(best)];
+      rounded_up[static_cast<std::size_t>(best)] = 1;
+      ++selected;
+    }
+  }
+
+  LandmarkSample out;
+  out.occupied_strata = static_cast<int>(order.size());
+  out.rows.reserve(static_cast<std::size_t>(target));
+  for (int stratum = 0; stratum < strata; ++stratum) {
+    const int take = quota[static_cast<std::size_t>(stratum)];
+    if (take <= 0) continue;
+    ++out.represented_strata;
+    const auto first = rows.begin() + offsets[static_cast<std::size_t>(stratum)];
+    const auto last = rows.begin() + offsets[static_cast<std::size_t>(stratum + 1)];
+    std::sample(first, last, std::back_inserter(out.rows), take, rng);
+  }
+  if (static_cast<int>(out.rows.size()) != target) {
+    throw std::runtime_error("Landmark quota allocation produced the wrong sample size.");
+  }
+  std::sort(out.rows.begin(), out.rows.end());
+  return out;
+}
+
+LandmarkSample spatial_grid_landmarks(
+  const std::vector<float>& spatial,
+  int samples,
+  int dimensions,
+  int target,
+  std::mt19937_64& rng
+) {
+  if (dimensions != 2 && dimensions != 3) {
+    throw std::invalid_argument("Spatial grid landmark selection supports 2D or 3D coordinates.");
+  }
+  const double root = std::pow(
+    static_cast<double>(std::max(1, target)),
+    1.0 / static_cast<double>(dimensions)
+  );
+  const int bins = std::max(1, std::min(4096, static_cast<int>(std::ceil(root))));
+  const detail::SpatialGridIndex grid =
+    detail::build_spatial_grid_index(spatial.data(), samples, dimensions, bins);
+  LandmarkSample out = quota_sample_landmarks(
+    grid.offsets,
+    grid.rows,
+    target,
+    rng,
+    true
+  );
+  out.grid_bins = bins;
+  return out;
 }
 
 std::vector<int> factor_subset(const std::vector<int>& values, const std::vector<int>& rows) {
@@ -1195,6 +1348,11 @@ struct IterationResult {
   std::vector<int> res;
   std::vector<int> constrain;
   std::vector<double> acc;
+  int landmarks_used = 0;
+  int landmark_occupied_strata = 0;
+  int landmark_represented_strata = 0;
+  int landmark_grid_bins = 0;
+  double landmark_seconds = 0.0;
   double accbest = std::numeric_limits<double>::quiet_NaN();
   double runtime = 0.0;
   double memory = 0.0;
@@ -1204,6 +1362,7 @@ struct IterationScratch {
   std::vector<int> cluster_counts;
   std::vector<int> selected_landpoints;
   std::vector<int> landpoints;
+  std::vector<int> coarse_labels;
   std::vector<char> is_landmark;
   std::vector<int> tpoints;
   std::vector<float> x_land;
@@ -1414,25 +1573,58 @@ IterationResult run_iteration(
   std::mt19937_64 rng(options.seed + static_cast<std::uint64_t>(run_id));
 
   detail::Timer iter_timer;
-  if (options.progress) {
-    std::cerr << "[kodama] M " << run_id << "/" << options.runs
-              << " landmark k-means with " << landmarks << " centers" << std::endl;
-  }
   const int kmeans_gpu_device = options.knn.gpu_device;
-  const std::vector<int> landmark_clusters = kmeans_labels(
-    full_float,
-    n,
-    p,
-    landmarks,
-    rng,
-    10,
-    options.n_threads,
-    options.backend,
-    kmeans_gpu_device
-  );
+  LandmarkSample landmark_sample;
+  scratch.coarse_labels.clear();
+  if (spatial_flag) {
+    if (options.progress) {
+      std::cerr << "[kodama] M " << run_id << "/" << options.runs
+                << " spatial grid landmark selection for " << landmarks << " samples" << std::endl;
+    }
+    landmark_sample = spatial_grid_landmarks(
+      spatial,
+      n,
+      options.spatial_cols,
+      landmarks,
+      rng
+    );
+  } else {
+    const int coarse_k = std::max(2, std::min(splitting, n));
+    if (options.progress) {
+      std::cerr << "[kodama] M " << run_id << "/" << options.runs
+                << " coarse landmark partition with " << coarse_k << " centers" << std::endl;
+    }
+    scratch.coarse_labels = kmeans_labels(
+      full_float,
+      n,
+      p,
+      coarse_k,
+      rng,
+      10,
+      options.n_threads,
+      options.backend,
+      kmeans_gpu_device
+    );
+    const IndexedStrata indexed = index_strata(scratch.coarse_labels, coarse_k);
+    landmark_sample = quota_sample_landmarks(
+      indexed.offsets,
+      indexed.rows,
+      landmarks,
+      rng,
+      false
+    );
+  }
+  scratch.landpoints = std::move(landmark_sample.rows);
+  const double landmark_seconds = iter_timer.seconds();
   if (options.progress) {
     std::cerr << "[kodama] M " << run_id << "/" << options.runs
-              << " landmark k-means done in " << iter_timer.seconds() << "s" << std::endl;
+              << " selected " << scratch.landpoints.size() << " landmarks from "
+              << landmark_sample.represented_strata << "/" << landmark_sample.occupied_strata
+              << (spatial_flag ? " occupied grid cells" : " coarse classes");
+    if (landmark_sample.grid_bins > 0) {
+      std::cerr << " using " << landmark_sample.grid_bins << " bins per axis";
+    }
+    std::cerr << " in " << landmark_seconds << "s" << std::endl;
   }
   const std::vector<int>* run_constrain_ptr = &constrain;
   bool run_constrain_is_identity = constrain_is_identity;
@@ -1480,17 +1672,6 @@ IterationResult run_iteration(
     run_constrain_is_identity = is_identity_constrain(*run_constrain_ptr);
   }
   const std::vector<int>& run_constrain = *run_constrain_ptr;
-  std::vector<std::vector<int>> cluster_rows(static_cast<std::size_t>(landmarks) + 1);
-  for (int i = 0; i < n; ++i) cluster_rows[static_cast<std::size_t>(landmark_clusters[static_cast<std::size_t>(i)])].push_back(i);
-  scratch.landpoints.clear();
-  scratch.landpoints.reserve(static_cast<std::size_t>(landmarks));
-  for (int c = 1; c <= landmarks; ++c) {
-    const std::vector<int>& rows = cluster_rows[static_cast<std::size_t>(c)];
-    if (rows.empty()) continue;
-    std::uniform_int_distribution<int> pick(0, static_cast<int>(rows.size()) - 1);
-    scratch.landpoints.push_back(rows[static_cast<std::size_t>(pick(rng))]);
-  }
-  std::sort(scratch.landpoints.begin(), scratch.landpoints.end());
   const std::vector<int>& landpoints = scratch.landpoints;
 
   scratch.is_landmark.assign(static_cast<std::size_t>(n), 0);
@@ -1597,6 +1778,11 @@ IterationResult run_iteration(
   }
 
   IterationResult out;
+  out.landmarks_used = static_cast<int>(landpoints.size());
+  out.landmark_occupied_strata = landmark_sample.occupied_strata;
+  out.landmark_represented_strata = landmark_sample.represented_strata;
+  out.landmark_grid_bins = landmark_sample.grid_bins;
+  out.landmark_seconds = landmark_seconds;
   out.res.assign(static_cast<std::size_t>(n), 0);
   out.constrain = run_constrain;
   for (std::size_t i = 0; i < landpoints.size(); ++i) out.res[static_cast<std::size_t>(landpoints[i])] = core_result.clbest[i];
@@ -1728,6 +1914,7 @@ KODAMAMatrixResult run_kodama_matrix(
   result.runs = options.runs;
   result.samples = static_cast<int>(x.rows);
   result.cycles = options.cycles;
+  result.effective_landmarks = options.landmarks;
   result.n_threads = options.n_threads;
   result.backend = options.backend;
   result.gpu_auto_workers = worker_plan.automatic;
@@ -1740,6 +1927,10 @@ KODAMAMatrixResult run_kodama_matrix(
   result.input_copy_seconds = input_copy_seconds;
   result.spatial_precompute_seconds = spatial_precompute_seconds;
   result.acc.assign(static_cast<std::size_t>(options.runs), std::numeric_limits<double>::quiet_NaN());
+  result.landmark_occupied_strata.assign(static_cast<std::size_t>(options.runs), 0);
+  result.landmark_represented_strata.assign(static_cast<std::size_t>(options.runs), 0);
+  result.landmark_grid_bins.assign(static_cast<std::size_t>(options.runs), 0);
+  result.landmark_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
   result.v.assign(static_cast<std::size_t>(options.runs) * options.cycles, std::numeric_limits<double>::quiet_NaN());
   result.res.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
   result.res_constrain.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
@@ -1873,6 +2064,11 @@ KODAMAMatrixResult run_kodama_matrix(
     const IterationResult& iter = iterations[static_cast<std::size_t>(run_id - 1)];
     const std::size_t row = static_cast<std::size_t>(run_id - 1);
     result.acc[row] = iter.accbest;
+    result.effective_landmarks = iter.landmarks_used;
+    result.landmark_occupied_strata[row] = iter.landmark_occupied_strata;
+    result.landmark_represented_strata[row] = iter.landmark_represented_strata;
+    result.landmark_grid_bins[row] = iter.landmark_grid_bins;
+    result.landmark_seconds[row] = iter.landmark_seconds;
     std::copy(iter.res.begin(), iter.res.end(), result.res.begin() + row * x.rows);
     std::copy(iter.constrain.begin(), iter.constrain.end(), result.res_constrain.begin() + row * x.rows);
     for (int c = 0; c < options.cycles && c < static_cast<int>(iter.acc.size()); ++c) {

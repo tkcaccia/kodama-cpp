@@ -5,6 +5,13 @@ All notable changes to kodama-cpp are documented here. The project follows
 
 ## [Unreleased]
 
+- Added an explicit move-only `ResidentIVFIndex` for CUDA and Metal. IVF
+  assignments, centroid accumulation and repair, list-prefix construction,
+  and ID scatter stay on-device; trained inputs and indexes can be reused by
+  subsequent searches without a hidden global cache.
+- Replaced the per-run `landmarks`-center k-means with exact-quota landmark
+  sampling: coarse `splitting` strata for matrix input and an automatic
+  population-weighted grid for 2D/3D coordinate input.
 - Replaced the CPU/CUDA UMAP and openTSNE implementation with the current
   fastEmbedR kernels, including direct float32 CSR graph construction, the
   current smooth-kNN bandwidth rule, pooled CUDA workspaces, and the symmetric

@@ -45,6 +45,7 @@ The public library also provides:
 - cross-validation kernels: `KNNCV` and `PLSLDACV`;
 - label optimization: `CoreKNN` and `CorePLSLDA`;
 - complete KODAMA matrix construction from data or a supplied KNN graph;
+- explicit resident CUDA/Metal IVF indexes for repeated nearest-neighbor calls;
 - randomized PCA with float32 data and CPU, CUDA, and Metal entry points;
 - KNN graph construction, UMAP, openTSNE, and random-walk clustering;
 - thin R and Python bindings to the same C++ implementation.
@@ -257,14 +258,38 @@ R CMD INSTALL split-repos/kodama-r
 The R session must see the same CUDA runtime libraries used during the core
 build. After installation, select CUDA with `backend = "cuda"`.
 
+### Reuse an accelerator IVF index
+
+The C++ API exposes a move-only owner for repeated searches against one
+training matrix:
+
+```cpp
+kodama::KNNOptions options;
+options.backend = kodama::Backend::CUDA; // or Backend::Metal
+options.metric = kodama::DistanceMetric::Euclidean;
+options.ivf_nlist = 256;
+options.ivf_nprobe = 32;
+
+auto index = kodama::BuildResidentIVFIndex(train, options);
+auto graph = kodama::SearchResidentIVFIndexSelf(index, 30);
+auto other = kodama::SearchResidentIVFIndex(index, query, 30);
+```
+
+The handle retains the float32 training matrix, projected matrix, centroids,
+list offsets, and list identifiers on the selected device. Construction uses
+device-side assignment accumulation, empty-cluster repair, prefix offsets,
+and ID scatter. Self-search reuses the resident training matrix; an external
+search uploads only its query matrix. The lifetime is explicit and there is
+no process-global cache.
+
 ## Parameters that matter most
 
 | Parameter | Meaning |
 | --- | --- |
 | `M` | Number of independent KODAMA label searches contributing to the final graph |
 | `Tcycle` | Number of proposal and cross-validation cycles inside each independent search |
-| `landmarks` | Maximum samples optimized directly; when `n <= landmarks`, KODAMA uses `ceiling(0.75 * n)` |
-| `splitting` | Initial number of label classes in each independent search |
+| `landmarks` | Exact effective sample count optimized directly; when `n <= landmarks`, KODAMA uses `ceiling(0.75 * n)` |
+| `splitting` | Initial label classes and coarse landmark strata for matrix-only input |
 | `knn.k` | K used by the KNN classifier, not the visualization graph |
 | `ncomp` | Requested feasible SIMPLS components for PLS-LDA |
 | `graph.neighbors` | Neighbors retained in the returned KODAMA graph |
@@ -272,6 +297,14 @@ build. After installation, select CUDA with `backend = "cuda"`.
 
 The R wrapper defaults `splitting` to 100 below 40,000 samples and 300
 otherwise. UMAP uses `k = 30` by default; openTSNE uses perplexity 30.
+
+Landmarks use exact population-proportional quotas. Matrix-only runs first
+partition the rows into `splitting` coarse classes; 2D/3D coordinate input
+instead uses an automatically sized regular grid. Integer quotas are sampled
+without replacement and residual slots use randomized systematic rounding, so
+the selected count is exact and no occupied grid cell is artificially
+guaranteed a landmark. Initial labels are still fitted in expression space on
+the selected rows.
 
 ## Use from another CMake project
 
@@ -314,8 +347,9 @@ compatibility mode. The openTSNE default perplexity is 30.
 
 CUDA nearest-neighbor search is package-owned and provides exact and
 recall-tuned IVF-Flat paths. Metal provides exact search and an explicit
-IVF-Flat alternative. No FAISS, cuVS, RAFT, or RMM headers or binaries are
-required.
+IVF-Flat alternative. Both IVF builders keep assignments, centroid
+accumulation, empty-cluster repair, and inverted-list construction on the
+accelerator. No FAISS, cuVS, RAFT, or RMM headers or binaries are required.
 
 See [`docs/backend-validation.md`](docs/backend-validation.md) for backend
 acceptance results and [`docs/release-validation.md`](docs/release-validation.md)

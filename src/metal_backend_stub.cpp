@@ -4,8 +4,25 @@
 #include "metal_backend.hpp"
 
 #include <stdexcept>
+#include <utility>
 
 namespace kodama::detail {
+
+struct NativeMetalIVFIndex::Impl {};
+
+NativeMetalIVFIndex::NativeMetalIVFIndex() = default;
+NativeMetalIVFIndex::~NativeMetalIVFIndex() = default;
+NativeMetalIVFIndex::NativeMetalIVFIndex(NativeMetalIVFIndex&&) noexcept = default;
+NativeMetalIVFIndex& NativeMetalIVFIndex::operator=(NativeMetalIVFIndex&&) noexcept = default;
+NativeMetalIVFIndex::NativeMetalIVFIndex(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+bool NativeMetalIVFIndex::valid() const noexcept { return false; }
+int NativeMetalIVFIndex::rows() const noexcept { return 0; }
+int NativeMetalIVFIndex::dimensions() const noexcept { return 0; }
+int NativeMetalIVFIndex::nlist() const noexcept { return 0; }
+DistanceMetric NativeMetalIVFIndex::metric() const noexcept {
+  return DistanceMetric::Euclidean;
+}
 
 bool metal_backend_available() {
   return false;
@@ -34,6 +51,40 @@ NativeKNNResult metal_ivf_knn_search(
   DistanceMetric,
   int,
   int,
+  const std::vector<int>&,
+  MetalIVFStats*
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+NativeMetalIVFIndex metal_build_ivf_index(
+  const std::vector<float>&,
+  int,
+  int,
+  DistanceMetric,
+  int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+NativeKNNResult metal_ivf_index_search(
+  const NativeMetalIVFIndex&,
+  const std::vector<float>&,
+  int,
+  int,
+  int,
+  double,
+  const std::vector<int>&,
+  MetalIVFStats*
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+NativeKNNResult metal_ivf_index_self_search(
+  const NativeMetalIVFIndex&,
+  int,
+  int,
+  double,
   const std::vector<int>&,
   MetalIVFStats*
 ) {
