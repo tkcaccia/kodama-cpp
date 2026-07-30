@@ -411,6 +411,48 @@ int main() {
   check_pls_result(fdispatch_lres, d.y, d.constrain, 4);
   require(fdispatch_lres.global_accuracy > 0.60, "Float32 generic PLS-LDA accuracy unexpectedly low.");
 
+  // Multiple labels can still have zero supervised covariance, for example
+  // when every predictor is constant. Such a fold must receive a majority
+  // prediction instead of aborting an entire KODAMA run.
+  const int degenerate_n = 40;
+  const int degenerate_p = 3;
+  std::vector<float> degenerate_x(
+    static_cast<std::size_t>(degenerate_n * degenerate_p),
+    1.0f
+  );
+  std::vector<int> degenerate_y(static_cast<std::size_t>(degenerate_n), 0);
+  std::vector<int> degenerate_constrain(static_cast<std::size_t>(degenerate_n), 0);
+  for (int row = 0; row < degenerate_n; ++row) {
+    degenerate_y[static_cast<std::size_t>(row)] = row < 30 ? 10 : 20;
+    degenerate_constrain[static_cast<std::size_t>(row)] = row;
+  }
+  kodama::MatrixView degenerate_view{
+    degenerate_x.data(),
+    static_cast<std::size_t>(degenerate_n),
+    static_cast<std::size_t>(degenerate_p)
+  };
+  kodama::PLSOptions degenerate_pls = pls;
+  degenerate_pls.cv.folds = 5;
+  degenerate_pls.fixed_components = 0;
+  kodama::PLSCVResult degenerate_lres = kodama::PLSLDACV_CPU(
+    degenerate_view,
+    degenerate_y,
+    degenerate_constrain,
+    degenerate_pls
+  );
+  require(
+    degenerate_lres.predicted_labels.size() == degenerate_y.size(),
+    "Degenerate PLS-LDA prediction size mismatch."
+  );
+  require(
+    std::isfinite(degenerate_lres.global_accuracy),
+    "Degenerate PLS-LDA accuracy must be finite."
+  );
+  require(
+    degenerate_lres.selected_components == 1,
+    "Degenerate PLS-LDA should report the majority fallback as one component."
+  );
+
   std::vector<int> noisy = make_noisy_labels(d.y);
   const double initial_agreement = direct_agreement(noisy, d.y);
   std::vector<int> fixed(static_cast<std::size_t>(d.n), 0);

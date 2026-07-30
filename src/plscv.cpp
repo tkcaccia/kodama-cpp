@@ -1089,6 +1089,11 @@ struct PLSFitF {
   DenseF y_weights;
 };
 
+class DegeneratePLSFit final : public std::runtime_error {
+ public:
+  explicit DegeneratePLSFit(const std::string& message) : std::runtime_error(message) {}
+};
+
 float dot_float(const std::vector<float>& a, const std::vector<float>& b) {
   double out = 0.0;
   for (std::size_t i = 0; i < a.size(); ++i) {
@@ -1135,6 +1140,15 @@ PLSFitF fit_pls_components_from_crossprod_float(
   std::vector<float> previous_weight;
   int fitted_rank = 0;
 
+  const auto power_refresh = [](const DenseF& cross_product, std::vector<float>& candidate) {
+    constexpr int power_iterations = 2;
+    for (int iteration = 0; iteration < power_iterations; ++iteration) {
+      const std::vector<float> response_projection =
+        t_mat_vec_float(cross_product, candidate);
+      candidate = mat_vec_float(cross_product, response_projection);
+    }
+  };
+
   for (int a = 0; a < max_rank; ++a) {
     std::vector<float> weight(static_cast<std::size_t>(x.cols), 0.0f);
     if (!previous_weight.empty()) {
@@ -1147,12 +1161,35 @@ PLSFitF fit_pls_components_from_crossprod_float(
 
     // fastPLS uses a one-vector incremental randomized refresh with two
     // power iterations before each SIMPLS deflation step.
-    constexpr int power_iterations = 2;
-    for (int iteration = 0; iteration < power_iterations; ++iteration) {
-      const std::vector<float> response_projection = t_mat_vec_float(s, weight);
-      weight = mat_vec_float(s, response_projection);
+    power_refresh(s, weight);
+    float refresh_norm = norm2_float(weight);
+    if (
+      previous_weight.empty() &&
+      (!std::isfinite(refresh_norm) || refresh_norm <= 1.0e-10f)
+    ) {
+      // Retry only a failed first randomized refresh on the response
+      // direction carrying the strongest supervised signal.
+      int strongest_response = -1;
+      double strongest_norm_squared = 0.0;
+      for (int response = 0; response < s.cols; ++response) {
+        double norm_squared = 0.0;
+        for (int feature = 0; feature < s.rows; ++feature) {
+          const double value = static_cast<double>(s(feature, response));
+          norm_squared += value * value;
+        }
+        if (std::isfinite(norm_squared) && norm_squared > strongest_norm_squared) {
+          strongest_norm_squared = norm_squared;
+          strongest_response = response;
+        }
+      }
+      if (strongest_response >= 0 && strongest_norm_squared > 1.0e-20) {
+        for (int feature = 0; feature < s.rows; ++feature) {
+          weight[static_cast<std::size_t>(feature)] = s(feature, strongest_response);
+        }
+        power_refresh(s, weight);
+        refresh_norm = norm2_float(weight);
+      }
     }
-    const float refresh_norm = norm2_float(weight);
     if (!std::isfinite(refresh_norm) || refresh_norm <= 1.0e-10f) break;
     for (float& value : weight) value /= refresh_norm;
 
@@ -1211,7 +1248,9 @@ PLSFitF fit_pls_components_from_crossprod_float(
   }
 
   if (fitted_rank < 1) {
-    throw std::runtime_error("fastPLS-compatible CPU float32 SIMPLS fit failed.");
+    throw DegeneratePLSFit(
+      "CPU float32 SIMPLS found no supervised latent direction."
+    );
   }
   if (fitted_rank == max_rank) return PLSFitF{std::move(weights), std::move(y_weights)};
 
@@ -2889,14 +2928,33 @@ PLSCVResult run_plscv_host(
       }
       return;
     }
-    PLSFitF fit = backend == Backend::Metal ?
-      fit_pls_components_labels_metal_float(
-        *x_train,
-        y_train_labels,
-        fold_classes,
-        options.max_components
-      ) :
-      fit_pls_components_labels_float(*x_train, y_train_labels, fold_classes, options.max_components, x_train_gram);
+    PLSFitF fit;
+    try {
+      fit = backend == Backend::Metal ?
+        fit_pls_components_labels_metal_float(
+          *x_train,
+          y_train_labels,
+          fold_classes,
+          options.max_components
+        ) :
+        fit_pls_components_labels_float(*x_train, y_train_labels, fold_classes, options.max_components, x_train_gram);
+    } catch (const DegeneratePLSFit&) {
+      std::map<int, int> class_counts;
+      for (int label : y_train_labels) ++class_counts[label];
+      int pred_label = fold_classes.front();
+      int best_count = -1;
+      for (const auto& entry : class_counts) {
+        if (entry.second > best_count) {
+          pred_label = entry.first;
+          best_count = entry.second;
+        }
+      }
+      fold_evaluated_components[fold_pos] = 1;
+      for (int row : *validation) {
+        selected_pred[static_cast<std::size_t>(row)] = pred_label;
+      }
+      return;
+    }
     const std::vector<int> eval_components = components_to_evaluate(options, fit.weights.cols);
     fold_evaluated_components[fold_pos] = eval_components.front();
     DenseF t_train_full = backend == Backend::Metal ?
