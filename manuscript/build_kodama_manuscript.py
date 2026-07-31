@@ -706,6 +706,11 @@ API_ROWS = [
         "makeSNNGraph equivalent and random-walk clustering",
         "CPU, CUDA, or Metal neighbor-graph construction followed by an explicit CPU random-walk clustering kernel.",
     ),
+    (
+        "R compatibility utilities",
+        "normalization, scaling, dinisurface, helicoid, spirals, swissroll",
+        "Dependency-free R implementations preserve the preprocessing signatures, returned fields, and seeded synthetic-manifold constructions of KODAMA 3.3; they are wrapper conveniences rather than C++ kernels.",
+    ),
 ]
 
 
@@ -1023,7 +1028,7 @@ INSTALLATION_ROWS = [
     ),
     (
         "R wrapper",
-        "Clone https://github.com/tkcaccia/kodama-r, set KODAMA_CPP_ROOT and KODAMA_CPP_BUILD_DIR, then run R CMD INSTALL kodama-r. The wrapper links the installed or selected core build.",
+        "Clone https://github.com/tkcaccia/kodama-r, set KODAMA_CPP_ROOT and KODAMA_CPP_BUILD_DIR, then run R CMD INSTALL kodama-r. The wrapper links the installed or selected core build and includes dependency-free KODAMA-compatible normalization, scaling, and synthetic-manifold utilities.",
     ),
     (
         "Python wrapper",
