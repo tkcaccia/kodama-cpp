@@ -8,11 +8,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -174,6 +177,12 @@ struct PrecomputedKNN {
   std::vector<int> folds;
   std::vector<PrecomputedKNNFold> fold_data;
   KNNParametersUsed parameters;
+#if defined(KODAMA_ENABLE_CUDA)
+  std::shared_ptr<detail::NativeCudaKNNVoteGraph> cuda_vote_graph;
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+  std::shared_ptr<detail::NativeMetalKNNVoteGraph> metal_vote_graph;
+#endif
 };
 
 struct KNNPredictionScratch {
@@ -186,6 +195,79 @@ struct KNNPredictionScratch {
   std::vector<int> touched;
   bool label_map_initialized = false;
 };
+
+void flatten_precomputed_knn(
+  const PrecomputedKNN& precomputed,
+  std::vector<int>& neighbor_rows,
+  std::vector<float>& scores
+) {
+  const int samples = static_cast<int>(precomputed.folds.size());
+  const int width = std::max(1, precomputed.parameters.k);
+  const std::size_t items =
+    static_cast<std::size_t>(samples) * static_cast<std::size_t>(width);
+  neighbor_rows.assign(items, -1);
+  scores.assign(items, -std::numeric_limits<float>::infinity());
+  for (const PrecomputedKNNFold& fold : precomputed.fold_data) {
+    for (std::size_t query = 0; query < fold.validation.size(); ++query) {
+      const int output_row = fold.validation[query];
+      if (output_row < 0 || output_row >= samples) continue;
+      const std::size_t source =
+        query * static_cast<std::size_t>(fold.k);
+      const std::size_t destination =
+        static_cast<std::size_t>(output_row) * static_cast<std::size_t>(width);
+      const int count = std::min(width, fold.k);
+      std::copy_n(
+        fold.neighbor_rows.data() + source,
+        count,
+        neighbor_rows.data() + destination
+      );
+      std::copy_n(
+        fold.scores.data() + source,
+        count,
+        scores.data() + destination
+      );
+    }
+  }
+}
+
+void attach_resident_knn_vote_graph(PrecomputedKNN& precomputed) {
+  std::vector<int> neighbor_rows;
+  std::vector<float> scores;
+  flatten_precomputed_knn(precomputed, neighbor_rows, scores);
+  const int samples = static_cast<int>(precomputed.folds.size());
+  const int neighbors = std::max(1, precomputed.parameters.k);
+#if defined(KODAMA_ENABLE_CUDA)
+  if (precomputed.parameters.backend == Backend::CUDA) {
+    precomputed.cuda_vote_graph =
+      std::make_shared<detail::NativeCudaKNNVoteGraph>(
+        detail::native_cuda_build_knn_vote_graph(
+          neighbor_rows,
+          scores,
+          samples,
+          neighbors,
+          precomputed.parameters.gpu_device
+        )
+      );
+    return;
+  }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+  if (precomputed.parameters.backend == Backend::Metal) {
+    precomputed.metal_vote_graph =
+      std::make_shared<detail::NativeMetalKNNVoteGraph>(
+        detail::metal_build_knn_vote_graph(
+          neighbor_rows,
+          scores,
+          samples,
+          neighbors
+        )
+      );
+  }
+#else
+  (void)samples;
+  (void)neighbors;
+#endif
+}
 
 void initialize_knn_label_map(KNNPredictionScratch& scratch, const std::vector<int>& labels) {
   scratch.label_to_code.clear();
@@ -342,6 +424,9 @@ PrecomputedKNN precompute_knn_cv_cpu(
       }
     }
     precomputed.fold_data.push_back(std::move(fold_data));
+  }
+  if (precomputed.parameters.backend == Backend::Metal) {
+    attach_resident_knn_vote_graph(precomputed);
   }
   return precomputed;
 }
@@ -531,6 +616,7 @@ PrecomputedKNN precompute_knn_cv_cuda(
     }
     precomputed.fold_data.push_back(std::move(fold_data));
   }
+  attach_resident_knn_vote_graph(precomputed);
   return precomputed;
 }
 #endif
@@ -585,6 +671,26 @@ CVPrediction predict_precomputed_knn(
     }
     scratch.fallback_counts[code] = 0;
   }
+#if defined(KODAMA_ENABLE_CUDA)
+  if (precomputed.cuda_vote_graph && precomputed.cuda_vote_graph->valid()) {
+    out.predicted = detail::native_cuda_knn_vote_predict(
+      *precomputed.cuda_vote_graph,
+      labels,
+      fallback_label
+    );
+    return out;
+  }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+  if (precomputed.metal_vote_graph && precomputed.metal_vote_graph->valid()) {
+    out.predicted = detail::metal_knn_vote_predict(
+      *precomputed.metal_vote_graph,
+      labels,
+      fallback_label
+    );
+    return out;
+  }
+#endif
   scratch.touched.reserve(static_cast<std::size_t>(precomputed.parameters.k));
   for (const PrecomputedKNNFold& fold : precomputed.fold_data) {
     const std::size_t k = static_cast<std::size_t>(fold.k);

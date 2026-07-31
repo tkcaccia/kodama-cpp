@@ -48,6 +48,35 @@ int main() {
 `result.acc` stores its raw cross-validated accuracy. Select a run from those
 internal scores, not from external reference labels.
 
+## Retain or lazily correct one graph
+
+`KODAMAMatrixResult` owns one `NeighborGraph`. With the default
+`apply_kodama_dissimilarity = true`, the base distances are corrected in place
+and the final graph is moved into `result.knn`. To retain the base graph and
+defer correction:
+
+```cpp
+options.apply_kodama_dissimilarity = false;
+auto result = kodama::KODAMAMatrix(
+  kodama::MatrixView{x.data(), n, p}, {}, {}, {}, options
+);
+
+kodama::KODAMADissimilarityInPlace(
+  result.knn,
+  result.res,
+  result.runs,
+  result.samples,
+  options.backend,
+  options.n_threads,
+  options.knn.gpu_device
+);
+```
+
+The in-place function accepts the public one-based graph convention and does
+not allocate a second graph. `result.knn_is_kodama_corrected` describes the
+state produced by `KODAMAMatrix`; `result.graph_storage_bytes` reports the
+retained index-distance capacity.
+
 ## Reuse a CUDA or Metal IVF index
 
 Use an explicit resident handle when several searches share one training
@@ -82,6 +111,30 @@ and inverted lists. Self-search does not upload the training matrix again;
 external queries upload only their query rows. Neighbor identifiers returned
 by both calls are one-based.
 
+## Parallel CPU HNSW graphs
+
+`GraphClusterOptions::n_threads`, `KNNOptions::n_threads`, and the wrapper
+argument `n.cores` control both native HNSW construction and querying. The
+implementation uses lock-protected concurrent insertion and batched parallel
+queries over contiguous float32 storage:
+
+```cpp
+kodama::GraphClusterOptions graph_options;
+graph_options.k = 30;
+graph_options.n_threads = 4;
+graph_options.metric = kodama::DistanceMetric::Euclidean;
+
+auto graph = kodama::KODAMAKNNGraph_CPU(
+  kodama::MatrixView{x.data(), n, p},
+  graph_options
+);
+```
+
+Parallel HNSW insertion is approximate and its graph can vary slightly with
+thread scheduling. The maintained regression test requires at least 0.99
+recall against exact neighbors rather than bitwise identity with a serial
+graph.
+
 ## R wrapper
 
 Build the core first, then install the thin wrapper from the checkout:
@@ -112,6 +165,27 @@ fit$best_labels
 KODAMA.timing(fit)
 embedding <- KODAMA.visualization(fit, "UMAP", k = 30, backend = "cpu")
 ```
+
+The matrix call builds the full-data graph once before all `M` searches. It
+also computes one CPU PCA from `x`, derives both UMAP and openTSNE starts from
+those scores, and stores the graph and starts in `fit`. The visualization call
+uses them directly by default. Check `fit$graph_builds` (normally `1`) and
+`fit$timing$visual_init_seconds` when profiling. To visualize on another
+backend, pass the raw matrix so initialization is recomputed there:
+
+```r
+embedding_cuda <- KODAMA.visualization(
+  fit,
+  "opentsne",
+  raw.data = x,
+  backend = "cuda",
+  perplexity = 30
+)
+```
+
+An explicit `init` always wins. Without explicit, raw, or backend-matched
+stored initialization, UMAP uses its graph-spectral start and openTSNE uses
+its deterministic random start.
 
 The complete installation and `R CMD check` procedure is in
 `split-repos/kodama-r/README.md`.
@@ -144,6 +218,10 @@ fit = kodama.matrix(
 labels = fit.best_labels
 embedding = kodama.visualization(fit, "UMAP", k=30, backend="cpu")
 ```
+
+`kodama.matrix()` stores raw-data PCA starts by default. Pass
+`raw_data=x` to `kodama.visualization()` when changing the CPU/CUDA
+visualization backend, or pass `init=` to provide coordinates explicitly.
 
 ## CUDA and Metal
 

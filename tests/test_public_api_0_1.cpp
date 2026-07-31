@@ -21,6 +21,12 @@ int main() {
       kodama::MatrixView, Labels, Labels, Labels, const kodama::CoreOptions&);
   using MatrixFn = kodama::KODAMAMatrixResult (*)(
       kodama::MatrixView, Labels, Labels, Labels, const kodama::KODAMAMatrixOptions&);
+  using PreparedDataMatrixFn = kodama::KODAMAMatrixResult (*)(
+      kodama::MatrixView, const kodama::KODAMAGraphResult&, Labels, Labels,
+      Labels, const kodama::KODAMAMatrixOptions&);
+  using PreparedMatrixFn = kodama::KODAMAMatrixResult (*)(
+      const kodama::KODAMAGraphResult&, Labels, Labels, Labels,
+      const kodama::KODAMAMatrixOptions&);
   using GraphMatrixFn = kodama::KODAMAMatrixResult (*)(
       const kodama::NeighborGraph&, int, Labels, Labels, Labels,
       const kodama::KODAMAMatrixOptions&);
@@ -29,6 +35,8 @@ int main() {
       const kodama::KODAMAMatrixOptions&);
   using GraphFn = kodama::NeighborGraph (*)(
       kodama::MatrixView, const kodama::GraphClusterOptions&);
+  using PreparedGraphFn = kodama::KODAMAGraphResult (*)(
+      kodama::MatrixView, const kodama::KODAMAGraphOptions&);
   using ClusterFn = kodama::GraphClusterResult (*)(
       const kodama::NeighborGraph&, int, const kodama::GraphClusterOptions&);
   using UMAPFn = kodama::EmbeddingResult (*)(
@@ -37,6 +45,10 @@ int main() {
       const kodama::NeighborGraph&, const kodama::OpenTSNEOptions&);
   using PCAFn = kodama::PCAResult (*)(
       kodama::MatrixView, const kodama::PCAOptions&);
+  using VisualizationInitFn = kodama::VisualizationInitResult (*)(
+      kodama::MatrixView, const kodama::VisualizationInitOptions&);
+  using DissimilarityInPlaceFn = void (*)(
+      kodama::NeighborGraph&, Labels, int, int, kodama::Backend, int, int);
   using ResidentIVFBuildFn = kodama::ResidentIVFIndex (*)(
       kodama::MatrixView, const kodama::KNNOptions&);
   using ResidentIVFSearchFn = kodama::NeighborGraph (*)(
@@ -59,6 +71,8 @@ int main() {
   const MatrixFn matrix[] = {
       &kodama::KODAMAMatrix, &kodama::KODAMAMatrix_CPU,
       &kodama::KODAMAMatrix_CUDA, &kodama::KODAMAMatrix_METAL};
+  const PreparedDataMatrixFn prepared_data_matrix = &kodama::KODAMAMatrix;
+  const PreparedMatrixFn prepared_matrix = &kodama::KODAMAMatrix;
   const GraphMatrixFn matrix_graph[] = {
       &kodama::KODAMAMatrixFromGraph, &kodama::KODAMAMatrixFromGraph_CPU,
       &kodama::KODAMAMatrixFromGraph_CUDA,
@@ -71,6 +85,9 @@ int main() {
   const GraphFn graph[] = {
       &kodama::KODAMAKNNGraph, &kodama::KODAMAKNNGraph_CPU,
       &kodama::KODAMAKNNGraph_CUDA, &kodama::KODAMAKNNGraph_METAL};
+  const PreparedGraphFn prepared_graph[] = {
+      &kodama::KODAMAGraph, &kodama::KODAMAGraph_CPU,
+      &kodama::KODAMAGraph_CUDA, &kodama::KODAMAGraph_METAL};
   const ClusterFn cluster[] = {
       &kodama::KODAMAGraphCluster, &kodama::KODAMAGraphCluster_CPU};
   const UMAPFn umap[] = {&kodama::KODAMAUMAP_CPU, &kodama::KODAMAUMAP_CUDA};
@@ -78,6 +95,10 @@ int main() {
       &kodama::KODAMAOpenTSNE_CPU, &kodama::KODAMAOpenTSNE_CUDA};
   const PCAFn pca[] = {
       &kodama::PCA, &kodama::PCA_CPU, &kodama::PCA_CUDA, &kodama::PCA_METAL};
+  const VisualizationInitFn visualization_init =
+      &kodama::KODAMAVisualizationPCAInit;
+  const DissimilarityInPlaceFn dissimilarity_in_place =
+      &kodama::KODAMADissimilarityInPlace;
   const ResidentIVFBuildFn resident_ivf_build =
       &kodama::BuildResidentIVFIndex;
   const ResidentIVFSearchFn resident_ivf_search =
@@ -85,9 +106,12 @@ int main() {
   const ResidentIVFSelfSearchFn resident_ivf_self_search =
       &kodama::SearchResidentIVFIndexSelf;
 
-  return knn[0] && pls[0] && core[0] && matrix[0] && matrix_graph[0] &&
-                 matrix_data_graph[0] && graph[0] && cluster[0] && umap[0] &&
-                 tsne[0] && pca[0] && resident_ivf_build &&
+  return knn[0] && pls[0] && core[0] && matrix[0] &&
+                 prepared_data_matrix && prepared_matrix && matrix_graph[0] &&
+                 matrix_data_graph[0] && graph[0] && prepared_graph[0] &&
+                 cluster[0] && umap[0] &&
+                 tsne[0] && pca[0] && visualization_init &&
+                 dissimilarity_in_place && resident_ivf_build &&
                  resident_ivf_search && resident_ivf_self_search
              ? 0
              : 1;

@@ -231,18 +231,34 @@ __global__ void kodama_label_crossprod_accum_colmajor_float_kernel(
   const int tile = static_cast<int>(blockIdx.y);
   if (col >= p) return;
 
-  extern __shared__ float class_sums[];
-  for (int cls = static_cast<int>(threadIdx.x); cls < n_classes; cls += static_cast<int>(blockDim.x)) {
+  extern __shared__ unsigned char shared_raw[];
+  float* class_sums = reinterpret_cast<float*>(shared_raw);
+  float* row_values = class_sums + n_classes;
+  int* row_classes = reinterpret_cast<int*>(row_values + row_tile);
+  for (int cls = static_cast<int>(threadIdx.x);
+       cls < n_classes;
+       cls += static_cast<int>(blockDim.x)) {
     class_sums[cls] = 0.0f;
+  }
+  const int start = tile * row_tile;
+  const int end = min(n, start + row_tile);
+  const int row = start + static_cast<int>(threadIdx.x);
+  if (static_cast<int>(threadIdx.x) < row_tile) {
+    row_classes[threadIdx.x] = row < end ? labels[row] - 1 : -1;
+    row_values[threadIdx.x] = row < end ?
+      x[static_cast<size_t>(row) +
+        static_cast<size_t>(col) * static_cast<size_t>(n)] :
+      0.0f;
   }
   __syncthreads();
 
-  const int start = tile * row_tile;
-  const int end = min(n, start + row_tile);
-  for (int row = start + static_cast<int>(threadIdx.x); row < end; row += static_cast<int>(blockDim.x)) {
-    const int cls = labels[row] - 1;
-    if (cls >= 0 && cls < n_classes) {
-      atomicAdd(class_sums + cls, x[static_cast<size_t>(row) + static_cast<size_t>(col) * static_cast<size_t>(n)]);
+  if (threadIdx.x == 0) {
+    const int rows_in_tile = end - start;
+    for (int local_row = 0; local_row < rows_in_tile; ++local_row) {
+      const int cls = row_classes[local_row];
+      if (cls >= 0 && cls < n_classes) {
+        class_sums[cls] += row_values[local_row];
+      }
     }
   }
   __syncthreads();
@@ -278,9 +294,25 @@ __global__ void kodama_label_crossprod_reduce_colmajor_float_kernel(
   s[static_cast<size_t>(col) + static_cast<size_t>(cls) * static_cast<size_t>(p)] = sum;
 }
 
+__global__ void kodama_label_crossprod_column_sums_float_kernel(
+  const float* s,
+  float* x_sums,
+  int p,
+  int n_classes
+) {
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (col >= p) return;
+  float x_sum = 0.0f;
+  for (int c = 0; c < n_classes; ++c) {
+    x_sum += s[col + c * p];
+  }
+  x_sums[col] = x_sum;
+}
+
 __global__ void kodama_label_crossprod_center_colmajor_float_kernel(
   float* s,
   const float* counts,
+  const float* x_sums,
   int n,
   int p,
   int n_classes
@@ -290,12 +322,8 @@ __global__ void kodama_label_crossprod_center_colmajor_float_kernel(
   if (idx >= total) return;
   const int col = idx % p;
   const int cls = idx / p;
-  float x_sum = 0.0f;
-  for (int c = 0; c < n_classes; ++c) {
-    x_sum += s[col + c * p];
-  }
   const float y_mean = n > 0 ? counts[cls] / static_cast<float>(n) : 0.0f;
-  s[idx] -= y_mean * x_sum;
+  s[idx] -= y_mean * x_sums[col];
 }
 
 size_t kodama_cuda_centered_label_crossprod_colmajor_float_scratch_size(
@@ -325,7 +353,10 @@ void kodama_cuda_centered_label_crossprod_colmajor_float(
   const int row_tile = 256;
   const int row_tiles = (n + row_tile - 1) / row_tile;
   const dim3 sum_blocks(static_cast<unsigned int>(p), static_cast<unsigned int>(row_tiles));
-  const size_t shared = sizeof(float) * static_cast<size_t>(n_classes);
+  const size_t shared =
+    sizeof(float) *
+      (static_cast<size_t>(n_classes) + static_cast<size_t>(row_tile)) +
+    sizeof(int) * static_cast<size_t>(row_tile);
   kodama_label_crossprod_accum_colmajor_float_kernel<<<sum_blocks, threads, shared, stream>>>(
     x_colmajor,
     labels,
@@ -342,9 +373,16 @@ void kodama_cuda_centered_label_crossprod_colmajor_float(
     p,
     n_classes
   );
+  kodama_label_crossprod_column_sums_float_kernel<<<(p + threads - 1) / threads, threads, 0, stream>>>(
+    s_colmajor,
+    x_sums,
+    p,
+    n_classes
+  );
   kodama_label_crossprod_center_colmajor_float_kernel<<<(s_total + threads - 1) / threads, threads, 0, stream>>>(
     s_colmajor,
     counts,
+    x_sums,
     n,
     p,
     n_classes
@@ -502,6 +540,20 @@ __global__ void kodama_lda_score_argmax_row_float_kernel(
   pred[row] = best + 1;
 }
 
+__global__ void kodama_transpose_pls_weights_float_kernel(
+  const float* column_major,
+  float* row_major,
+  int predictors,
+  int components
+) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = predictors * components;
+  if (idx >= total) return;
+  const int predictor = idx / components;
+  const int component = idx - predictor * components;
+  row_major[idx] = column_major[predictor + component * predictors];
+}
+
 void kodama_cuda_lda_label_sums_row_float(const float* t, const int* labels, int n, int kmax, int n_classes, float* sums, cudaStream_t stream) {
   const int threads = 256;
   const dim3 blocks(n_classes, kmax);
@@ -573,6 +625,24 @@ void kodama_cuda_lda_score_argmax_row_float(
   const int threads = 256;
   const int blocks = (n + threads - 1) / threads;
   kodama_lda_score_argmax_row_float_kernel<<<blocks, threads, 0, stream>>>(t, linear, constants, pred, n, kk, n_classes);
+}
+
+void kodama_cuda_transpose_pls_weights_float(
+  const float* column_major,
+  float* row_major,
+  int predictors,
+  int components,
+  cudaStream_t stream
+) {
+  const int threads = 256;
+  const int total = predictors * components;
+  const int blocks = (total + threads - 1) / threads;
+  kodama_transpose_pls_weights_float_kernel<<<blocks, threads, 0, stream>>>(
+    column_major,
+    row_major,
+    predictors,
+    components
+  );
 }
 
 }

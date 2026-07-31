@@ -46,6 +46,8 @@ The public library also provides:
 - label optimization: `CoreKNN` and `CorePLSLDA`;
 - complete KODAMA matrix construction from data or a supplied KNN graph;
 - explicit resident CUDA/Metal IVF indexes for repeated nearest-neighbor calls;
+- persistent CUDA/Metal KODAMA workspaces for fold matrices, classifier state,
+  projected labels, and the full-data graph across proposal cycles and `M` runs;
 - randomized PCA with float32 data and CPU, CUDA, and Metal entry points;
 - KNN graph construction, UMAP, openTSNE, and random-walk clustering;
 - thin R and Python bindings to the same C++ implementation.
@@ -54,6 +56,14 @@ Numerical matrices, PLS/LDA workspaces, and accelerator buffers use float32.
 Timing and summary statistics use double precision. Requested feasible PLS
 component counts are evaluated directly; the implementation does not search
 for an internally selected "best" component count.
+
+The package-owned CPU HNSW path uses `n_threads` for both graph construction
+and graph querying. It stores vectors and adjacency arrays contiguously,
+inserts nodes concurrently with per-node locking, evaluates expansion
+candidates in reusable batches, and schedules query rows in contiguous
+batches. The maintained quality test requires at least 0.99 recall against
+exact neighbors. See [backend validation](docs/backend-validation.md) for
+timing and race-detection evidence.
 
 ## Five-minute CPU build
 
@@ -169,6 +179,55 @@ plot(
 )
 ```
 
+The graph preparation step can also be called and reused explicitly:
+
+```r
+prepared <- KODAMA.graph(x, k = 30, backend = "cpu")
+fit_graph <- KODAMA.matrix(prepared, classifier = "knn", M = 4, Tcycle = 4)
+fit_graph_x <- KODAMA.matrix(
+  prepared,
+  raw.data = x,
+  classifier = "pls_lda",
+  M = 4,
+  Tcycle = 4
+)
+```
+
+`KODAMA.graph()` returns one KNN graph, backend-matched PCA starts for UMAP and
+openTSNE, metadata, and timings. It deliberately does not retain `x`.
+`KODAMA.matrix()` accepts this prepared object alone, the prepared object plus
+`raw.data`, a bare `indices`/`distances` graph, or a raw matrix. For graph-only
+PLS-LDA, self-tuning Laplacian features provide the rectangular input; supplying
+`raw.data` retains the ordinary data-input PLS-LDA path.
+
+With raw matrix input, `KODAMA.matrix()` implicitly performs the same graph
+preparation step. It constructs its full-data neighbor graph once, before the
+independent `M` searches, and returns that graph for direct reuse by
+`KODAMA.visualization()`. By default the same native matrix call also performs
+one backend-native float32 PCA and stores the separately scaled UMAP and
+openTSNE starts. Visualization therefore performs neither neighbor search nor
+PCA again when its backend matches the stored initialization. An explicit
+`init` takes precedence, followed by a backend-matched stored start. Supplying
+`raw.data = x` recomputes the start only when no compatible stored start is
+available. Graph-only spectral UMAP or random openTSNE initialization is used
+only when no matching raw-data start is available. The result fields
+`graph_builds` and `timing$visual_init_seconds` make this lifecycle observable.
+The C++ result owns only one graph buffer: final row compaction and KODAMA
+distance correction occur in place, then the graph is moved into `knn`.
+`knn_is_kodama_corrected` records whether correction was requested, and
+`graph_storage_bytes` reports retained C++ capacity. The former duplicate
+`base_knn` payload is no longer returned.
+
+CUDA and Metal upload the full-data graph once and keep it resident through
+all independent `M` runs. Each worker lane owns persistent landmark/fold,
+label, projection, PLS, LDA, and voting buffers. A selected landmark matrix
+and its fold layouts are refreshed once when a lane starts a new `M` run, then
+reused throughout its `Tcycle` proposals; label-dependent cross-products,
+weights, and predictions overwrite existing device buffers rather than
+allocating new ones. Only compact labels, predictions, accuracies, and the
+final corrected graph cross the device boundary in the inner optimization
+lifecycle.
+
 For a full analysis, use enough independent searches and proposal cycles to
 assess convergence. The release-validation configuration uses `M = 100` and
 `Tcycle = 100`; these values are much more expensive than the smoke test.
@@ -196,7 +255,7 @@ fit_pls <- KODAMA.matrix(
 | Run complete KODAMA | `KODAMA.matrix()` |
 | Run KODAMA from KNN indices and distances | `KODAMA.matrix.graph()` |
 | Compute float32 PCA | `KODAMA.pca()` |
-| Build a KNN/SNN graph | `KODAMA.graph()`, `makeSNNGraph()` |
+| Build a reusable graph plus PCA starts | `KODAMA.graph()`, `makeSNNGraph()` |
 | Compute UMAP or openTSNE | `KODAMA.visualization()` |
 | Cluster a graph or embedding | `KODAMA.clustering()` |
 | Inspect runtime by step | `KODAMA.timing()` |
@@ -341,15 +400,28 @@ manuscript/              JMLR manuscript sources and artifacts
 ## Implementation notes
 
 The CPU and CUDA UMAP/openTSNE implementations track fastEmbedR commit
-`c98b9ecd124d442f20f849ce1be7f5bd4c13d0db`. UMAP uses fuzzy graph weighting
+`ef064f2a13db0b28f257bcb25bd06fd031da6da6`. UMAP uses fuzzy graph weighting
 by default and retains symmetric binary graph weighting as an explicit
-compatibility mode. The openTSNE default perplexity is 30.
+compatibility mode. The openTSNE default perplexity is 30. A controlled CPU
+openTSNE comparison with identical neighbors, raw-data PCA initialization, and
+settings is numerically identical. UMAP uses the same fuzzy graph, optimizer
+equations, schedule, and initialization; later CPU coordinates need not be
+bitwise identical because kodama-cpp keeps the iterative state in float32,
+whereas the compared fastEmbedR R path stores its embedding in a double
+matrix. See [`docs/visualization-parity.md`](docs/visualization-parity.md).
 
 CUDA nearest-neighbor search is package-owned and provides exact and
 recall-tuned IVF-Flat paths. Metal provides exact search and an explicit
 IVF-Flat alternative. Both IVF builders keep assignments, centroid
 accumulation, empty-cluster repair, and inverted-list construction on the
 accelerator. No FAISS, cuVS, RAFT, or RMM headers or binaries are required.
+
+The KODAMA CUDA/Metal lifecycle also retains its full graph and per-worker
+classifier allocations across `M` runs. CUDA label-aware SIMPLS uses a
+dedicated persistent cuBLAS workspace per stream. Its float32 class
+cross-product uses fixed-order accumulation followed by separate column-sum
+and centering kernels, avoiding a read/write race while preserving the
+accepted SIMPLS formula.
 
 See [`docs/backend-validation.md`](docs/backend-validation.md) for backend
 acceptance results and [`docs/release-validation.md`](docs/release-validation.md)

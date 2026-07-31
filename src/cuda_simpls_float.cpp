@@ -148,6 +148,19 @@ struct FloatSimplsWorkspace {
     if (handle == nullptr) {
       check_cublas(cublasCreate(&handle), "cublasCreate(float SIMPLS)");
       check_cublas(cublasSetStream(handle, stream()), "cublasSetStream(float SIMPLS)");
+      dBlasWorkspace.ensure(4U * 1024U * 1024U / sizeof(float));
+      check_cublas(
+        cublasSetWorkspace(
+          handle,
+          dBlasWorkspace.data(),
+          4U * 1024U * 1024U
+        ),
+        "cublasSetWorkspace(float SIMPLS)"
+      );
+      check_cublas(
+        cublasSetAtomicsMode(handle, CUBLAS_ATOMICS_NOT_ALLOWED),
+        "cublasSetAtomicsMode(float SIMPLS)"
+      );
     }
     return handle;
   }
@@ -173,6 +186,7 @@ struct FloatSimplsWorkspace {
   curandGenerator_t rng_handle = nullptr;
   cudaStream_t stream_handle = nullptr;
   FloatDeviceArray dX;
+  FloatDeviceArray dBlasWorkspace;
   FloatDeviceArray dY;
   FloatDeviceArray dS;
   FloatDeviceArray dS0;
@@ -592,7 +606,9 @@ bool simpls_fit_cuda_float_fast_crossprod(
   float* qq_colmajor,
   const int* labels_1based = nullptr,
   const float* class_counts = nullptr,
-  const float* xtx_colmajor = nullptr
+  const float* xtx_colmajor = nullptr,
+  bool inputs_are_device_resident = false,
+  const float** rr_device = nullptr
 ) {
   try {
     FloatSimplsWorkspace& ws = g_float_workspace;
@@ -603,7 +619,7 @@ bool simpls_fit_cuda_float_fast_crossprod(
 
     const std::size_t x_size = static_cast<std::size_t>(n) * static_cast<std::size_t>(p);
     const std::size_t s_size = static_cast<std::size_t>(p) * static_cast<std::size_t>(m);
-    ws.dX.ensure(x_size);
+    if (!inputs_are_device_resident) ws.dX.ensure(x_size);
     ws.dA.ensure(s_size);
     ws.dA0.ensure(s_size);
     ws.dRR.ensure(static_cast<std::size_t>(p) * static_cast<std::size_t>(max_ncomp));
@@ -615,31 +631,41 @@ bool simpls_fit_cuda_float_fast_crossprod(
     ws.dRvec.ensure(static_cast<std::size_t>(p));
     ws.dVS.ensure(static_cast<std::size_t>(m));
     ws.dCoeff.ensure(static_cast<std::size_t>(std::max(max_ncomp, 1)));
-    if (xtx_colmajor != nullptr) {
+    if (xtx_colmajor != nullptr && !inputs_are_device_resident) {
       ws.dXtX.ensure(static_cast<std::size_t>(p) * static_cast<std::size_t>(p));
     }
     if (use_label_crossprod) {
       if (labels_1based == nullptr || class_counts == nullptr) return false;
-      ws.dLabels.ensure(static_cast<std::size_t>(n));
-      ws.dCounts.ensure(static_cast<std::size_t>(m));
+      if (!inputs_are_device_resident) {
+        ws.dLabels.ensure(static_cast<std::size_t>(n));
+        ws.dCounts.ensure(static_cast<std::size_t>(m));
+      }
       ws.dXsum.ensure(kodama_cuda_centered_label_crossprod_colmajor_float_scratch_size(n, p, m));
     }
 
-    check_cuda(cudaMemcpyAsync(ws.dX.data(), x_colmajor, sizeof(float) * x_size, cudaMemcpyHostToDevice, stream),
-               "cudaMemcpyAsync(float fast SIMPLS X)");
-    if (xtx_colmajor != nullptr) {
+    const float* d_x = inputs_are_device_resident ? x_colmajor : ws.dX.data();
+    const float* d_xtx = inputs_are_device_resident ? xtx_colmajor : ws.dXtX.data();
+    const int* d_labels = inputs_are_device_resident ? labels_1based : ws.dLabels.data();
+    const float* d_counts = inputs_are_device_resident ? class_counts : ws.dCounts.data();
+    if (!inputs_are_device_resident) {
+      check_cuda(cudaMemcpyAsync(ws.dX.data(), x_colmajor, sizeof(float) * x_size, cudaMemcpyHostToDevice, stream),
+                 "cudaMemcpyAsync(float fast SIMPLS X)");
+    }
+    if (xtx_colmajor != nullptr && !inputs_are_device_resident) {
       check_cuda(cudaMemcpyAsync(ws.dXtX.data(), xtx_colmajor, sizeof(float) * static_cast<std::size_t>(p) * static_cast<std::size_t>(p), cudaMemcpyHostToDevice, stream),
                  "cudaMemcpyAsync(float fast SIMPLS X'X)");
     }
     if (use_label_crossprod) {
-      check_cuda(cudaMemcpyAsync(ws.dLabels.data(), labels_1based, sizeof(int) * static_cast<std::size_t>(n), cudaMemcpyHostToDevice, stream),
-                 "cudaMemcpyAsync(float fast SIMPLS labels)");
-      check_cuda(cudaMemcpyAsync(ws.dCounts.data(), class_counts, sizeof(float) * static_cast<std::size_t>(m), cudaMemcpyHostToDevice, stream),
-                 "cudaMemcpyAsync(float fast SIMPLS class counts)");
+      if (!inputs_are_device_resident) {
+        check_cuda(cudaMemcpyAsync(ws.dLabels.data(), labels_1based, sizeof(int) * static_cast<std::size_t>(n), cudaMemcpyHostToDevice, stream),
+                   "cudaMemcpyAsync(float fast SIMPLS labels)");
+        check_cuda(cudaMemcpyAsync(ws.dCounts.data(), class_counts, sizeof(float) * static_cast<std::size_t>(m), cudaMemcpyHostToDevice, stream),
+                   "cudaMemcpyAsync(float fast SIMPLS class counts)");
+      }
       kodama_cuda_centered_label_crossprod_colmajor_float(
-        ws.dX.data(),
-        ws.dLabels.data(),
-        ws.dCounts.data(),
+        d_x,
+        d_labels,
+        d_counts,
         n,
         p,
         m,
@@ -688,6 +714,7 @@ bool simpls_fit_cuda_float_fast_crossprod(
         check_cublas(cublasScopy(blas, p, ws.dRvec.data(), 1, ws.dY.data(), 1), "cublasScopy(float fast SIMPLS rr warm start)");
       } else {
         check_curand(curandSetPseudoRandomGeneratorSeed(rng, static_cast<unsigned long long>(1 + a)), "curandSetPseudoRandomGeneratorSeed(float fast SIMPLS)");
+        check_curand(curandSetGeneratorOffset(rng, 0ULL), "curandSetGeneratorOffset(float fast SIMPLS)");
         check_curand(curandGenerateNormal(rng, ws.dY.data(), padded_random_elems_float(p, l), 0.0f, 1.0f), "curandGenerateNormal(float fast SIMPLS Y0)");
         if (has_rr_prev) {
           check_cublas(cublasScopy(blas, p, ws.dRvec.data(), 1, ws.dY.data(), 1), "cublasScopy(float fast SIMPLS rr warm start)");
@@ -742,8 +769,8 @@ bool simpls_fit_cuda_float_fast_crossprod(
         check_cublas(cublasScopy(blas, p, ws.dUblock.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(p), 1, ws.dRvec.data(), 1),
                      "cublasScopy(float fast SIMPLS r)");
       if (xtx_colmajor != nullptr) {
-        check_cublas(
-          cublasSgemv(blas, CUBLAS_OP_N, p, p, &one, ws.dXtX.data(), p, ws.dRvec.data(), 1, &zero, ws.dPvec.data(), 1),
+          check_cublas(
+          cublasSgemv(blas, CUBLAS_OP_N, p, p, &one, d_xtx, p, ws.dRvec.data(), 1, &zero, ws.dPvec.data(), 1),
           "cublasSgemv(float fast SIMPLS p=X'Xr)"
         );
           float tnorm2 = 0.0f;
@@ -754,7 +781,7 @@ bool simpls_fit_cuda_float_fast_crossprod(
           check_cublas(cublasSscal(blas, p, &inv_tnorm, ws.dPvec.data(), 1), "cublasSscal(float fast SIMPLS gram p)");
         } else {
           check_cublas(
-            cublasSgemv(blas, CUBLAS_OP_N, n, p, &one, ws.dX.data(), n, ws.dRvec.data(), 1, &zero, ws.dT.data(), 1),
+            cublasSgemv(blas, CUBLAS_OP_N, n, p, &one, d_x, n, ws.dRvec.data(), 1, &zero, ws.dT.data(), 1),
             "cublasSgemv(float fast SIMPLS t=Xr)"
           );
           float tnorm = 0.0f;
@@ -765,7 +792,7 @@ bool simpls_fit_cuda_float_fast_crossprod(
           check_cublas(cublasSscal(blas, p, &inv_tnorm, ws.dRvec.data(), 1), "cublasSscal(float fast SIMPLS r)");
 
           check_cublas(
-            cublasSgemv(blas, CUBLAS_OP_T, n, p, &one, ws.dX.data(), n, ws.dT.data(), 1, &zero, ws.dPvec.data(), 1),
+            cublasSgemv(blas, CUBLAS_OP_T, n, p, &one, d_x, n, ws.dT.data(), 1, &zero, ws.dPvec.data(), 1),
             "cublasSgemv(float fast SIMPLS p=X't)"
           );
         }
@@ -829,6 +856,7 @@ bool simpls_fit_cuda_float_fast_crossprod(
       check_cuda(cudaMemcpyAsync(qq_colmajor, ws.dQQ.data(), sizeof(float) * static_cast<std::size_t>(m) * static_cast<std::size_t>(max_ncomp), cudaMemcpyDeviceToHost, stream),
                  "cudaMemcpyAsync(float fast SIMPLS QQ)");
     }
+    if (rr_device != nullptr) *rr_device = ws.dRR.data();
     check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize(float fast SIMPLS output)");
     return true;
   } catch (...) {
@@ -929,6 +957,42 @@ extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels_gram(
     labels_1based,
     class_counts,
     xtx_colmajor
+  );
+}
+
+extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels_device(
+  const float* x_colmajor_device,
+  int n,
+  int p,
+  const float* xtx_colmajor_device,
+  const int* labels_1based_device,
+  const float* class_counts_device,
+  int m,
+  int max_components,
+  const float** rr_colmajor_device
+) {
+  using namespace kodama_fastpls_cuda;
+  if (!runtime_available()) return false;
+  if (n < 1 || p < 1 || m < 1 || max_components < 1) return false;
+  if (x_colmajor_device == nullptr || labels_1based_device == nullptr ||
+      class_counts_device == nullptr || rr_colmajor_device == nullptr) {
+    return false;
+  }
+  const int max_ncomp = std::min(max_components, std::min(p, std::max(1, n - 1)));
+  return simpls_fit_cuda_float_fast_crossprod(
+    x_colmajor_device,
+    n,
+    p,
+    nullptr,
+    m,
+    max_ncomp,
+    nullptr,
+    nullptr,
+    labels_1based_device,
+    class_counts_device,
+    xtx_colmajor_device,
+    true,
+    rr_colmajor_device
   );
 }
 

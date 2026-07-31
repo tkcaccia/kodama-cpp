@@ -236,7 +236,10 @@ int main(int argc, char** argv) {
   kodama::KNNOptions knn;
   knn.cv.folds = 5;
   knn.cv.seed = 7;
-  knn.cv.stratified = true;
+  const char* stratified_env = std::getenv("KODAMA_CV_STRATIFIED");
+  const bool stratified =
+    stratified_env == nullptr || std::string(stratified_env) != "0";
+  knn.cv.stratified = stratified;
   knn.k = 10;
   knn.metric = kodama::DistanceMetric::Cosine;
   knn.ivf_nlist = ivf_nlist;
@@ -246,7 +249,7 @@ int main(int argc, char** argv) {
   kodama::PLSOptions pls;
   pls.cv.folds = 5;
   pls.cv.seed = 7;
-  pls.cv.stratified = true;
+  pls.cv.stratified = stratified;
   pls.max_components = pls_max_components;
   pls.fixed_components = pls_max_components;
   pls.center = true;

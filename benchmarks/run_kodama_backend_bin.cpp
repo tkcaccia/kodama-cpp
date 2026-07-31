@@ -137,6 +137,12 @@ int main(int argc, char** argv) {
     options.backend = kodama::Backend::Metal;
     print_result("KODAMA_KNN", "metal", kodama::KODAMAMatrix_METAL(view, {}, {}, {}, options), labels);
   }
+#if defined(KODAMA_ENABLE_CUDA)
+  if (method_enabled("KODAMA_KNN_CUDA")) {
+    options.backend = kodama::Backend::CUDA;
+    print_result("KODAMA_KNN", "cuda", kodama::KODAMAMatrix_CUDA(view, {}, {}, {}, options), labels);
+  }
+#endif
 
   options.classifier = kodama::CoreClassifier::PLS_LDA;
   if (method_enabled("KODAMA_PLSLDA_CPU")) {
@@ -147,5 +153,11 @@ int main(int argc, char** argv) {
     options.backend = kodama::Backend::Metal;
     print_result("KODAMA_PLSLDA", "metal", kodama::KODAMAMatrix_METAL(view, {}, {}, {}, options), labels);
   }
+#if defined(KODAMA_ENABLE_CUDA)
+  if (method_enabled("KODAMA_PLSLDA_CUDA")) {
+    options.backend = kodama::Backend::CUDA;
+    print_result("KODAMA_PLSLDA", "cuda", kodama::KODAMAMatrix_CUDA(view, {}, {}, {}, options), labels);
+  }
+#endif
   return 0;
 }

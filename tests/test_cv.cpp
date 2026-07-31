@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -61,6 +62,118 @@ void check_constrained_folds(const std::vector<int>& constrain, const std::vecto
 
 void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
+}
+
+double exact_graph_recall(
+  const kodama::NeighborGraph& graph,
+  const std::vector<float>& data,
+  int rows,
+  int columns
+) {
+  const int k = graph.neighbors;
+  double hits = 0.0;
+  std::vector<std::pair<float, int>> exact;
+  exact.reserve(static_cast<std::size_t>(rows - 1));
+  for (int row = 0; row < rows; ++row) {
+    exact.clear();
+    const float* query =
+      data.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(columns);
+    for (int candidate = 0; candidate < rows; ++candidate) {
+      if (candidate == row) continue;
+      const float* point =
+        data.data() + static_cast<std::size_t>(candidate) * static_cast<std::size_t>(columns);
+      float distance = 0.0f;
+      for (int column = 0; column < columns; ++column) {
+        const float delta = query[column] - point[column];
+        distance += delta * delta;
+      }
+      exact.emplace_back(distance, candidate + 1);
+    }
+    std::partial_sort(
+      exact.begin(),
+      exact.begin() + k,
+      exact.end()
+    );
+    for (int rank = 0; rank < k; ++rank) {
+      const int observed =
+        graph.indices[static_cast<std::size_t>(row) * static_cast<std::size_t>(k) +
+                      static_cast<std::size_t>(rank)];
+      for (int expected_rank = 0; expected_rank < k; ++expected_rank) {
+        if (observed == exact[static_cast<std::size_t>(expected_rank)].second) {
+          hits += 1.0;
+          break;
+        }
+      }
+    }
+  }
+  return hits / static_cast<double>(rows * k);
+}
+
+void check_parallel_hnsw_graph() {
+  constexpr int rows = 600;
+  constexpr int columns = 24;
+  constexpr int neighbors = 20;
+  std::vector<float> data(static_cast<std::size_t>(rows) * columns);
+  std::mt19937 rng(107);
+  std::normal_distribution<float> noise(0.0f, 1.0f);
+  for (float& value : data) value = noise(rng);
+
+  const kodama::MatrixView view{
+    data.data(),
+    static_cast<std::size_t>(rows),
+    static_cast<std::size_t>(columns)
+  };
+  kodama::GraphClusterOptions options;
+  options.k = neighbors;
+  options.metric = kodama::DistanceMetric::Euclidean;
+  options.n_threads = 1;
+  const kodama::NeighborGraph serial = kodama::KODAMAKNNGraph_CPU(view, options);
+  options.n_threads = 4;
+  const kodama::NeighborGraph parallel = kodama::KODAMAKNNGraph_CPU(view, options);
+
+  for (const kodama::NeighborGraph* graph : {&serial, &parallel}) {
+    require(graph->neighbors == neighbors, "Native HNSW neighbor count mismatch.");
+    require(
+      graph->indices.size() == static_cast<std::size_t>(rows * neighbors),
+      "Native HNSW index size mismatch."
+    );
+    require(
+      graph->distances.size() == graph->indices.size(),
+      "Native HNSW distance size mismatch."
+    );
+    for (int row = 0; row < rows; ++row) {
+      float previous = -1.0f;
+      for (int rank = 0; rank < neighbors; ++rank) {
+        const std::size_t offset =
+          static_cast<std::size_t>(row) * neighbors + static_cast<std::size_t>(rank);
+        require(
+          graph->indices[offset] >= 1 && graph->indices[offset] <= rows,
+          "Native HNSW returned an invalid index."
+        );
+        require(
+          graph->indices[offset] != row + 1,
+          "Native HNSW returned a self-neighbor."
+        );
+        require(
+          std::isfinite(graph->distances[offset]),
+          "Native HNSW returned a non-finite distance."
+        );
+        require(
+          graph->distances[offset] + 1e-6f >= previous,
+          "Native HNSW distances are not ordered."
+        );
+        previous = graph->distances[offset];
+      }
+    }
+  }
+  require(
+    exact_graph_recall(serial, data, rows, columns) >= 0.99,
+    "Single-core native HNSW recall fell below 0.99."
+  );
+  require(
+    exact_graph_recall(parallel, data, rows, columns) >= 0.99,
+    "Parallel native HNSW recall fell below 0.99."
+  );
 }
 
 double direct_agreement(const std::vector<int>& a, const std::vector<int>& b) {
@@ -234,6 +347,76 @@ void check_spatial_grid_query_nearest() {
           "Spatial grid 3D base/query nearest distances mismatch.");
 }
 
+kodama::NeighborGraph reference_kodama_dissimilarity(
+  kodama::NeighborGraph graph,
+  const std::vector<int>& labels,
+  int runs,
+  int samples
+) {
+  for (int row = 0; row < samples; ++row) {
+    std::vector<std::pair<float, int>> corrected(
+      static_cast<std::size_t>(graph.neighbors)
+    );
+    const std::size_t row_offset =
+      static_cast<std::size_t>(row) * static_cast<std::size_t>(graph.neighbors);
+    for (int rank = 0; rank < graph.neighbors; ++rank) {
+      const std::size_t offset = row_offset + static_cast<std::size_t>(rank);
+      const int neighbor_one_based = graph.indices[offset];
+      const int neighbor = neighbor_one_based - 1;
+      float distance = graph.distances[offset];
+      if (
+        neighbor < 0 || neighbor >= samples ||
+        !std::isfinite(distance)
+      ) {
+        corrected[static_cast<std::size_t>(rank)] = {
+          std::numeric_limits<float>::infinity(),
+          neighbor_one_based
+        };
+        continue;
+      }
+      int same = 0;
+      int valid = 0;
+      for (int run = 0; run < runs; ++run) {
+        const std::size_t base =
+          static_cast<std::size_t>(run) * static_cast<std::size_t>(samples);
+        const int lhs = labels[base + static_cast<std::size_t>(row)];
+        const int rhs = labels[base + static_cast<std::size_t>(neighbor)];
+        if (lhs == 0 || rhs == 0) continue;
+        ++valid;
+        if (lhs == rhs) ++same;
+      }
+      if (same == 0 || valid == 0) {
+        distance = std::numeric_limits<float>::infinity();
+      } else {
+        const double agreement =
+          static_cast<double>(same) / static_cast<double>(valid);
+        distance = static_cast<float>(
+          (1.0 + static_cast<double>(distance)) /
+          (agreement * agreement)
+        );
+      }
+      corrected[static_cast<std::size_t>(rank)] = {
+        distance,
+        neighbor_one_based
+      };
+    }
+    std::stable_sort(
+      corrected.begin(),
+      corrected.end(),
+      [](const auto& left, const auto& right) {
+        if (left.first != right.first) return left.first < right.first;
+        return left.second < right.second;
+      }
+    );
+    for (int rank = 0; rank < graph.neighbors; ++rank) {
+      const std::size_t offset = row_offset + static_cast<std::size_t>(rank);
+      graph.distances[offset] = corrected[static_cast<std::size_t>(rank)].first;
+      graph.indices[offset] = corrected[static_cast<std::size_t>(rank)].second;
+    }
+  }
+  return graph;
+}
+
 void check_pca_cpu() {
   constexpr int n = 80;
   constexpr int p = 5;
@@ -313,6 +496,7 @@ void check_pca_cpu() {
 }  // namespace
 
 int main() {
+  check_parallel_hnsw_graph();
   check_spatial_grid_graph();
   check_spatial_grid_query_nearest();
   check_pca_cpu();
@@ -547,9 +731,55 @@ int main() {
   km_options.seed = 23;
   km_options.metric = kodama::DistanceMetric::Euclidean;
   km_options.classifier = kodama::CoreClassifier::KNN;
+  km_options.compute_visual_init = true;
   km_options.knn.k = 10;
   km_options.knn.n_threads = 1;
+  kodama::KODAMAGraphOptions prepared_graph_options;
+  prepared_graph_options.neighbors = 45;
+  prepared_graph_options.n_threads = km_options.n_threads;
+  prepared_graph_options.seed = km_options.seed;
+  prepared_graph_options.metric = km_options.metric;
+  prepared_graph_options.backend = kodama::Backend::CPU;
+  const kodama::KODAMAGraphResult prepared_graph =
+    kodama::KODAMAGraph_CPU(fview, prepared_graph_options);
+  require(prepared_graph.samples == d.n, "KODAMAGraph sample count mismatch.");
+  require(prepared_graph.dimensions == d.p, "KODAMAGraph dimension count mismatch.");
+  require(prepared_graph.graph_builds == 1, "KODAMAGraph should build exactly one graph.");
+  require(prepared_graph.knn.neighbors == 45, "KODAMAGraph neighbor count mismatch.");
+  require(prepared_graph.knn.indices.front() >= 1, "KODAMAGraph indices should be one-based.");
+  require(
+    prepared_graph.visual_init.umap.size() == static_cast<std::size_t>(d.n * 2) &&
+      prepared_graph.visual_init.opentsne.size() == static_cast<std::size_t>(d.n * 2),
+    "KODAMAGraph did not retain both PCA initializations."
+  );
   kodama::KODAMAMatrixResult km_res = kodama::KODAMAMatrix_CPU(fview, std::vector<int>(), std::vector<int>(), fixed, km_options);
+  const kodama::KODAMAMatrixResult km_prepared_data_res = kodama::KODAMAMatrix(
+    fview,
+    prepared_graph,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    km_options
+  );
+  require(km_prepared_data_res.graph_builds == 0, "Prepared KODAMA graph was rebuilt.");
+  require(km_prepared_data_res.has_visual_init, "Prepared PCA initialization was not reused.");
+  require(
+    km_prepared_data_res.res.size() == km_res.res.size(),
+    "Prepared-graph-plus-data KODAMA returned an invalid label matrix."
+  );
+  const kodama::KODAMAMatrixResult km_prepared_only_res = kodama::KODAMAMatrix(
+    prepared_graph,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    km_options
+  );
+  require(km_prepared_only_res.graph_builds == 0, "Graph-only KODAMA rebuilt its input graph.");
+  require(km_prepared_only_res.has_visual_init, "Graph-only KODAMA lost the prepared PCA initialization.");
+  require(
+    km_prepared_only_res.res.size() == static_cast<std::size_t>(km_options.runs * d.n),
+    "Graph-only KODAMA result label size mismatch."
+  );
   require(km_res.runs == km_options.runs, "KODAMAMatrix run count mismatch.");
   require(km_res.samples == d.n, "KODAMAMatrix sample count mismatch.");
   require(km_res.cycles == km_options.cycles, "KODAMAMatrix cycle count mismatch.");
@@ -557,6 +787,10 @@ int main() {
   require(km_res.v.size() == static_cast<std::size_t>(km_options.runs * km_options.cycles), "KODAMAMatrix trace size mismatch.");
   require(km_res.res.size() == static_cast<std::size_t>(km_options.runs * d.n), "KODAMAMatrix result label size mismatch.");
   require(km_res.res_constrain.size() == static_cast<std::size_t>(km_options.runs * d.n), "KODAMAMatrix constrain size mismatch.");
+  require(km_res.graph_builds == 1, "KODAMAMatrix should build the global graph exactly once for all M runs.");
+  require(km_res.has_visual_init, "KODAMAMatrix did not retain the requested visualization initialization.");
+  require(km_res.visual_init.umap.size() == static_cast<std::size_t>(d.n * 2), "KODAMAMatrix UMAP initialization size mismatch.");
+  require(km_res.visual_init.opentsne.size() == static_cast<std::size_t>(d.n * 2), "KODAMAMatrix openTSNE initialization size mismatch.");
   require(km_res.effective_landmarks == km_options.landmarks, "KODAMAMatrix effective landmark count mismatch.");
   require(km_res.landmark_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix landmark timing size mismatch.");
   require(km_res.landmark_grid_bins == std::vector<int>(static_cast<std::size_t>(km_options.runs), 0), "Nonspatial KODAMAMatrix unexpectedly used a spatial grid.");
@@ -568,6 +802,59 @@ int main() {
   require(km_res.knn.indices.size() == static_cast<std::size_t>(d.n * km_res.knn.neighbors), "KODAMAMatrix neighbor index size mismatch.");
   require(km_res.knn.distances.size() == km_res.knn.indices.size(), "KODAMAMatrix neighbor distance size mismatch.");
   require(km_res.knn.indices.front() >= 1, "KODAMAMatrix neighbor indices should be one-based for R compatibility.");
+  require(km_res.knn_is_kodama_corrected, "KODAMAMatrix did not mark its corrected graph.");
+  require(
+    km_res.graph_storage_bytes >=
+      km_res.knn.indices.size() * sizeof(int) +
+      km_res.knn.distances.size() * sizeof(float),
+    "KODAMAMatrix graph storage accounting mismatch."
+  );
+
+  kodama::KODAMAMatrixOptions km_base_options = km_options;
+  km_base_options.apply_kodama_dissimilarity = false;
+  km_base_options.compute_visual_init = false;
+  kodama::KODAMAMatrixResult km_base_res = kodama::KODAMAMatrix(
+    fview,
+    prepared_graph,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    km_base_options
+  );
+  require(
+    km_base_res.res == km_prepared_data_res.res,
+    "Deferring graph correction changed the optimized KODAMA labels."
+  );
+  require(
+    !km_base_res.knn_is_kodama_corrected,
+    "Deferred KODAMA graph correction was incorrectly marked as complete."
+  );
+  const kodama::NeighborGraph lazy_reference = reference_kodama_dissimilarity(
+    km_base_res.knn,
+    km_base_res.res,
+    km_base_res.runs,
+    km_base_res.samples
+  );
+  const int* lazy_indices_storage = km_base_res.knn.indices.data();
+  const float* lazy_distances_storage = km_base_res.knn.distances.data();
+  kodama::KODAMADissimilarityInPlace(
+    km_base_res.knn,
+    km_base_res.res,
+    km_base_res.runs,
+    km_base_res.samples,
+    kodama::Backend::CPU,
+    km_base_options.n_threads
+  );
+  require(
+    lazy_indices_storage == km_base_res.knn.indices.data() &&
+      lazy_distances_storage == km_base_res.knn.distances.data(),
+    "Lazy KODAMA correction reallocated graph storage."
+  );
+  require(
+    km_base_res.knn.indices == lazy_reference.indices &&
+      km_base_res.knn.distances == lazy_reference.distances,
+    "Lazy in-place KODAMA correction differs from the mathematical reference."
+  );
 
   kodama::KODAMAMatrixOptions km_spatial_options = km_options;
   km_spatial_options.runs = 1;
@@ -615,7 +902,46 @@ int main() {
   require(umap_res.samples == d.n, "CPU UMAP sample count mismatch.");
   require(umap_res.components == 2, "CPU UMAP component count mismatch.");
   require(umap_res.embedding.size() == static_cast<std::size_t>(d.n * 2), "CPU UMAP embedding size mismatch.");
+  require(umap_res.initialization == "graph_spectral", "CPU UMAP graph fallback was not reported.");
   for (float value : umap_res.embedding) require(std::isfinite(value), "CPU UMAP produced a non-finite value.");
+
+  kodama::VisualizationInitOptions visual_init_options;
+  visual_init_options.n_components = 2;
+  visual_init_options.n_threads = 2;
+  visual_init_options.seed = 9;
+  visual_init_options.backend = kodama::Backend::CPU;
+  const kodama::VisualizationInitResult visual_init =
+    kodama::KODAMAVisualizationPCAInit(fview, visual_init_options);
+  require(visual_init.samples == d.n, "Visualization PCA initialization sample count mismatch.");
+  require(visual_init.components == 2, "Visualization PCA initialization component count mismatch.");
+  require(visual_init.backend == kodama::Backend::CPU, "Visualization PCA initialization backend mismatch.");
+  require(visual_init.umap.size() == static_cast<std::size_t>(d.n * 2), "UMAP PCA initialization size mismatch.");
+  require(visual_init.opentsne.size() == static_cast<std::size_t>(d.n * 2), "openTSNE PCA initialization size mismatch.");
+  float max_tsne_sd = 0.0f;
+  for (int component = 0; component < 2; ++component) {
+    float mean = 0.0f;
+    for (int row = 0; row < d.n; ++row) {
+      mean += visual_init.opentsne[static_cast<std::size_t>(row) * 2u + component];
+    }
+    mean /= static_cast<float>(d.n);
+    require(std::abs(mean) < 1e-6f, "openTSNE PCA initialization is not centered.");
+    float sum_squares = 0.0f;
+    for (int row = 0; row < d.n; ++row) {
+      const float value =
+        visual_init.opentsne[static_cast<std::size_t>(row) * 2u + component] - mean;
+      sum_squares += value * value;
+    }
+    max_tsne_sd = std::max(
+      max_tsne_sd,
+      std::sqrt(sum_squares / static_cast<float>(d.n - 1))
+    );
+  }
+  require(std::abs(max_tsne_sd - 1.0e-4f) < 1.0e-6f, "openTSNE PCA initialization scale mismatch.");
+
+  const kodama::EmbeddingResult raw_umap_res =
+    kodama::KODAMAUMAP_CPU(km_res.knn, fview, umap_options);
+  require(raw_umap_res.initialization == "raw_pca", "Raw-data UMAP initialization was not used.");
+  require(raw_umap_res.initialization_backend == kodama::Backend::CPU, "Raw-data UMAP initialization backend mismatch.");
 
   kodama::OpenTSNEOptions tsne_options;
   tsne_options.n_neighbors = std::min(12, km_res.knn.neighbors);
@@ -628,7 +954,12 @@ int main() {
   require(tsne_res.samples == d.n, "CPU openTSNE sample count mismatch.");
   require(tsne_res.components == 2, "CPU openTSNE component count mismatch.");
   require(tsne_res.embedding.size() == static_cast<std::size_t>(d.n * 2), "CPU openTSNE embedding size mismatch.");
+  require(tsne_res.initialization == "random", "CPU openTSNE graph fallback was not reported.");
   for (float value : tsne_res.embedding) require(std::isfinite(value), "CPU openTSNE produced a non-finite value.");
+  const kodama::EmbeddingResult raw_tsne_res =
+    kodama::KODAMAOpenTSNE_CPU(km_res.knn, fview, tsne_options);
+  require(raw_tsne_res.initialization == "raw_pca", "Raw-data openTSNE initialization was not used.");
+  require(raw_tsne_res.initialization_backend == kodama::Backend::CPU, "Raw-data openTSNE initialization backend mismatch.");
 
   kodama::KODAMAMatrixOptions km_pls_options = km_options;
   km_pls_options.classifier = kodama::CoreClassifier::PLS_LDA;
@@ -648,11 +979,11 @@ int main() {
   km_graph_options.runs = 1;
   km_graph_options.cycles = 2;
   km_graph_options.landmarks = 40;
-  km_graph_options.graph_neighbors = std::min(20, km_res.base_knn.neighbors);
+  km_graph_options.graph_neighbors = std::min(20, km_base_res.knn.neighbors);
   km_graph_options.knn.k = 5;
   km_graph_options.apply_kodama_dissimilarity = true;
   kodama::KODAMAMatrixResult km_graph_knn_res = kodama::KODAMAMatrixFromGraph_CPU(
-    km_res.base_knn,
+    km_base_res.knn,
     d.n,
     std::vector<int>(),
     std::vector<int>(),
@@ -667,7 +998,7 @@ int main() {
 
   kodama::KODAMAMatrixResult km_graph_data_knn_res = kodama::KODAMAMatrixFromGraphData_CPU(
     fview,
-    km_res.base_knn,
+    km_base_res.knn,
     std::vector<int>(),
     std::vector<int>(),
     fixed,
@@ -684,7 +1015,7 @@ int main() {
   km_graph_pls_options.graph_feature_components = 5;
   km_graph_pls_options.graph_feature_steps = 2;
   kodama::KODAMAMatrixResult km_graph_pls_res = kodama::KODAMAMatrixFromGraph_CPU(
-    km_res.base_knn,
+    km_base_res.knn,
     d.n,
     std::vector<int>(),
     std::vector<int>(),
@@ -695,7 +1026,7 @@ int main() {
   require(km_graph_pls_res.res.size() == static_cast<std::size_t>(d.n), "Graph-input PLS-LDA result size mismatch.");
   require(km_graph_pls_res.graph_feature_seconds >= 0.0, "Graph-input PLS-LDA feature timing missing.");
 
-  std::vector<float> graph_laplacian_features = kodama::KODAMAGraphFeatures_CPU(km_res.base_knn, d.n, [&]() {
+  std::vector<float> graph_laplacian_features = kodama::KODAMAGraphFeatures_CPU(km_base_res.knn, d.n, [&]() {
     kodama::KODAMAMatrixOptions opts = km_graph_pls_options;
     opts.graph_feature_components = 4;
     opts.graph_feature_steps = 4;
@@ -726,21 +1057,40 @@ int main() {
     );
   }
 
+  kodama::VisualizationInitOptions cuda_visual_init_options;
+  cuda_visual_init_options.n_components = 2;
+  cuda_visual_init_options.n_threads = 1;
+  cuda_visual_init_options.seed = 13;
+  cuda_visual_init_options.backend = kodama::Backend::CUDA;
+  const kodama::VisualizationInitResult cuda_visual_init =
+    kodama::KODAMAVisualizationPCAInit(fview, cuda_visual_init_options);
+  require(cuda_visual_init.backend == kodama::Backend::CUDA,
+          "CUDA visualization initialization backend metadata mismatch.");
+  require(cuda_visual_init.umap.size() == static_cast<std::size_t>(d.n * 2) &&
+          cuda_visual_init.opentsne.size() == static_cast<std::size_t>(d.n * 2),
+          "CUDA visualization initialization size mismatch.");
+
   const kodama::EmbeddingResult cuda_umap = kodama::KODAMAUMAP_CUDA(
-    km_res.knn, umap_options
+    km_res.knn, fview, umap_options
   );
   require(cuda_umap.backend == kodama::Backend::CUDA &&
           cuda_umap.embedding.size() == static_cast<std::size_t>(d.n * 2),
           "CUDA UMAP smoke test failed.");
+  require(cuda_umap.initialization == "raw_pca" &&
+          cuda_umap.initialization_backend == kodama::Backend::CUDA,
+          "CUDA raw-data UMAP initialization metadata mismatch.");
   for (const float value : cuda_umap.embedding) {
     require(std::isfinite(value), "CUDA UMAP produced a non-finite value.");
   }
   const kodama::EmbeddingResult cuda_tsne = kodama::KODAMAOpenTSNE_CUDA(
-    km_res.knn, tsne_options
+    km_res.knn, fview, tsne_options
   );
   require(cuda_tsne.backend == kodama::Backend::CUDA &&
           cuda_tsne.embedding.size() == static_cast<std::size_t>(d.n * 2),
           "CUDA openTSNE smoke test failed.");
+  require(cuda_tsne.initialization == "raw_pca" &&
+          cuda_tsne.initialization_backend == kodama::Backend::CUDA,
+          "CUDA raw-data openTSNE initialization metadata mismatch.");
   for (const float value : cuda_tsne.embedding) {
     require(std::isfinite(value), "CUDA openTSNE produced a non-finite value.");
   }
@@ -856,6 +1206,55 @@ int main() {
   require(cuda_km_res.effective_landmarks == cuda_km_options.landmarks, "CUDA KODAMAMatrix effective landmark count mismatch.");
   require(cuda_km_res.landmark_occupied_strata == std::vector<int>{cuda_km_options.splitting}, "CUDA nonspatial landmark stratum count mismatch.");
   require(cuda_km_res.landmark_represented_strata == std::vector<int>{cuda_km_options.splitting}, "CUDA nonspatial landmark coverage mismatch.");
+
+  const kodama::KODAMAMatrixResult cuda_km_repeat =
+    kodama::KODAMAMatrix_CUDA(
+      fview,
+      std::vector<int>(),
+      std::vector<int>(),
+      fixed,
+      cuda_km_options
+    );
+  require(
+    cuda_km_res.res == cuda_km_repeat.res,
+    "Resident CUDA KODAMA KNN is not repeatable."
+  );
+  require(
+    cuda_km_res.knn.indices == cuda_km_repeat.knn.indices,
+    "Resident CUDA KODAMA KNN graph ordering is not repeatable."
+  );
+  require(
+    cuda_km_res.knn.distances == cuda_km_repeat.knn.distances,
+    "Resident CUDA KODAMA KNN graph distances are not repeatable."
+  );
+
+  kodama::KODAMAMatrixOptions cuda_pls_matrix_options = cuda_km_options;
+  cuda_pls_matrix_options.classifier = kodama::CoreClassifier::PLS_LDA;
+  cuda_pls_matrix_options.components = 3;
+  const kodama::KODAMAMatrixResult cuda_pls_matrix =
+    kodama::KODAMAMatrix_CUDA(
+      fview,
+      std::vector<int>(),
+      std::vector<int>(),
+      fixed,
+      cuda_pls_matrix_options
+    );
+  const kodama::KODAMAMatrixResult cuda_pls_matrix_repeat =
+    kodama::KODAMAMatrix_CUDA(
+      fview,
+      std::vector<int>(),
+      std::vector<int>(),
+      fixed,
+      cuda_pls_matrix_options
+    );
+  require(
+    cuda_pls_matrix.res == cuda_pls_matrix_repeat.res,
+    "Resident CUDA KODAMA PLS-LDA is not repeatable."
+  );
+  require(
+    cuda_pls_matrix.knn.indices == cuda_pls_matrix_repeat.knn.indices,
+    "Resident CUDA KODAMA PLS-LDA graph ordering is not repeatable."
+  );
 
   kodama::KODAMAMatrixOptions cuda_spatial_options = km_spatial_options;
   cuda_spatial_options.backend = kodama::Backend::CUDA;

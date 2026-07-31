@@ -58,6 +58,14 @@ pybind11_add_module(_core MODULE src/kodama_cpp_python/bindings.cpp)
 target_compile_features(_core PRIVATE cxx_std_17)
 target_link_libraries(_core PRIVATE kodama::kodama_cpp ${KODAMA_CPP_RESOLVED_EXTRA_LIBS} ${KODAMA_CPP_EXTRA_LIBS})
 if(APPLE)
+  find_library(KODAMA_PY_METAL_FRAMEWORK Metal REQUIRED)
+  find_library(KODAMA_PY_MPS_FRAMEWORK MetalPerformanceShaders REQUIRED)
+  find_library(KODAMA_PY_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  target_link_libraries(_core PRIVATE
+    ${KODAMA_PY_METAL_FRAMEWORK}
+    ${KODAMA_PY_MPS_FRAMEWORK}
+    ${KODAMA_PY_FOUNDATION_FRAMEWORK}
+  )
   target_link_options(_core PRIVATE
     "-Wl,-rpath,/opt/homebrew/opt/libomp/lib"
     "-Wl,-rpath,/opt/homebrew/opt/llvm/lib"

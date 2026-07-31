@@ -12,6 +12,28 @@ The default CPU KNN path no longer requires FAISS. On MetRef (873 samples,
 0.827033. The dependency-free single-thread build had a five-run median of
 11.145 s.
 
+HNSW construction now completes a deterministic connected base seed of
+`min(n, max(n_threads + 1, 2 * m_hnsw + 1))` points, then inserts the
+remaining nodes concurrently with per-node locking. It computes candidate
+distances in reusable batches, caches reciprocal-edge distances during
+construction, and queries contiguous row batches in parallel. Vectors,
+adjacency lists, counts, and temporary build distances use flat
+float32/integer storage. On an Apple M3, the maintained synthetic
+4000-by-32, `k=30` graph benchmark produced these three-run medians:
+
+| Implementation | Threads | Seconds | Quality |
+| --- | ---: | ---: | --- |
+| Previous serial-insertion path | 4 | 7.248 | exact-reference recall 1.000 in the recorded run |
+| Parallel construction and query | 1 | 6.722 | reference |
+| Parallel construction and query | 4 | 1.791 | median overlap with one-thread graph 0.99966 |
+
+The accepted path therefore scales by 3.75x from one to four threads and is
+4.05x faster than the previous four-thread implementation. Across 100
+repeated four-thread builds of a 600-by-24 problem with `k=20`, minimum and
+mean brute-force recall were 0.99975 and 0.99987. The CPU regression test
+requires both one-thread and four-thread recall of at least 0.99 against
+brute-force neighbors, and the complete CPU suite passes ThreadSanitizer.
+
 ### Native Apple Metal exact KNN
 
 On the same MetRef test, Metal exact KNN reproduced accuracy 0.827033 with a
@@ -32,6 +54,45 @@ The Metal device, command queue, compiled library, and pipeline states are
 created once. Each SIMPLS component encodes `Xw` and `X'Xw` into one command
 buffer. This removes one synchronization per component without changing the
 SIMPLS equations; parity tests remained unchanged.
+
+### KODAMA-resident CUDA and Metal state
+
+The complete KODAMA accelerator lifecycle now owns one resident full-data
+graph and one scratch lane per concurrent `M` worker. A lane retains
+landmark/fold matrices, compact labels, projected labels, KNN voting arrays,
+PLS weights, cross-products, latent projections, and LDA workspaces.
+Landmark membership and fold contents change between independent runs, so
+their existing allocations are refreshed once per `M`; they are not
+reallocated or retransferred for every proposal cycle. Graph projection and
+final all-run dissimilarity correction execute against the same resident graph
+and download only the final corrected rows.
+
+CUDA label-aware `X'Y` originally centered class sums by reading and writing
+the same matrix in one kernel. A two-kernel column-sum/centering sequence
+removes that race. Class accumulation and tile reduction use fixed row order,
+the random generator offset is reset with its seed, and every SIMPLS stream
+owns a persistent cuBLAS workspace. On the five MetRef folds, resident and
+ordinary fits and two repeated ordinary fits produced bitwise-identical
+float32 PLS weights after this correction.
+
+The following single paired engineering runs compare the former transfer path
+with the now-default resident path. They are lifecycle checks rather than a
+multi-dataset performance claim.
+
+| Dataset | Backend | Classifier | M / Tcycle | Transfer (s) | Resident (s) | Speedup | Output |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| MetRef | CUDA | KNN | 10 / 10 | 0.4647 | 0.4464 | 1.04x | exact |
+| MetRef | CUDA | PLS-LDA | 10 / 10 | 1.5000 | 1.4418 | 1.04x | exact |
+| Br8100 | CUDA | KNN | 10 / 10 | 1.0995 | 1.1082 | 0.99x | exact |
+| Br8100 | CUDA | PLS-LDA | 10 / 10 | 1.9756 | 1.8044 | 1.09x | exact |
+| Br8100 | CUDA | PLS-LDA | 1 / 100 | 3.5861 | 3.2451 | 1.11x | exact |
+| MetRef | Metal | KNN | 10 / 10 | 0.2079 | 0.1820 | 1.14x | exact |
+| MetRef | Metal | PLS-LDA | 10 / 10 | 9.2716 | 8.9736 | 1.03x | exact |
+
+Raw rows are retained in
+`benchmarks/device_residency_20260731.csv`. The neutral Br8100 KNN row is
+reported deliberately: at this scale its search and stochastic orchestration
+dominate the saved transfers.
 
 ### Package-owned CUDA exact/IVF KNN and k-means
 
@@ -130,6 +191,8 @@ by this implementation.
 
 ## Regression Suites
 
+- macOS CPU ThreadSanitizer: the complete C++ suite passed with parallel HNSW
+  construction and querying enabled.
 - macOS CPU without Metal/OpenMP: both C++ and float32 smoke suites passed.
 - macOS Metal without OpenMP: Metal, C++, and float32 smoke suites passed.
 - Linux CUDA 13 on chiamaka, without FAISS/cuVS/RAFT/RMM: both C++ and float32

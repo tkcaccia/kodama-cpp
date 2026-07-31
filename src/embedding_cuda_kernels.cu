@@ -4554,17 +4554,21 @@ int fastembedr_cuda_opentsne_fft_from_knn_impl(const int* indices,
     return 0;
   };
 
-  auto capture_iteration = [&](float current_exaggeration,
-                               float current_momentum,
-                               float current_learning_rate,
-                               CudaGraphExecOwner& target) -> int {
+  auto capture_iteration_chunk = [&](float current_exaggeration,
+                                     float current_momentum,
+                                     float current_learning_rate,
+                                     int repetitions,
+                                     CudaGraphExecOwner& target) -> int {
+    if (repetitions < 1) return 1;
     cudaGraph_t graph = nullptr;
     cudaError_t code = cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     if (code != cudaSuccess) return 1;
-    if (encode_iteration(current_exaggeration, current_momentum, current_learning_rate, false)) {
-      cudaStreamEndCapture(stream, &graph);
-      if (graph != nullptr) cudaGraphDestroy(graph);
-      return 1;
+    for (int repetition = 0; repetition < repetitions; ++repetition) {
+      if (encode_iteration(current_exaggeration, current_momentum, current_learning_rate, false)) {
+        cudaStreamEndCapture(stream, &graph);
+        if (graph != nullptr) cudaGraphDestroy(graph);
+        return 1;
+      }
     }
     code = cudaStreamEndCapture(stream, &graph);
     if (code != cudaSuccess || graph == nullptr) {
@@ -4586,36 +4590,75 @@ int fastembedr_cuda_opentsne_fft_from_knn_impl(const int* indices,
   const float normal_learning_rate = learning_rate_auto ?
     static_cast<float>(n) / normal_exaggeration :
     learning_rate;
+  constexpr int graph_chunk_limit = 25;
+  const int early_graph_iterations = std::min(graph_chunk_limit, early_exaggeration_iter);
+  const int normal_graph_iterations = std::min(graph_chunk_limit, n_iter);
+  const int early_graph_launches = early_graph_iterations > 0 ?
+    early_exaggeration_iter / early_graph_iterations : 0;
+  const int normal_graph_launches = normal_graph_iterations > 0 ?
+    n_iter / normal_graph_iterations : 0;
+  const int early_tail_iterations = early_graph_iterations > 0 ?
+    early_exaggeration_iter % early_graph_iterations : 0;
+  const int normal_tail_iterations = normal_graph_iterations > 0 ?
+    n_iter % normal_graph_iterations : 0;
   bool used_graph_capture = false;
   CudaGraphExecOwner early_graph;
+  CudaGraphExecOwner early_tail_graph;
   CudaGraphExecOwner normal_graph;
+  CudaGraphExecOwner normal_tail_graph;
   if (cuda_graph_capture_enabled() && total_iter > 1) {
     bool capture_ok = true;
     if (early_exaggeration_iter > 0) {
-      capture_ok = capture_iteration(
-        early_exaggeration, initial_momentum, early_learning_rate, early_graph
+      capture_ok = capture_iteration_chunk(
+        early_exaggeration, initial_momentum, early_learning_rate,
+        early_graph_iterations, early_graph
       ) == 0;
+      if (capture_ok && early_tail_iterations > 0) {
+        capture_ok = capture_iteration_chunk(
+          early_exaggeration, initial_momentum, early_learning_rate,
+          early_tail_iterations, early_tail_graph
+        ) == 0;
+      }
     }
     if (capture_ok && n_iter > 0) {
-      capture_ok = capture_iteration(
-        normal_exaggeration, final_momentum, normal_learning_rate, normal_graph
+      capture_ok = capture_iteration_chunk(
+        normal_exaggeration, final_momentum, normal_learning_rate,
+        normal_graph_iterations, normal_graph
       ) == 0;
+      if (capture_ok && normal_tail_iterations > 0) {
+        capture_ok = capture_iteration_chunk(
+          normal_exaggeration, final_momentum, normal_learning_rate,
+          normal_tail_iterations, normal_tail_graph
+        ) == 0;
+      }
     }
     if (capture_ok) {
       used_graph_capture = true;
-      for (int iter = 0; iter < early_exaggeration_iter; ++iter) {
+      for (int launch = 0; launch < early_graph_launches; ++launch) {
         if (check_cuda(cudaGraphLaunch(early_graph.get(), stream),
-                       "cudaGraphLaunch(opentsne early iteration)")) {
+                       "cudaGraphLaunch(opentsne early chunk)")) {
           cleanup();
           return 1;
         }
       }
-      for (int iter = 0; iter < n_iter; ++iter) {
+      if (early_tail_iterations > 0 &&
+          check_cuda(cudaGraphLaunch(early_tail_graph.get(), stream),
+                     "cudaGraphLaunch(opentsne early tail)")) {
+        cleanup();
+        return 1;
+      }
+      for (int launch = 0; launch < normal_graph_launches; ++launch) {
         if (check_cuda(cudaGraphLaunch(normal_graph.get(), stream),
-                       "cudaGraphLaunch(opentsne normal iteration)")) {
+                       "cudaGraphLaunch(opentsne normal chunk)")) {
           cleanup();
           return 1;
         }
+      }
+      if (normal_tail_iterations > 0 &&
+          check_cuda(cudaGraphLaunch(normal_tail_graph.get(), stream),
+                     "cudaGraphLaunch(opentsne normal tail)")) {
+        cleanup();
+        return 1;
       }
     }
   }

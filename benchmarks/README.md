@@ -106,3 +106,43 @@ The backend benchmark should compare:
 
 External FAISS/cuVS results may be reported as historical baselines, but are
 not build dependencies of the benchmarked library.
+
+Build and run the maintained native-backend microbenchmark with:
+
+```bash
+cmake --build build --target kodama_native_backend_benchmark --parallel
+./build/kodama_native_backend_benchmark
+```
+
+The graph rows report native HNSW with one and four threads, overlap between
+those approximate graphs, and exact-neighbor recall when Metal is available.
+The measurements used for the 2026-07-31 parallel-HNSW validation are retained
+in `native_hnsw_parallel_20260731.csv`.
+
+## Graph-storage lifecycle
+
+Build the single-owner graph benchmark with:
+
+```bash
+cmake --build build --target kodama_graph_storage_lifecycle --parallel
+/usr/bin/time -v ./build/kodama_graph_storage_lifecycle single 1000021 100
+```
+
+Use mode `legacy` to reproduce the former simultaneous `global_graph`,
+`result.knn`, and `result.base_knn` allocations. On chiamaka, the flow18-sized
+case (`n=1,000,021`, `k=100`) reduced retained graph capacity from
+2,408,050,568 to 808,016,968 bytes and maximum RSS from 2,354,304 to
+791,808 KiB. The graph ownership/copy lifecycle fell from 0.561 to 0.059
+seconds; complete process wall time, including graph creation and the
+deliberate 500 ms RSS observation hold, fell from 1.60 to 1.07 seconds. Raw
+results are retained in `graph_storage_lifecycle_flow18_20260731.csv`.
+
+## Device-resident KODAMA lifecycle
+
+`device_residency_20260731.csv` records paired development measurements made
+before removal of the legacy transfer switch. The default CUDA/Metal path now
+uploads the full-data graph once and reuses per-worker landmark/fold,
+classifier, projection, and voting allocations across `Tcycle` and `M`.
+The CSV includes both positive and neutral rows and records whether CV
+accuracy, ARI, and class counts matched. These single pairs validate the
+systems change; use the release benchmark protocol for performance claims.

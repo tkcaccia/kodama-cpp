@@ -47,13 +47,18 @@ TOKENS = {
 
 
 AUTHORS = [
-    ("Moussa Kassim", "1,2", "moussa.kassim@icgeb.org"),
-    ("Martin Ocharo", "1,2", "martin.ocharo@icgeb.org"),
+    ("Moussa Kassim", "1,2,*", "moussa.kassim@icgeb.org"),
+    ("Martin Ocharo", "1,2,*", "martin.ocharo@icgeb.org"),
     ("Dalia Ahmed", "1", "dalia.ahmed@icgeb.org"),
     ("Dupe Ojo", "1", "dupe.ojo@icgeb.org"),
     ("Alessia Vignoli", "3,4", "vignoli@cerm.unifi.it"),
-    ("Leonardo Tenori", "3,4", "tenori@cerm.unifi.it"),
-    ("Stefano Cacciatore", "1,2", "stefano.cacciatore@icgeb.org"),
+    ("Leonardo Tenori", "3,4,†", "tenori@cerm.unifi.it"),
+    ("Stefano Cacciatore", "1,2,†", "stefano.cacciatore@icgeb.org"),
+]
+
+AUTHOR_NOTES = [
+    ("*", "Moussa Kassim and Martin Ocharo contributed equally."),
+    ("†", "Leonardo Tenori and Stefano Cacciatore are co-corresponding authors."),
 ]
 
 AFFILIATIONS = [
@@ -79,25 +84,21 @@ AFFILIATIONS = [
 
 ABSTRACT = (
     "KODAMA searches for latent structure by maximizing the cross-validated predictability of an "
-    "evolving label vector. We present kodama-cpp, a standalone C++17 implementation that preserves "
-    "this objective while reformulating its numerical execution for multicore CPU, NVIDIA CUDA, and "
-    "Apple Metal systems. The novelty is not a replacement objective: it is an accelerator-native "
-    "software design in which one typed core owns float32 data, fold assignments, evolving labels, "
-    "classifier workspaces, and graph outputs instead of repeatedly crossing an R-package boundary. "
-    "The CUDA backend provides package-owned exact and recall-tuned IVF-Flat nearest-neighbor search, "
-    "device-side IVF construction, explicit resident indexes, GPU k-means, label-aware SIMPLS "
-    "cross-products, reusable device workspaces, and latent-space LDA. "
-    "The Metal backend provides native exact and IVF-Flat search, device-side IVF construction, "
-    "explicit resident indexes, GPU k-means, and MPS-assisted SIMPLS "
-    "projection while retaining the same KNN and PLS-LDA contracts. KODAMA runs remain independent, "
-    "requested feasible PLS component counts are evaluated directly, and unavailable accelerators "
-    "raise errors rather than silently executing a CPU substitute. The resulting library exposes "
-    "KNN and PLS-LDA cross-validation, label optimization, KODAMA matrix construction from data or "
-    "supplied neighbor graphs, float32 randomized PCA, and visualization primitives through "
-    "wrapper-independent APIs. We "
-    "validate mathematical parity, backend identity, runtime, memory behavior, and external-label "
-    "diagnostics separately so that acceleration claims are not conflated with the internal "
-    "cross-validation objective."
+    "evolving label vector. We present kodama-cpp and make four contributions. First, KODAMA is "
+    "implemented as a standalone C++17 library with a typed, wrapper-independent API, allowing thin "
+    "R and Python interfaces to share one numerical implementation. Second, native multicore CPU, "
+    "NVIDIA CUDA, and Apple Metal backends implement float32 nearest-neighbor search, k-means, "
+    "SIMPLS followed by latent-space LDA, PCA, graph operations, and reusable workspaces without "
+    "silent CPU fallback. Third, the current search uses a common prediction-guided proposal and "
+    "evaluation scaffold, while PLS-LDA adds a disclosed transition-coarsening move and fragmentation "
+    "term to its state score. Proposal size decreases smoothly, an error-scaled temperature permits "
+    "early exploration, and each cycle performs exactly one new cross-validation pass. Fourth, the landmark-projection strategy "
+    "introduced in the KODAMA bioRxiv work is formalized for general matrix input through exact-quota "
+    "stratified sampling, optimization on landmarks, and supervised projection to the remaining "
+    "samples. These policies retain cross-validated predictability as the internal signal but need "
+    "not reproduce historical stochastic trajectories. We validate backend identity, numerical "
+    "behavior, runtime, memory, landmark-selection contracts, and external-label diagnostics "
+    "separately so that systems acceleration is not conflated with the optimization objective."
 )
 
 
@@ -138,17 +139,21 @@ SECTIONS = [
                 "the KODAMA optimization layer: KNN for local neighborhood consistency and PLS-LDA "
                 "for low-rank linear discrimination. R and Python wrappers call the same typed API, "
                 "so fold construction, proposals, acceptance decisions, and result metadata are not "
-                "reimplemented by each language interface."
+                "reimplemented by each language interface. Their public functions, defaults, accepted "
+                "choices, one-based best-run convention, and result fields are matched; Python only "
+                "transliterates dotted R argument names to snake_case."
             ),
             (
-                "The principal software novelty has four parts. First, analysis matrices and repeated "
-                "workspaces are float32-native. Second, nearest-neighbor search, k-means initialization, "
-                "randomized PCA, SIMPLS, and LDA have backend-specific implementations rather than "
-                "hidden CPU fallbacks. "
-                "Third, KODAMA-specific invariants such as independent M runs, one CV evaluation per "
-                "proposal cycle, constrained groups, and requested PLS component counts remain shared. "
-                "Fourth, backend identity, timings, memory, search parameters, and prediction diagnostics "
-                "are returned as data, making heterogeneous execution testable from thin wrappers."
+                "The manuscript is organized around four novelties. The first is software ownership: "
+                "KODAMA becomes a standalone C++ library from which R and Python wrappers can be built "
+                "without reimplementing folds, proposals, classifiers, or graph construction. The "
+                "second is heterogeneous execution through native CUDA and Apple Metal backends under "
+                "the same float32 result contract. The third is a guided label-evolution strategy that "
+                "uses out-of-fold predictions, class-transition evidence, adaptive proposal sizes, "
+                "degeneracy guards, and error-scaled cooling while preserving one new CV evaluation per "
+                "cycle. The fourth is a general landmark-projection procedure, first introduced in the "
+                "KODAMA bioRxiv study, that makes the expensive optimization depend on a representative "
+                "subset and then projects each optimized solution to all samples."
             ),
             (
                 "We deliberately frame this contribution as a software-methods paper, not as a "
@@ -179,7 +184,10 @@ SECTIONS = [
                 "landmarks, and fixed or constrained groups as typed inputs. During each cycle, "
                 "misclassified samples or constrained groups generate candidate label moves. A "
                 "move is accepted if it improves the objective, or under a temperature rule that "
-                "allows exploration early in the run."
+                "allows exploration early in the run. The landmark-projection principle introduced "
+                "by Abdel-Shafy et al. (2025) is treated here as a general matrix algorithm: label "
+                "optimization is performed on selected landmarks and the chosen classifier restores "
+                "a complete label vector before ensemble construction."
             ),
             (
                 "The M runs are independent. This independence is important both statistically, "
@@ -200,8 +208,10 @@ SECTIONS = [
                 "A MatrixView accepts double or float inputs, but all analysis paths convert to and "
                 "retain float32 matrices and workspaces. The core owns fold assignments, compact class "
                 "encodings, current and best label vectors, classifier buffers, and typed result "
-                "metadata. The public API is grouped into cross-validation kernels, core label "
-                "optimization, KODAMA matrix construction, PCA, graph construction, and embedding utilities."
+                "metadata. KODAMAGraphResult owns only graph arrays, two PCA starts, and metadata; "
+                "it never owns or aliases the source MatrixView. The public API is grouped into "
+                "cross-validation kernels, core label optimization, graph preparation, KODAMA matrix "
+                "construction, PCA, and embedding utilities."
             ),
             (
                 "Backend selection is strict and observable. CPU, CUDA, and Metal entry points report "
@@ -211,7 +221,10 @@ SECTIONS = [
             ),
             (
                 "KNN kernels have backend-specific implementations under one voting contract. The "
-                "dependency-light CPU path uses a package-owned float32 HNSW implementation. CUDA "
+                "dependency-light CPU path uses a package-owned float32 HNSW implementation with "
+                "a deterministic connected base seed before per-node-locked parallel insertion, "
+                "batched candidate distance evaluation, contiguous graph storage, and parallel "
+                "batched queries. CUDA "
                 "provides package-owned exact and recall-tuned IVF-Flat search plus GPU k-means using "
                 "CUDA Toolkit libraries. Apple Metal provides native exact and recall-tuned IVF-Flat "
                 "search plus GPU k-means using Metal compute kernels. Neighbor structures are reused "
@@ -226,6 +239,15 @@ SECTIONS = [
                 "mathematically feasible, rather than being replaced by an internal model-selection "
                 "shortcut. The library exposes no PLS-cKNN classifier; KODAMA optimization is limited "
                 "to KNN and PLS-LDA."
+            ),
+            (
+                "CUDA and Metal KODAMA calls keep one full-data graph resident through all M runs "
+                "and allocate one persistent scratch lane per concurrent worker. Each lane retains "
+                "landmark and fold layouts, compact labels, projections, KNN votes, cross-products, "
+                "PLS weights, and LDA workspaces. A new M run changes landmark membership and fold "
+                "contents, so those values are refreshed once in the existing buffers; Tcycle "
+                "proposals overwrite only label-dependent state. This is buffer and data-lifecycle "
+                "residency, while stochastic proposal decisions remain host orchestrated."
             ),
             (
                 "Latent-space LDA is fitted from sufficient statistics. For training scores T, "
@@ -249,22 +271,38 @@ SECTIONS = [
                 "Armadillo, Eigen, or RAFT."
             ),
             (
-                "UMAP and openTSNE are direct standalone ports of the pinned current fastEmbedR "
-                "implementation. UMAP builds fuzzy graphs by default, with binary weighting "
+                "UMAP and openTSNE are direct standalone ports of pinned fastEmbedR revision "
+                "ef064f2a. UMAP builds fuzzy graphs by default, with binary weighting "
                 "available explicitly; both are constructed directly in float32 CSR form, "
                 "including the smooth-kNN bandwidth calculation and epochs-per-sample schedule; "
                 "openTSNE uses the matching sparse affinities and exact or FFT-grid repulsion. "
-                "The CUDA path reuses pooled workspaces, and neither path links fastEmbedR or R."
+                "The current openTSNE port also retains persistent CPU workers, cached FFT plans, "
+                "parallel FFT preparation, and chunked CUDA graph launches. The CUDA path reuses "
+                "pooled workspaces, and neither path links fastEmbedR or R."
             ),
             (
-                "For graph inputs, where neighbor indices and distances are supplied by the caller, "
-                "KODAMA keeps the KNN optimizer directly on the supplied graph and avoids rebuilding "
-                "the neighbor search. If the PLS-LDA optimizer is requested without the original "
-                "feature matrix, the graph is converted into a PLS-compatible float32 representation "
-                "with the standard self-tuning normalized Laplacian transform: local row-wise distance "
-                "scales define edge weights, the graph is symmetrized and degree-normalized, and "
-                "randomized power iterations produce features for the same PLS-LDA core. This is the "
-                "only supported graph-to-feature path in the public API."
+                "Visualization initialization is part of the typed backend contract. One "
+                "backend-native float32 PCA produces both starts from the raw matrix: openTSNE "
+                "centers and scales scores to maximum component standard deviation 1e-4, while "
+                "UMAP centers, max-absolute scales to 10, adds seeded float32 jitter, and recenters. "
+                "Explicit coordinates take precedence; otherwise wrappers use explicit raw data, "
+                "then a stored start only when its CPU/CUDA backend matches, and finally the "
+                "reported graph-spectral UMAP or random openTSNE fallback. In a controlled CPU "
+                "openTSNE comparison with matched neighbors and settings, fastEmbedR and kodama-cpp "
+                "coordinates were identical. CPU UMAP is algorithmically matched but not asserted "
+                "bitwise because kodama-cpp retains float32 iterative state whereas the compared R "
+                "entry point stores its embedding in a double matrix."
+            ),
+            (
+                "KODAMA.graph prepares one full-data neighbor graph and backend-matched UMAP and "
+                "openTSNE PCA starts without retaining the raw matrix. Four input forms share one "
+                "dispatch contract: raw data; a prepared graph result; that result plus a separately "
+                "supplied raw matrix; or a bare neighbor graph. Prepared and bare graph inputs avoid "
+                "rebuilding neighbor search. With explicit raw features, landmark geometry and "
+                "PLS-LDA use the original float32 variables; without them, the graph is converted into "
+                "a PLS-compatible float32 representation with the standard self-tuning normalized "
+                "Laplacian transform. Fixed-graph KNN reuses supplied neighborhoods and is not asserted "
+                "to reproduce the stochastic trajectory of data-native KNN."
             ),
             (
                 "The graph-only PLS-LDA transform is deterministic conditional on the supplied seed. "
@@ -400,10 +438,11 @@ SECTIONS = [
                 "The main engineering limitation is that KODAMA performs many cross-validation "
                 "fits. This makes memory locality, buffer reuse, label compaction, and GPU "
                 "scheduling as important as asymptotic complexity. The present release includes "
-                "float32 buffers, fold reuse, label compaction, CUDA kernels, and native Metal KNN "
-                "and PLS-LDA kernels, but full accelerator-resident "
-                "batching of independent M runs remains an engineering extension rather than a claim "
-                "of the current manuscript."
+                "float32 buffers, fold reuse, label compaction, a resident full-data graph, persistent "
+                "per-worker CUDA/Metal classifier workspaces, and native accelerator KNN and PLS-LDA "
+                "kernels. Landmark selection and proposal control remain host orchestrated; a fully "
+                "device-side evolutionary state machine is an engineering extension rather than a "
+                "claim of the current manuscript."
             ),
             (
                 "The native CUDA neighbor-graph builder currently supports at most 256 retained "
@@ -420,39 +459,81 @@ SECTIONS = [
 
 CONTRIBUTION_ROWS = [
     (
-        "Mathematical continuity",
-        "Preserves cross-validated label predictability, independent M runs, constrained proposals, and the derived KODAMA graph or dissimilarity.",
+        "Standalone C++ core",
+        "Moves folds, classifiers, label evolution, projection, and graph construction into one C++17 library so thin R and Python wrappers share the same typed implementation.",
     ),
     (
-        "Standalone implementation",
-        "Moves data ownership and label evolution into a C++17 library so R and Python wrappers share one implementation.",
+        "CUDA and Metal backends",
+        "Provides native float32 KNN, k-means, SIMPLS-LDA, PCA, and reusable accelerator state with strict backend identity and no silent CPU fallback.",
     ),
     (
-        "Native CUDA backend",
-        "Combines exact/IVF-Flat KNN, k-means, label-aware SIMPLS, latent LDA, and reusable device workspaces without FAISS, cuVS, or RAFT runtime links.",
+        "Guided CV maximization",
+        "Uses a common prediction-guided proposal/evaluation scaffold; PLS-LDA additionally applies transition coarsening and a fragmentation-aware state-score term.",
     ),
     (
-        "Native Metal backend",
-        "Implements exact/IVF-Flat KNN and k-means with Metal kernels and accelerates SIMPLS projections with Metal Performance Shaders.",
+        "Landmark projection",
+        "Formalizes the bioRxiv landmark idea as exact-quota stratified sampling, optimization on a representative subset, supervised projection, and ensemble graph correction.",
+    ),
+]
+
+
+LANDMARKING_NOVELTY_PARAGRAPHS = [
+    (
+        "The landmark-projection principle was introduced in the KODAMA bioRxiv study "
+        "(Abdel-Shafy et al., 2025) to reduce the cost of repeated accuracy maximization: optimize "
+        "labels only on a selected subset, fit a supervised model to each optimized landmark "
+        "vector, and predict labels for the remaining samples before constructing the ensemble "
+        "dissimilarity. kodama-cpp isolates this principle as a general algorithmic component that "
+        "does not depend on a particular application domain or wrapper language."
     ),
     (
-        "KODAMA-specific reuse",
-        "Caches fold data, compacts active labels, reuses neighbor structures, and keeps M runs independent without changing the objective.",
+        "The current selector replaces k-means with one center per requested landmark by a coarse "
+        "partition followed by exact population-proportional allocation. For effective landmark "
+        "count L and coarse stratum c containing n_c of n samples, q_c = L n_c / n is the expected "
+        "allocation. The algorithm samples floor(q_c) rows without replacement, then assigns the "
+        "remaining slots by randomized systematic rounding of the fractional quotas. It therefore "
+        "returns exactly L distinct landmarks and satisfies E[L_c] = L n_c / n without requiring "
+        "L k-means centers."
     ),
     (
-        "Testable backend contract",
-        "Returns typed predictions, labels, graphs, timings, memory, search parameters, and actual backend identity, with no silent fallback.",
+        "Sampling strata and labels being optimized are intentionally different objects. After "
+        "landmarks are selected, a separate expression-space partition initializes the candidate "
+        "labels. KODAMA evolves those labels for Tcycle steps, stores the selected vector from each "
+        "of M independent runs, and projects it to non-landmarks with the selected KNN or PLS-LDA "
+        "classifier. The final graph is then corrected from agreement across complete projected "
+        "vectors, so non-landmarks contribute to the returned representation even though the "
+        "iterative CV search is performed on the landmark subset."
+    ),
+]
+
+
+LANDMARK_VALIDATION_ROWS = [
+    (
+        "Selection contract",
+        "Unit tests require the exact effective landmark count, distinct sampled rows, fixed-seed repeatability, and valid represented/occupied-stratum diagnostics.",
+    ),
+    (
+        "Backend contract",
+        "CPU and CUDA matrix runs expose matching landmark counts and diagnostics; selection remains host-orchestrated and independent of classifier backend.",
+    ),
+    (
+        "Scalability isolation",
+        "On flow18, selecting 750,016 landmarks from 300 coarse strata required 0.321 seconds; the separately measured 100-neighbor global graph dominated the complete call.",
+    ),
+    (
+        "Quality evaluation",
+        "Landmark tests report downstream CV accuracy, ensemble stability, and external diagnostics separately from selection time so representativeness is not inferred from speed alone.",
     ),
 ]
 
 
 IMPLEMENTATION_NOVELTY_PARAGRAPHS = [
     (
-        "kodama-cpp is an algorithm-preserving systems redesign rather than a new KODAMA objective. "
-        "The original R implementation remains the reference for accuracy maximization and the "
-        "ensemble construction. The new contribution is that numerical state previously recreated "
-        "across wrapper calls is represented once in typed C++ objects and reused across folds, "
-        "proposal cycles, and independent runs."
+        "kodama-cpp preserves cross-validated predictability as the KODAMA signal but contributes "
+        "both a systems redesign and an explicit current search policy. The original R implementation "
+        "remains the historical reference for accuracy maximization and ensemble construction. In the "
+        "new library, numerical state previously recreated across wrapper calls is represented once in "
+        "typed C++ objects and reused across folds, proposal cycles, and independent runs."
     ),
     (
         "This distinction matters because the runtime of KODAMA is the product of several nested "
@@ -468,6 +549,15 @@ IMPLEMENTATION_NOVELTY_PARAGRAPHS = [
         "SIMPLS deflation and latent LDA model while each accelerator maps the dominant operations to "
         "its own memory and matrix-compute model. This separation avoids benchmark-specific branches "
         "inside the classifier and makes CPU/accelerator parity an explicit test target."
+    ),
+    (
+        "Guided evolution is deliberately implemented above the classifier layer. Previous held-out "
+        "predictions determine sample/group proposals and the class-transition graph; the adaptive "
+        "schedule determines how many groups may move; and each proposal receives one new CV pass. "
+        "This is a common scaffold, not a classifier-independent state policy: KNN uses the diversity-"
+        "guarded score directly, whereas PLS-LDA may add transition coarsening and a fragmentation "
+        "subtraction before the shared cooling decision. The policy can change stochastic trajectories "
+        "relative to historical KODAMA without changing the definition of a CV prediction."
     ),
 ]
 
@@ -489,9 +579,11 @@ CUDA_BACKEND_PARAGRAPHS = [
     (
         "For PLS-LDA, class labels are encoded compactly and the centered X'Y cross-product is formed "
         "from class sums on the GPU, avoiding a dense n-by-K one-hot response. Float32 SIMPLS uses "
-        "reusable thread-local device workspaces that grow to the required capacity. Separate CUDA "
+        "reusable thread-local device workspaces that grow to the required capacity. Fixed-order "
+        "class accumulation is followed by separate column-sum and centering kernels, avoiding a "
+        "read/write race in X'Y centering. Each stream owns a persistent cuBLAS workspace. Separate CUDA "
         "kernels compute latent projections, class sums, covariance terms, and LDA scores, while "
-        "fold caches retain train/validation layouts and reusable Gram information."
+        "fold caches retain train/validation layouts."
     ),
     (
         "The default rank-one randomized SIMPLS refresh uses two power iterations. CUDA dispatches "
@@ -505,11 +597,12 @@ CUDA_BACKEND_PARAGRAPHS = [
         "factorization, and copies back predicted codes rather than score matrices."
     ),
     (
-        "The CUDA backend reduces allocation and transfer costs but the present release does not "
-        "claim that the complete M-run ensemble is permanently device resident. Independent runs "
-        "are scheduled without changing their seeds or proposal trajectories, and small control "
-        "decisions remain host orchestrated. Fully batched resident M execution is therefore treated "
-        "as future engineering work, not as evidence used in the current speedup claims."
+        "The CUDA backend uploads the full graph once and keeps per-worker landmark/fold, label, "
+        "projection, voting, SIMPLS, and LDA allocations alive across independent runs. Values that "
+        "mathematically change are refreshed in place, and independent runs retain their seeds and "
+        "proposal trajectories. Landmark selection, proposal decisions, and compact result collection "
+        "remain host orchestrated, so the manuscript does not claim a fully device-side evolutionary "
+        "state machine."
     ),
 ]
 
@@ -561,8 +654,8 @@ BACKEND_CONTRACT_ROWS = [
     ),
     (
         "KODAMA evolution",
-        "Same folds, constrained proposals, acceptance score, requested feasible components, and independent M runs.",
-        "Same folds, constrained proposals, acceptance score, requested feasible components, and independent M runs.",
+        "For a fixed classifier: same folds, constrained proposals, classifier-specific score, requested feasible components, and independent M runs.",
+        "For a fixed classifier: same folds, constrained proposals, classifier-specific score, requested feasible components, and independent M runs.",
     ),
     (
         "Failure semantics",
@@ -584,6 +677,11 @@ API_ROWS = [
         "Independent label-evolution runs that maximize KNN or PLS-LDA cross-validated accuracy.",
     ),
     (
+        "Graph preparation",
+        "KODAMA.graph / KODAMAGraph",
+        "One reusable KNN graph plus backend-matched UMAP/openTSNE PCA starts, without retaining the raw matrix.",
+    ),
+    (
         "KODAMA matrix",
         "KODAMA.matrix / KODAMAMatrix",
         "Landmark selection, splitting, M runs, optimized label vectors, KODAMA dissimilarity, and graph output.",
@@ -601,7 +699,7 @@ API_ROWS = [
     (
         "Visualization",
         "KODAMA.visualization",
-        "Current fastEmbedR UMAP and openTSNE ports from standard or KODAMA-corrected neighbor graphs; direct float32 CSR construction uses fuzzy UMAP weighting by default, with binary weighting explicit.",
+        "Pinned fastEmbedR UMAP and openTSNE ports from standard or KODAMA-corrected float32 graphs; backend-matched raw-data PCA initialization is the default, fuzzy UMAP weighting is the default, and initialization provenance is returned.",
     ),
     (
         "Graph and clustering",
@@ -643,8 +741,8 @@ COMPLEXITY_ROWS = [
 GRAPH_INPUT_VALIDATION_ROWS = [
     (
         "KNN graph input",
-        "Uses supplied neighbor indices/distances directly in CoreKNNGraph and KODAMAMatrixFromGraph.",
-        "Accepted as the graph-input path because it preserves the KNN voting mathematics and removes repeated search work.",
+        "Uses supplied neighbor indices/distances directly in CoreKNNGraph_CPU and KODAMAMatrixFromGraph; no neighbor index is rebuilt.",
+        "Preserves graph-based KNN voting mathematics. The precomputed-graph voting kernel is host-resident in the current release; accelerator backends can still execute matrix-side initialization work.",
     ),
     (
         "PLS-LDA graph input with X",
@@ -653,14 +751,133 @@ GRAPH_INPUT_VALIDATION_ROWS = [
     ),
     (
         "PLS-LDA graph-only input",
-        "When X is unavailable, the graph is transformed into self-tuning normalized Laplacian features before CorePLSLDA.",
-        "Exposed as an optional fallback, not as evidence that graph-only PLS-LDA matches data-input PLS-LDA in all datasets.",
+        "When X is unavailable, a host kernel transforms the graph into self-tuning normalized Laplacian features before backend-selected CorePLSLDA.",
+        "Exposed as an optional spectral surrogate, not as evidence that graph-only PLS-LDA matches data-input PLS-LDA in all datasets.",
     ),
     (
         "Validation boundary",
         "Wrapper tests exercise both KNN and PLS-LDA graph-input calls; benchmark comparisons must use the same M, Tcycle, seed, and supplied graph.",
         "The manuscript does not use graph-only PLS-LDA results to support data-input KODAMA performance claims.",
     ),
+]
+
+
+GRAPH_INPUT_CONTRACT_ROWS = [
+    ("Raw X", "Raw float32 variables", "Data-native KNN", "Raw variables", "One"),
+    ("Prepared P", "Self-tuning graph features", "Fixed supplied graph", "Laplacian surrogate", "Zero"),
+    ("Prepared P + X", "Raw float32 variables", "Fixed supplied graph", "Raw variables", "Zero"),
+    ("Bare G", "Self-tuning graph features", "Fixed supplied graph", "Laplacian surrogate", "Zero"),
+]
+
+
+GRAPH_API_SMOKE_ROWS = [
+    ("KNN", "X", "1", "0.323", "0.954", "0.907"),
+    ("KNN", "P + X", "0", "0.037", "0.965", "0.907"),
+    ("KNN", "P", "0", "0.023", "0.983", "1.000"),
+    ("KNN", "G", "0", "0.023", "0.983", "1.000"),
+    ("PLS-LDA", "X", "1", "2.217", "0.936", "1.000"),
+    ("PLS-LDA", "P + X", "0", "2.088", "0.936", "1.000"),
+    ("PLS-LDA", "P", "0", "1.817", "0.947", "1.000"),
+    ("PLS-LDA", "G", "0", "1.801", "0.947", "1.000"),
+]
+
+
+GRAPH_API_SMOKE_NOTE = (
+    "MetRef CUDA smoke validation used n = 873, p = 375, k = 100, and M = T = 10. "
+    "The prepared R object occupied 1.08 MB and contained no raw-data field, compared "
+    "with 2.70 MB for the input matrix; one-time graph/PCA preparation required 0.342 "
+    "wall seconds. Exact PLS-LDA agreement confirms that prepared P does not alter "
+    "raw-feature classification when X is also supplied. The KNN difference is expected: "
+    "P + X uses fixed-graph voting, whereas X uses data-native KNN within each landmark "
+    "sample. P and bare G agree exactly because stored PCA starts affect visualization "
+    "initialization, not graph-only label evolution. These figures validate API lifecycle "
+    "semantics and are not presented as a performance benchmark."
+)
+
+
+GRAPH_PREPARATION_PSEUDOCODE_LINES = [
+    "Algorithm: graph preparation and KODAMA.matrix dispatch",
+    "",
+    "KODAMA.Graph(X, k, backend):",
+    "  X32 <- Float32(X)",
+    "  G <- BackendKNN(X32, k)",
+    "  (Z_U, Z_T) <- BackendPCAStarts(X32)",
+    "  return P = {G, Z_U, Z_T, dimensions, backend, timings}",
+    "  # X32 and X are not retained by P.",
+    "",
+    "KODAMA.Matrix(input, optional X):",
+    "  raw X        -> prepare P; use raw geometry",
+    "  prepared P+X -> reuse P; use caller-owned raw geometry",
+    "  prepared P   -> reuse P; use self-tuning graph geometry",
+    "  bare G       -> use G with no stored PCA starts and graph geometry",
+]
+
+
+GRAPH_INPUT_PROCEDURE_PARAGRAPHS = [
+    (
+        "The graph-input API represents a KNN matrix as two rectangular arrays with identical "
+        "shape n by k. Entry I[i,j] is the sample identifier of the jth neighbor of sample i, "
+        "and D[i,j] is its non-negative dissimilarity. The boundary accepts either zero-based "
+        "or one-based identifiers, converts them to the internal convention, discards invalid "
+        "identifiers, self-neighbors, and non-finite distances, clamps negative distances to "
+        "zero, and retains at most graph.neighbors entries per row. The row order must match "
+        "the sample order used by every optional label, constraint, and feature vector."
+    ),
+    (
+        "For graph-only KNN KODAMA, the supplied graph replaces construction of the global "
+        "neighbor index and remains the source of neighbors for CV voting, landmark-label "
+        "projection, and final agreement correction. A deterministic self-tuning normalized-"
+        "Laplacian representation is still computed once to provide geometry for landmark "
+        "selection and initial splitting; it does not replace graph-based KNN voting. If the "
+        "original data matrix X is available, KODAMAMatrixFromGraphData uses float32 X for "
+        "that geometry while continuing to reuse the supplied graph."
+    ),
+    (
+        "PLS-LDA requires a rectangular feature representation. With X supplied, graph-input "
+        "PLS-LDA uses the ordinary float32 SIMPLS plus latent-space LDA classifier on X. With "
+        "only I and D supplied, it uses the deterministic self-tuning normalized-Laplacian "
+        "features described above. This graph-only PLS-LDA route is an explicit spectral "
+        "surrogate and is not claimed to be numerically equivalent to data-input PLS-LDA. "
+        "Graph normalization and spectral feature extraction are host operations in the "
+        "current release; CPU, CUDA, or Metal is then selected for the PLS-LDA evolution."
+    ),
+    (
+        "The remaining KODAMA procedure is unchanged: each of M independent runs selects "
+        "landmarks, initializes at most splitting classes, performs Tcycle proposal and CV "
+        "updates, and projects its optimized labels to all samples. The output contains the "
+        "M by n label matrix, one best raw CV accuracy per run, one graph in either base or "
+        "KODAMA-corrected state, timing fields including graph-feature time, and backend "
+        "metadata. UMAP or openTSNE can then consume the corrected graph directly; "
+        "when X is unavailable, visualization reports its graph-only initialization fallback."
+    ),
+    (
+        "The R and Python graph-input functions expose the same contract. Python uses the "
+        "direct snake_case transliteration of dotted R names. Defaults, accepted values, the "
+        "one-based best-run convention, and returned fields are otherwise aligned."
+    ),
+]
+
+
+GRAPH_INPUT_USAGE_LINES = [
+    "C++17",
+    "kodama::NeighborGraph g{I, D, k};",
+    "kodama::KODAMAMatrixOptions opt;",
+    "opt.runs = 100; opt.cycles = 100; opt.classifier = kodama::CoreClassifier::KNN;",
+    "auto fit = kodama::KODAMAMatrixFromGraph(g, n, {}, {}, {}, opt);",
+    "",
+    "R",
+    "p <- KODAMA.graph(X, k = 100, backend = \"cuda\")",
+    "fit_graph <- KODAMA.matrix(p, classifier = \"knn\")",
+    "fit_graph_x <- KODAMA.matrix(p, raw.data = X, classifier = \"pls_lda\")",
+    "fit_raw <- KODAMA.matrix(X, classifier = \"pls_lda\")",
+    "fit_bare <- KODAMA.matrix(list(indices = I, distances = D), classifier = \"knn\")",
+    "",
+    "Python",
+    "p = kodama.graph(X, k=100, backend=\"cuda\")",
+    "fit_graph = kodama.matrix(p, classifier=\"knn\")",
+    "fit_graph_x = kodama.matrix(p, raw_data=X, classifier=\"pls_lda\")",
+    "fit_raw = kodama.matrix(X, classifier=\"pls_lda\")",
+    "fit_bare = kodama.matrix({\"indices\": I, \"distances\": D}, classifier=\"knn\")",
 ]
 
 
@@ -778,7 +995,7 @@ VALIDATION_ROWS = [
     ),
     (
         "Continuous integration",
-        "GitHub Actions commit 9da48ee passed CPU core jobs on Linux and macOS, a native Metal job on macOS, R package build/check, and Python installation/pytest.",
+        "GitHub Actions commit a32f718 passed the CI, CPU-coverage, and API-documentation workflows, including Linux/macOS CPU, native Metal, and wrapper jobs.",
     ),
     (
         "Coverage and documentation",
@@ -786,7 +1003,7 @@ VALIDATION_ROWS = [
     ),
     (
         "Release",
-        "CMake install targets, wrapper build scripts, benchmark drivers, SPDX source headers, a pinned provenance matrix, retained third-party license texts, and a checksum-backed license audit are present. Commit 9da48ee and R-wrapper commit 4d5506b are audited candidates; the final clean tag, archive digest, and optional DOI will be inserted only after they are created.",
+        "CMake install targets, wrapper build scripts, benchmark drivers, SPDX source headers, a pinned provenance matrix, retained third-party license texts, and a checksum-backed license audit are present. Commit a32f718 and R-wrapper commit 4d5506b are the current candidates; benchmark rows retain their recorded historical commits. The final clean tag, archive digest, and optional DOI will be inserted only after they are created.",
     ),
 ]
 
@@ -823,7 +1040,7 @@ LICENSE_DEPENDENCY_ROWS = [
     ("kodama-cpp project code", "MIT, with SPDX copyright assigned to Stefano Cacciatore; historical Git identity tkcaccia."),
     ("KODAMA-derived code", "Public origin GPL (>= 2); local portions whose copyright Stefano Cacciatore owns are separately authorized under MIT. KODAMA coauthors remain credited."),
     ("fastPLS-derived code", "Public origin GPL-3; local SIMPLS/LDA portions whose copyright Stefano Cacciatore owns are separately authorized under MIT. fastPLS coauthors remain credited."),
-    ("fastEmbedR and faissR", "MIT snapshots pinned for randomized-PCA policy, UMAP/openTSNE, HNSW, Metal, and exact 2D/3D grid-KNN lineage."),
+    ("fastEmbedR and faissR", "MIT snapshots pinned for randomized-PCA policy, UMAP/openTSNE, HNSW, Metal, and nearest-neighbor implementation lineage."),
     ("Native CPU HNSW", "Direct FAISS-derived organization under MIT; Meta and Stefano Cacciatore notices and the complete FAISS license are retained."),
     ("Apple Metal", "MIT AND Apache-2.0 for the combined file; Meta, Faiss-mlx, and modification notices plus both full licenses are retained."),
     ("Native CUDA", "Package-owned exact/IVF KNN, k-means, and SIMPLS/LDA use CUDA Toolkit libraries without FAISS, cuVS, RAFT, RMM, Armadillo, or external graph-clustering links."),
@@ -834,10 +1051,10 @@ LICENSE_DEPENDENCY_ROWS = [
 WRAPPER_VALIDATION_ROWS = [
     ("C++ core, local CPU", "Dependency-free release-candidate build passed 4/4 configured tests on macOS, including the source/license audit and frozen public-API snapshot."),
     ("C++ core, Apple Metal", "Native Metal release-candidate build passed 5/5 configured tests, including the source/license audit and frozen public-API snapshot; a clean external CMake consumer linked the installed package and selected Metal."),
-    ("C++ core, CUDA", "A clean commit-9da48ee build for compute capability 12.0 used CUDA 13.0 V13.0.88 on chiamaka. CTest passed 3/3 configured license, numerical/core, and public-API tests; the independently installed R wrapper also passed its testthat suite."),
+    ("C++ core, CUDA", "Commit a32f718 passed 4/4 configured license, numerical/core, public-API, and float32 smoke tests in the CUDA 13.0 compute-capability-12.0 build on chiamaka."),
     ("R wrapper, local CPU", "R CMD build followed by R CMD check --as-cran --no-manual passed on the source tarball in a UTF-8 locale with only the expected new-submission NOTE."),
-    ("Python wrapper, local CPU", "Temporary virtual-environment install against the local CPU build passed pytest: 4/4 tests."),
-    ("GitHub Actions", "Commit 9da48ee passed CPU core jobs on Ubuntu and macOS, native Metal on macOS, R package build/check, and Python installation/pytest. Separate coverage and API-documentation workflows also passed."),
+    ("Python wrapper, local CPU", "An isolated local package load against the CPU extension passed all six pytest checks, including explicit R/Python signature and default-parity assertions."),
+    ("GitHub Actions", "Commit a32f718 passed CI, CPU-coverage, and API-documentation workflows, including Ubuntu/macOS CPU, native Metal, R/Python, and documentation jobs."),
 ]
 
 
@@ -981,6 +1198,20 @@ METAL_VALIDATION_PARAGRAPHS = [
         "The CPU build therefore measures the package-owned HNSW and float32 SIMPLS/LDA implementations, "
         "while the Metal build links only Apple system frameworks. CPU/Metal agreement within the documented "
         "float32 tolerance is the primary acceptance criterion; timings are secondary evidence."
+    ),
+    (
+        "A focused Apple M3 graph benchmark used 4,000 samples, 32 float32 variables, k = 30, "
+        "and three repeated runs. Before concurrent insertion, the accepted implementation builds "
+        "a deterministic connected seed containing min(n, max(n_threads + 1, 2 m_HNSW + 1)) "
+        "points, where m_HNSW is the internal graph connectivity. Parallel HNSW construction "
+        "required a median 6.722 s with one thread and 1.791 s with four threads, a 3.75-fold "
+        "scaling gain. The earlier four-thread "
+        "serial-insertion implementation required 7.248 s, so the accepted implementation was "
+        "4.05-fold faster. Four-thread overlap with the one-thread graph had a three-run median "
+        "of 0.99966. Across 100 repeated four-thread builds of a 600 by 24 test problem with "
+        "k = 20, minimum and mean brute-force recall were 0.99975 and 0.99987. Both serial and "
+        "parallel paths must retain at least 0.99 exact-neighbor recall in CTest, and the complete "
+        "CPU suite passes ThreadSanitizer."
     ),
     (
         "Metal IVF-Flat remains an explicit option rather than an automatic replacement for exact search. "
@@ -1284,7 +1515,7 @@ KODAMA_PARAMETER_ROWS = [
     ),
     (
         "splitting",
-        "Initial number of label classes and matrix-input landmark strata. If not supplied, splitting is 100 for n < 40000 and 300 otherwise. Both landmark paths run a separate expression-space k-means on the selected rows so sampling strata remain distinct from labels being optimized.",
+        "Initial number of label classes and matrix-input landmark strata. If not supplied, splitting is 100 for n < 40000 and 300 otherwise. After landmark sampling, a separate matrix-space k-means initializes labels on the selected rows so sampling strata remain distinct from labels being optimized.",
     ),
     (
         "constrain",
@@ -1303,12 +1534,6 @@ KODAMA_PARAMETER_ROWS = [
 
 LABEL_SEARCH_DETAIL_PARAGRAPHS = [
     (
-        "Landmark selection is exact-quota stratified sampling rather than k-means with one center per requested landmark. For matrix-only input, one splitting-center k-means partitions all samples at the beginning of each independent run. If stratum c contains n_c samples and the effective landmark count is L, its expected quota is q_c = L n_c / n. The implementation draws floor(q_c) rows without replacement and assigns the remaining L - sum_c floor(q_c) slots by randomized systematic rounding of the fractional quotas. The same seed + run convention controls partition initialization, residual rounding, and within-stratum sampling. A separate splitting-center k-means on the selected matrix initializes candidate labels, preserving the established initialization and preventing sampling strata from becoming the optimization target."
-    ),
-    (
-        "When auxiliary coordinates have two or three columns, the strata are occupied cells in a regular grid with ceil(L^(1/d)) bins per axis. Cells are traversed in grid order and receive the same population-proportional exact quotas. An occupied cell is not guaranteed a landmark: low-mass cells may receive zero after randomized rounding, while denser cells may contribute several rows. This avoids a user-set density threshold and preserves an unbiased expected contribution E[L_c] = L n_c / n. The same expression-space splitting k-means initializes labels, so the grid controls coverage rather than defining candidate classes."
-    ),
-    (
         "The object optimized by KODAMA is the label vector itself. At any time the algorithm holds a candidate vector y on the landmark samples. A classifier is not used to predict an external truth; instead it is trained to reproduce y under cross-validation. A label vector is therefore good when the labels assigned to held-out samples are predictable from the measured variables. The raw accuracy attached to a candidate, acc(y), is the fraction of landmark samples for which the held-out prediction pred_i(y) equals the candidate label y_i."
     ),
     (
@@ -1324,10 +1549,10 @@ LABEL_SEARCH_DETAIL_PARAGRAPHS = [
         "The many-to-one transition proposal uses the same matrix N. For a source class a and a destination b, the expected count under independence is n_a n_b / n. A candidate absorption is considered only when N_ab exceeds this expectation and also exceeds the number of samples that remain in class a. Candidate destinations are sampled with probability proportional to their positive surplus, and the selected source classes are mapped to the destination only if the move reduces the number of active classes without collapsing all labels into one class."
     ),
     (
-        "For the PLS-LDA path, an additional automatic coarsening proposal may be applied before the CV evaluation. It computes the class entropy H = -sum_k p_k log p_k and the effective number of classes K_eff = exp(H). Fragmentation is measured as max(0, log(K / max(1, K_eff))). Classes with high transition instability and small movable size are proposed for merging into their strongest predicted destination; the merge budget is ceil(T_frag max(0, K - K_eff)), where T_frag = fragmentation / (fragmentation + weighted_transition_entropy + 1). This keeps the proposal rule tied to CV confusion rather than to external labels."
+        "Under the standard KODAMA.matrix policy, the PLS-LDA path applies an additional automatic coarsening proposal before the CV evaluation. It computes the class entropy H = -sum_k p_k log p_k and the effective number of classes K_eff = exp(H). Fragmentation is measured as max(0, log(K / max(1, K_eff))). Classes with high transition instability and small movable size are proposed for merging into their strongest predicted destination; the merge budget is ceil(T_frag max(0, K - K_eff)), where T_frag = fragmentation / (fragmentation + weighted_transition_entropy + 1). This keeps the proposal tied to CV confusion rather than external labels. The branch is PLS-LDA-specific because latent LDA estimates a q-dimensional mean for every active class and a pooled covariance from the remaining degrees of freedom; many small classes therefore affect a global fitted model. KNN voting has no analogous global per-class parameter fit. The lower-level CoreOptions interface exposes the coarsening and diversity switches for controlled studies."
     ),
     (
-        "After these proposal moves, the proposed vector is evaluated by exactly one new CV pass. With guarded diversity, S starts as A sqrt(1 - sum_k p_k^2), where A is raw CV accuracy and p_k is the class proportion. With PLS-LDA automatic coarsening, S is reduced by (1 - A) max(H / log n, fragmentation / (1 + fragmentation)); KNN has no additional parsimony subtraction but retains the diversity factor. The labels stored in clbest maximize S, and accbest is the raw A evaluated for exactly those labels. These score terms change state selection without changing the underlying CV classifier."
+        "After these proposal moves, the proposed vector is evaluated by exactly one new CV pass. The classifier-common score is S_0 = A sqrt(1 - sum_k p_k^2), where A is raw CV accuracy and p_k is the class proportion. KNN uses S_KNN = S_0. PLS-LDA uses S_PLS-LDA = S_0 - (1 - A) max(H / log n, fragmentation / (1 + fragmentation)) when automatic coarsening is active. The labels stored in clbest maximize the applicable classifier-specific score, and accbest is the raw A evaluated for exactly those labels. Thus the CV objective and evaluation count are common, but the state-selection policy is not identical."
     ),
     (
         "The best vector is updated whenever the proposal score improves. In evolutionary mode, a separate current vector is also maintained. A worse proposal can become current with probability exp((score_new - score_current) / tau_t), where, for one-based cycle t, tau_t = max(1e-9, 0.10 max(0, 1 - current_accuracy) (1 - t/Tcycle)). The 1e-9 floor makes the terminal cycle numerically defined and effectively greedy. Repeating this process for M independent seeds gives an ensemble of guarded high-predictability label vectors rather than relying on a single local optimum."
@@ -1340,20 +1565,23 @@ SCORE_INTERPRETATION_PARAGRAPHS = [
         "It is useful to distinguish three quantities that appear in the implementation. The first is the raw held-out CV accuracy A(y), which is the classifier reproducibility score reported for a label vector. The second is the proposal acceptance score S(y), which is the stochastic-search objective actually used to choose moves when degeneracy guards are enabled. The third is an external diagnostic, such as ARI or embedding compactness, which is never optimized by KODAMA but is reported when reference labels are available."
     ),
     (
-        "This distinction is necessary because a high raw CV accuracy alone can be achieved by a collapsed or overly coarse label vector. Such a vector may be easy for the classifier to reproduce but poor as a representation of latent structure. The guarded diversity factor and class-coarsening penalties are therefore part of the current standard KODAMA search score in kodama-cpp: they change which proposals are accepted, while the reported accuracy remains the raw held-out classifier accuracy."
+        "This distinction is necessary because a high raw CV accuracy alone can be achieved by a collapsed or overly coarse label vector. Such a vector may be easy for the classifier to reproduce but poor as a representation of latent structure. The diversity factor is common to KNN and PLS-LDA. Transition coarsening and the fragmentation subtraction are PLS-LDA-specific standard policies; they change which proposals are selected, while the reported accuracy remains the raw held-out classifier accuracy."
     ),
     (
-        "The same distinction also clarifies how to compare KNN and PLS-LDA. KNN can produce very stable local partitions with high raw accuracy, whereas PLS-LDA can favor labelings that are predictable in a low-dimensional discriminant space. For that reason, the benchmark reports both raw CV accuracy and label-quality diagnostics, rather than treating any single scalar as a complete measure of KODAMA quality."
+        "The fixed-M = 100 sensitivity study provides empirical motivation, not a causal ablation. At Tcycle = 100, median active-class counts were 9 for KNN versus 24 for PLS-LDA on MetRef and 32 versus 71 on USPS, showing that the classifier paths occupy different fragmentation regimes despite high held-out accuracy. The archived experiment did not toggle only the PLS-LDA penalty, so the manuscript does not claim that this term universally improves ARI, silhouette, or runtime. It is reported as a classifier-specific implementation policy whose isolated benefit remains to be tested."
     ),
 ]
 
 
 REPRODUCIBLE_ALGORITHM_STEPS = [
     (
-        "For each run r = 1,...,M, create a random generator with seed seed + r and copy the input matrix into float32 working storage. Let L be the validated landmark count. With matrix-only input, run k-means on all rows with splitting centers and 10 iterations to obtain coarse strata. With 2D/3D auxiliary coordinates, form a regular grid with ceil(L^(1/d)) bins per axis and use occupied cells as ordered strata."
+        "Copy the input matrix once into float32 working storage. Before the M loop, build one full-data neighbor graph G0 for label projection and final agreement correction. When visualization initialization is requested, run one backend-native float32 PCA on the same working matrix and derive the separately scaled UMAP and openTSNE starts from those scores. The graph and both starts are returned with the matrix result."
     ),
     (
-        "For each stratum c, compute q_c = L n_c / n, take floor(q_c) samples without replacement, and assign the remaining slots by randomized systematic rounding of q_c - floor(q_c). This returns exactly L distinct landmarks. If starting labels are supplied, subset them and apply constrained-majority relabeling when needed. Otherwise run expression-space k-means on the landmarks with init_k = max(2, min(splitting, L)), irrespective of how the sampling strata were formed."
+        "For each run r = 1,...,M, create a random generator with seed seed + r. Let L be the validated landmark count. Run k-means on all rows with splitting centers and 10 iterations to obtain coarse matrix-derived sampling strata."
+    ),
+    (
+        "For each stratum c, compute q_c = L n_c / n, take floor(q_c) samples without replacement, and assign the remaining slots by randomized systematic rounding of q_c - floor(q_c). This returns exactly L distinct landmarks. If starting labels are supplied, subset them and apply constrained-majority relabeling when needed. Otherwise run matrix-space k-means on the landmarks with init_k = max(2, min(splitting, L)), independently of the sampling partition."
     ),
     (
         "Build CV folds on the landmark set. With no constrain vector, samples are assigned to folds directly. With a constrain vector, each group is assigned as a whole; stratified folds use the group-majority label and non-stratified folds shuffle groups. KODAMA.matrix currently sets the internal CV folds to non-stratified for both KNN and PLS-LDA core paths."
@@ -1368,10 +1596,10 @@ REPRODUCIBLE_ALGORITHM_STEPS = [
         "For each sampled group, collect the non-fixed members. Their candidate replacement labels are the previous CV predictions for those members. The replacement label is drawn from the empirical frequency of those predicted labels, and all eligible members of the group are relabeled together."
     ),
     (
-        "Apply class-level transition proposals. The transition matrix has entries N_ab = #{i: current label a, CV prediction b}. The many-to-one proposal requires N_ab - n_a n_b/n > 0 and N_ab > N_aa, prefers destinations supported by multiple source classes, and samples among eligible destinations in proportion to summed positive surplus. It rejects moves that collapse to one class or fail to reduce class count. For PLS-LDA, an additional coarsening move may merge small unstable classes according to the same transition matrix."
+        "Apply the classifier-common class-transition proposal. The transition matrix has entries N_ab = #{i: current label a, CV prediction b}. The many-to-one proposal requires N_ab - n_a n_b/n > 0 and N_ab > N_aa, prefers destinations supported by multiple source classes, and samples among eligible destinations in proportion to summed positive surplus. It rejects moves that collapse to one class or fail to reduce class count. Only for PLS-LDA, an additional coarsening move may merge small unstable classes according to the same transition matrix."
     ),
     (
-        "Evaluate the proposed labels with exactly one CV pass. Let A_t be the fraction of landmark samples whose proposed label equals the held-out CV prediction. The implementation records the raw accuracy attached to the selected best vector, while the default KODAMA.matrix acceptance score guards against degenerate labelings by multiplying A_t by sqrt(1 - sum_k p_k^2), where p_k is the current class proportion. When class coarsening is enabled, an additional parsimony term based on label entropy and effective class count is subtracted."
+        "Evaluate the proposed labels with exactly one CV pass. Let A_t be the fraction of landmark samples whose proposed label equals the held-out CV prediction. Both classifiers multiply A_t by sqrt(1 - sum_k p_k^2), where p_k is the current class proportion. Only the PLS-LDA policy subtracts the additional entropy/effective-class fragmentation term when class coarsening is enabled. Record raw A_t alongside the selected vector."
     ),
     (
         "Update the best vector whenever the proposal score improves. In evolutionary-chain mode, also update the current vector if the score improves the current score, or with probability exp((score - current_score) / tau_t), where tau_t = max(1e-9, 0.10 max(0, 1 - current_accuracy) (1 - t/Tcycle))."
@@ -1384,7 +1612,7 @@ REPRODUCIBLE_ALGORITHM_STEPS = [
 
 GRAPH_CONSTRUCTION_PARAGRAPHS = [
     (
-        "The C++ implementation stores the final KODAMA representation as a sparse neighbor graph rather than materializing a dense n by n matrix by default. First, it constructs a global KNN graph on the original samples using the selected metric and graph_neighbors. This unmodified graph is returned as base_knn."
+        "The C++ implementation stores the final KODAMA representation as a sparse neighbor graph rather than materializing a dense n by n matrix by default. KODAMAGraph constructs one global KNN graph using the selected metric and graph_neighbors and computes backend-matched PCA starts. KODAMAGraphResult owns only indices, float32 distances, two initialization arrays, dimensions, backend provenance, and timings; it does not own, alias, or copy the source MatrixView. KODAMAMatrix can consume that result alone or alongside a separately supplied MatrixView; raw-matrix input invokes the same preparation logic internally. The graph owner is kept through all independent runs, compacted in place, and moved into the result. The default applies agreement correction to that same storage. If correction is deferred, the result retains the base graph and KODAMADissimilarityInPlace can correct it lazily; no simultaneous base_knn and corrected-knn copies are retained."
     ),
     (
         "Let c_i^(r) be the final label of sample i from run r. For each retained edge (i,j) with original nonnegative distance d_ij, compute V_ij as the number of runs where both endpoint labels are nonzero, and S_ij as the number of those valid runs where the two labels agree. If V_ij = 0 or S_ij = 0, the corrected edge distance is set to infinity. Otherwise a_ij = S_ij / V_ij and d'_ij = (1 + d_ij) / a_ij^2. Each neighbor row is then sorted by d'_ij. This implementation contract is not invariant to an arbitrary rescaling of d, so matched comparisons fix preprocessing and metric. The resulting graph is the KODAMA-corrected graph used by KODAMA.visualization."
@@ -1392,6 +1620,36 @@ GRAPH_CONSTRUCTION_PARAGRAPHS = [
     (
         "A dense dissimilarity can be derived from the same agreement statistic by evaluating the formula for all sample pairs. The library keeps the sparse graph form because downstream UMAP, openTSNE, and graph clustering only need local neighborhoods, and the sparse form is the scalable object shared by the available backends."
     ),
+]
+
+
+MAIN_ALGORITHM_PSEUDOCODE_LINES = [
+    "Algorithm: KODAMA with guided evolution and landmark projection",
+    "",
+    "Input: X or prepared graph P, classifier F, runs M, cycles T, landmarks L",
+    "       splitting K0, folds Pi, seed s",
+    "if P is absent then P <- KODAMA.Graph(X)",
+    "G0 <- P.graph; (Z_U, Z_T) <- P.PCA_starts",
+    "for r = 1,...,M do",
+    "  strata <- CoarsePartition(X, K0, seed=s+r)",
+    "  L_r <- ExactQuotaSample(strata, L, seed=s+r)",
+    "  y <- InitialPartition(X[L_r,], K0, seed=s+r)",
+    "  (A, pred) <- CrossValidate(F, X[L_r,], y, Pi_r)",
+    "  (y_best, A_best, S_best) <- (y, A, Score_F(y, A))",
+    "  for t = 1,...,T do",
+    "    y_prop <- GuidedProposal(y, pred, t, T, constraints)",
+    "    if F == PLS-LDA then y_prop <- TransitionCoarsen(y_prop, pred)",
+    "    (A_prop, pred_prop) <- CrossValidate(F, X[L_r,], y_prop, Pi_r)",
+    "    update (y_best, A_best, S_best) when Score_F(y_prop, A_prop) improves",
+    "    (y, pred, A) <- AcceptOrCool(y_prop, pred_prop, A_prop, t, T)",
+    "  end for",
+    "  c[,r] <- ProjectLabels(F, X[L_r,], y_best, X)",
+    "end for",
+    "for each edge (i,j) in G0 do",
+    "  V_ij <- {r : c[i,r] and c[j,r] are valid}; a_ij <- mean over r in V_ij of 1[c[i,r] = c[j,r]]",
+    "  d_ij' <- infinity if a_ij = 0 else (1 + d_ij) / a_ij^2",
+    "end for",
+    "return corrected graph G, projected label matrix c, and paired raw CV accuracies",
 ]
 
 
@@ -1414,7 +1672,7 @@ SINGLE_RUN_PSEUDOCODE_LINES = [
     "",
     "pred0 <- CrossValidate(F, X_L, y0, folds)",
     "acc0 <- Accuracy(y0, pred0)",
-    "score0 <- ObjectiveScore(y0, acc0)",
+    "score0 <- ObjectiveScore(F, y0, acc0)",
     "y_best <- y0; pred_best <- pred0; acc_best <- acc0; score_best <- score0",
     "y_current <- y0; pred_current <- pred0; acc_current <- acc0; score_current <- score0",
     "",
@@ -1438,9 +1696,12 @@ SINGLE_RUN_PSEUDOCODE_LINES = [
     "  end for",
     "",
     "  y_prop <- ClassTransitionProposals(y_prop, pred_base, fixed)",
+    "  if F == PLS-LDA then",
+    "    y_prop <- PLSLDATransitionCoarsening(y_prop, pred_base, fixed)",
+    "  end if",
     "  pred_prop <- CrossValidate(F, X_L, y_prop, folds)  # exactly one CV pass",
     "  acc_prop <- Accuracy(y_prop, pred_prop)",
-    "  score_prop <- ObjectiveScore(y_prop, acc_prop)",
+    "  score_prop <- ObjectiveScore(F, y_prop, acc_prop)",
     "",
     "  if score_prop > score_best then",
     "    y_best <- y_prop; pred_best <- pred_prop",
@@ -1469,25 +1730,22 @@ KODAMA_PSEUDOCODE_LINES = [
     "  M: number of independent runs",
     "  Tcycle: proposal/evaluation cycles per run",
     "  landmarks, splitting, graph_neighbors",
-    "  optional coordinates, starting_labels, constrain, fixed",
+    "  optional starting_labels, constrain, fixed",
     "",
     "Output:",
     "  C: M by n matrix of optimized label vectors",
     "  A: length-M vector of best raw CV accuracies",
     "  G_K: KODAMA-corrected neighbor graph",
+    "  Z_umap, Z_tsne: optional backend-native PCA starts",
     "",
     "X32 <- float32(X)",
     "L_eff <- ValidateLandmarks(landmarks, n)  # ceil(0.75*n) when request >= n",
-    "G0 <- KNNGraph(X32, graph_neighbors)",
+    "G0 <- KNNGraph(X32, graph_neighbors)  # exactly once, before M",
+    "Z_umap, Z_tsne <- VisualizationPCAStarts(X32)  # one PCA, if requested",
     "for r = 1,...,M do",
     "  rng <- RNG(seed + r)",
-    "  if coordinates are supplied then",
-    "    strata <- OccupiedGridCells(coordinates, ceil(L_eff^(1/d)))",
-    "    L <- QuotaLandmarks(strata, L_eff, rng, ordered=TRUE)",
-    "  else",
-    "    coarse <- KMeans(X32, splitting, rng)",
-    "    L <- QuotaLandmarks(coarse, L_eff, rng, ordered=FALSE)",
-    "  end if",
+    "  coarse <- KMeans(X32, splitting, rng)",
+    "  L <- QuotaLandmarks(coarse, L_eff, rng)",
     "  if starting_labels supplied then",
     "    y0 <- starting_labels[L]",
     "  else",
@@ -1505,8 +1763,8 @@ KODAMA_PSEUDOCODE_LINES = [
     "  A[r] <- acc_best",
     "end for",
     "",
-    "G_K <- ReweightGraphByLabelAgreement(G0, C)",
-    "return C, A, G_K",
+    "G_K <- ReweightGraphByLabelAgreementInPlace(G0, C)",
+    "return C, A, G_K, Z_umap, Z_tsne",
     "",
     "QuotaLandmarks(strata, L, rng, ordered):",
     "  for each stratum c do",
@@ -1519,13 +1777,13 @@ KODAMA_PSEUDOCODE_LINES = [
     "  SystematicRound(frac, R, u, ordered, take)",
     "  return union_c SampleWithoutReplacement(c, take[c], rng)",
     "",
-    "ObjectiveScore(y, a):",
+    "ObjectiveScore(F, y, a):",
     "  score <- a",
     "  if guarded_diversity then",
     "    p_l <- class proportions in y",
     "    score <- score * sqrt(1 - sum_l p_l^2)",
     "  end if",
-    "  if class_coarsening then",
+    "  if F == PLS-LDA and class_coarsening then",
     "    score <- score - (1 - a) * Parsimony(y)",
     "  end if",
     "  return score",
@@ -1555,11 +1813,11 @@ GRAPH_INPUT_PSEUDOCODE_LINES = [
     "G0 <- NormalizeExternalGraph(I, D)",
     "if X is supplied then",
     "  X_work <- float32(X)",
-    "else if F == PLS-LDA then",
-    "  X_work <- SelfTuningLaplacianFeatures(G0, ncomp)",
     "else",
-    "  X_work <- empty",
+    "  X_work <- SelfTuningLaplacianFeatures(G0, ncomp)",
     "end if",
+    "# For KNN, X_work supplies selection/initialization geometry only;",
+    "# graph voting, projection, and correction continue to use G0.",
     "",
     "for r = 1,...,M do",
     "  rng <- RNG(seed + r)",
@@ -1580,7 +1838,7 @@ GRAPH_INPUT_PSEUDOCODE_LINES = [
     "  A[r] <- acc_best",
     "end for",
     "",
-    "G_K <- ReweightGraphByLabelAgreement(G0, C)",
+    "G_K <- ReweightGraphByLabelAgreementInPlace(G0, C)",
     "return C, A, G_K",
 ]
 
@@ -1594,9 +1852,15 @@ IMPLEMENTATION_EVIDENCE_ROWS = [
     ),
     (
         "Package-owned CPU HNSW",
-        "src/native_knn.cpp implements float32 HNSW search used by KNNCV, CoreKNN, graph construction, and KODAMA.matrix without linking FAISS.",
-        "Dependency-free CPU CTest covers folds, prediction accuracy, graph construction, and KODAMA optimization; no FAISS build option remains.",
-        "On MetRef, native CPU KNNCV reproduced accuracy 0.827033; runtime evidence is reported independently from accelerator paths.",
+        "src/native_knn.cpp implements HNSW over contiguous float32 vectors and flat adjacency arrays. It completes a deterministic connected base seed of min(n, max(n_threads + 1, 2 m_HNSW + 1)) points before per-node-locked parallel insertion, cached reciprocal-edge distances, reusable batched candidate workspaces, and batched parallel queries. KNNCV, CoreKNN, graph construction, and KODAMA.matrix use it without linking FAISS.",
+        "tests/test_cv.cpp requires valid ordered self-excluding graphs and at least 0.99 brute-force recall for both one-thread and four-thread builds. A 100-build stress test records minimum exact recall, while dependency-free CTest covers folds, prediction accuracy, graph construction, and KODAMA optimization; the full CPU suite also passes ThreadSanitizer.",
+        "On a 4,000 by 32 Apple M3 benchmark with k = 30, the three-run median was 6.722 s with one thread and 1.791 s with four (3.75x scaling), versus 7.248 s for the previous four-thread path (4.05x improvement). Median one/four-thread graph overlap was 0.99966. Across 100 repeated 600 by 24 builds with k = 20, minimum and mean recall versus brute force were 0.99975 and 0.99987. On MetRef, native CPU KNNCV reproduced accuracy 0.827033.",
+    ),
+    (
+        "Single-owner graph lifecycle",
+        "src/kodama_matrix.cpp retains global_graph through the independent runs, compacts and optionally fuses rows in place, applies agreement correction in the same buffers, and moves the graph into KODAMAMatrixResult. The result no longer owns base_knn beside knn; R and Python serialize one graph.",
+        "tests/test_cv.cpp compares lazy in-place correction with the edge-agreement formula, verifies stable index and distance storage addresses, and checks storage accounting. Wrapper tests require one knn payload and correction-state metadata.",
+        "For the flow18 dimensions (1,000,021 samples, k = 100), the lifecycle benchmark reduced retained graph capacity from 2,408,050,568 to 808,016,968 bytes and maximum RSS from 2,354,304 to 791,808 KiB (66.4%). The graph ownership/copy phase fell from 0.561 to 0.059 s (89.4%); complete process wall time, including graph creation and a fixed RSS observation hold, fell from 1.60 to 1.07 s.",
     ),
     (
         "CUDA nearest-neighbor search",
@@ -1624,9 +1888,9 @@ IMPLEMENTATION_EVIDENCE_ROWS = [
     ),
     (
         "Exact-quota landmarking",
-        "src/kodama_matrix.cpp forms coarse expression strata for matrix input or occupied regular-grid cells for 2D/3D coordinate input, then allocates exact population-proportional quotas by randomized systematic rounding and samples observed rows without replacement.",
-        "tests/test_cv.cpp checks exact effective count, represented/occupied strata, automatic grid dimensions, fixed-seed repeatability, and CPU/CUDA landmark-diagnostic parity.",
-        "On flow18, 750,016 observed landmarks were selected from 300/300 coarse strata in 0.321 s; the complete M=1, Tcycle=10 CUDA KNN call took 362.348 s, of which 335.079 s was global graph construction.",
+        "src/kodama_matrix.cpp forms coarse matrix-derived strata, allocates exact population-proportional quotas by randomized systematic rounding, and samples rows without replacement.",
+        "tests/test_cv.cpp checks the exact effective count, distinct and represented samples, fixed-seed repeatability, and CPU/CUDA landmark-diagnostic parity.",
+        "On flow18, 750,016 landmarks were selected from 300/300 coarse matrix strata in 0.321 s; the complete M=1, Tcycle=10 CUDA KNN call took 362.348 s, of which 335.079 s was global graph construction.",
     ),
     (
         "Native Apple Metal backend",
@@ -1646,6 +1910,12 @@ IMPLEMENTATION_EVIDENCE_ROWS = [
         "tests/test_cv.cpp checks dimensions, finite values, centered scores, orthonormal loadings, ordered singular values, determinism, float/double input parity, and CUDA agreement; tests/test_metal.cpp checks Metal agreement; R and Python tests exercise the public wrappers.",
         "PCA is an auxiliary public primitive rather than part of the KODAMA objective. Performance claims will be reported separately from KODAMA.matrix timings when a matched PCA benchmark is archived.",
     ),
+    (
+        "Visualization parity and initialization",
+        "src/visualization.cpp exposes KODAMAVisualizationPCAInit and CPU UMAP/openTSNE; the CUDA embedding kernels supply the corresponding accelerator optimizers. KODAMA.matrix builds the full-data graph once before M and, when requested, uses one native PCA to retain both scaled starts. R and Python wrappers enforce explicit/stored/raw/fallback precedence and backend matching, so supplying raw data again does not recompute an already compatible stored start.",
+        "C++ tests verify a single graph build for M > 1, both retained initialization matrices, centering, openTSNE scale, backend metadata, and raw-data overloads; wrapper tests verify default stored starts and graph-only fallbacks. A controlled CPU openTSNE comparison at the pinned fastEmbedR revision produced zero maximum and mean coordinate difference.",
+        "On flow18 (1,000,021 samples), matched CUDA KNN runs with Tcycle = 100 took 300.314 s for M = 1 and 301.091 s for M = 2; both reported graph_builds = 1, and the added independent 100-cycle search cost only 0.78 s wall time. UMAP graph construction, initialization, schedule, and objective match the pinned source. Later CPU coordinates are assessed by embedding diagnostics rather than bitwise equality because kodama-cpp is float32-native while the compared fastEmbedR R path stores iterative coordinates as doubles.",
+    ),
 ]
 
 
@@ -1656,7 +1926,7 @@ NOVELTY_ROWS = [
     ),
     (
         "Backend-native classifiers",
-        "Keeps KNN and PLS-LDA mathematically shared but implements their dominant operations separately for CPU, CUDA, and Metal.",
+        "Keeps each classifier's mathematics consistent across CPU, CUDA, and Metal while implementing its dominant operations separately for each backend.",
     ),
     (
         "Float32 execution",
@@ -1690,6 +1960,11 @@ REFERENCES = [
         "Cacciatore, S., Tenori, L., Luchinat, C., Bennett, P. R., and MacIntyre, D. A. "
         "KODAMA: an R package for knowledge discovery and data mining. Bioinformatics, "
         "33(4), 621-623, 2017."
+    ),
+    (
+        "Abdel-Shafy, E. A., Kassim, M., Vignoli, A., et al. KODAMA enables self-guided "
+        "weakly supervised learning in spatial transcriptomics. bioRxiv, "
+        "doi:10.1101/2025.05.28.656544, 2025."
     ),
     (
         "Cacciatore, S. and Tenori, L. KODAMA: Knowledge Discovery by Accuracy Maximization. "
@@ -1923,6 +2198,7 @@ def add_title(
     authors: str,
     author_records=None,
     affiliations=None,
+    author_notes=None,
     corresponding_author: str | None = None,
 ) -> None:
     p = doc.add_paragraph()
@@ -1974,6 +2250,17 @@ def add_title(
             run = p.add_run(" " + affiliation)
             set_run_font(run, 8.5, False, TOKENS["muted"])
             run.italic = True
+
+    if author_notes:
+        for marker, note in author_notes:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(1)
+            p.paragraph_format.space_after = Pt(1)
+            run = p.add_run(marker)
+            set_run_font(run, 7.5, False, TOKENS["muted"])
+            run.font.superscript = True
+            run = p.add_run(" " + note)
+            set_run_font(run, 8.5, False, TOKENS["muted"])
 
     if corresponding_author:
         p = doc.add_paragraph()
@@ -2251,6 +2538,7 @@ def build_docx() -> None:
         "",
         author_records=AUTHORS,
         affiliations=AFFILIATIONS,
+        author_notes=AUTHOR_NOTES,
     )
 
     doc.add_heading("Abstract", level=1)
@@ -2272,6 +2560,16 @@ def build_docx() -> None:
                 "Objective",
                 "c* = argmax_c A(c; X, F, Pi), where A is cross-validated accuracy under the chosen classifier and fold assignment.",
             )
+            doc.add_heading("Landmark-projection strategy", level=2)
+            for paragraph in LANDMARKING_NOVELTY_PARAGRAPHS:
+                doc.add_paragraph(paragraph)
+            add_table(
+                doc,
+                ("Validation dimension", "Current manuscript evidence"),
+                LANDMARK_VALIDATION_ROWS,
+                [1.45, 5.0],
+                font_size=8.0,
+            )
             doc.add_heading("Label-vector search mechanics", level=2)
             for paragraph in LABEL_SEARCH_DETAIL_PARAGRAPHS:
                 doc.add_paragraph(paragraph)
@@ -2290,6 +2588,13 @@ def build_docx() -> None:
             doc.add_heading("Final graph and dissimilarity", level=3)
             for paragraph in GRAPH_CONSTRUCTION_PARAGRAPHS:
                 doc.add_paragraph(paragraph)
+            doc.add_heading("Main algorithm pseudocode", level=2)
+            doc.add_paragraph(
+                "The following compact algorithm connects landmark selection, guided label evolution, "
+                "projection, and agreement-graph construction. Each inner cycle contributes exactly "
+                "one new CV evaluation; the initial state contributes one baseline CV evaluation."
+            )
+            add_pseudocode_block(doc, MAIN_ALGORITHM_PSEUDOCODE_LINES)
         if heading == "3. Implementation architecture":
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2323,10 +2628,37 @@ def build_docx() -> None:
             )
             doc.add_heading("Public API summary", level=2)
             add_table(doc, ("Layer", "Public API", "Purpose"), API_ROWS, [1.35, 1.75, 3.35])
+            doc.add_heading("Graph-first input contract", level=2)
+            doc.add_paragraph(
+                "KODAMA.graph returns graph arrays, backend-matched PCA starts, metadata, and timings, "
+                "but never the source matrix. Raw features remain caller-owned when supplied separately."
+            )
+            add_table(
+                doc,
+                ("Input", "Working geometry", "KNN evolution", "PLS-LDA evolution", "Graph builds"),
+                GRAPH_INPUT_CONTRACT_ROWS,
+                [0.8, 1.55, 1.35, 1.45, 0.8],
+                font_size=7.2,
+            )
+            doc.add_page_break()
+            add_pseudocode_block(doc, GRAPH_PREPARATION_PSEUDOCODE_LINES, font_size=7.0, line_spacing=0.86)
+            doc.add_heading("Graph-API smoke validation", level=3)
+            add_table(
+                doc,
+                ("Classifier", "Input", "Builds", "Core s", "Best CV", "Agreement"),
+                GRAPH_API_SMOKE_ROWS,
+                [1.05, 0.8, 0.65, 0.75, 0.85, 0.9],
+                font_size=7.2,
+            )
+            doc.add_paragraph(GRAPH_API_SMOKE_NOTE)
             doc.add_heading("Computational scaling", level=2)
             add_table(doc, ("Component", "Dominant work", "Implementation implication"), COMPLEXITY_ROWS, [1.25, 2.7, 2.5], font_size=7.6)
             doc.add_heading("Graph-input KODAMA validation boundary", level=2)
             add_table(doc, ("Path", "Implementation", "Interpretation"), GRAPH_INPUT_VALIDATION_ROWS, [1.25, 2.75, 2.45], font_size=7.4)
+            doc.add_heading("KODAMA directly from a KNN matrix", level=2)
+            for paragraph in GRAPH_INPUT_PROCEDURE_PARAGRAPHS:
+                doc.add_paragraph(paragraph)
+            add_pseudocode_block(doc, GRAPH_INPUT_USAGE_LINES, font_size=6.9, line_spacing=0.84)
         if heading == "4. Relationship to public KODAMA literature":
             doc.add_heading("Compatibility with the R implementation", level=2)
             add_table(doc, ("Aspect", "Public R/literature contract", "kodama-cpp"), COMPATIBILITY_ROWS, [1.25, 2.65, 2.55])
@@ -2482,7 +2814,7 @@ def build_docx() -> None:
                 caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 caption.paragraph_format.space_after = Pt(8)
                 run = caption.add_run(
-                    "Figure 3. Fixed M = 100 and Tcycle = 100 nonspatial visualization validation. "
+                    "Figure 3. Fixed M = 100 and Tcycle = 100 matrix-input visualization validation. "
                     "Panels A and B compare truth-label silhouette; panel C reports complete KODAMA.matrix "
                     "wall time on a logarithmic scale; panel D reports selected-run ARI. Reference labels "
                     "were used only after optimization."
@@ -2518,7 +2850,7 @@ def build_docx() -> None:
                     caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     caption.paragraph_format.space_after = Pt(8)
                     run = caption.add_run(
-                        "Figure 4. Sensitivity of KODAMA quality and runtime to Tcycle and M on named nonspatial datasets."
+                        "Figure 4. Sensitivity of KODAMA quality and runtime to Tcycle and M on named matrix-input datasets."
                     )
                     set_run_font(run, 9.0, False, TOKENS["muted"])
                 doc.add_heading("Agreement-graph convergence", level=3)
@@ -2546,7 +2878,7 @@ def build_docx() -> None:
                     set_run_font(run, 9.0, False, TOKENS["muted"])
             else:
                 doc.add_paragraph(
-                    "Named nonspatial release results are pending. Preliminary anonymized development rows are deliberately excluded from this submission draft."
+                    "Named matrix-input release results are pending. Preliminary anonymized development rows are deliberately excluded from this submission draft."
                 )
             doc.add_heading("Implementation claims and evidence", level=2)
             add_table(
@@ -2581,10 +2913,11 @@ def build_docx() -> None:
     algorithm_heading = doc.add_heading("Algorithm 3: KODAMA.matrix.graph pseudocode", level=1)
     algorithm_heading.paragraph_format.page_break_before = True
     doc.add_paragraph(
-        "The graph-input routine keeps the same label-evolution objective while replacing "
-        "the initial neighbor search with caller-supplied indices and distances. KNN uses "
-        "the supplied graph directly; PLS-LDA uses self-tuning Laplacian features only when "
-        "the original feature matrix is not supplied."
+        "The graph-input routine keeps the applicable classifier-specific label-evolution policy "
+        "while replacing global neighbor-search construction with caller-supplied indices and "
+        "distances. KNN voting, label projection, and agreement correction use the supplied graph. "
+        "When the original feature matrix is absent, self-tuning Laplacian features provide "
+        "selection and initialization geometry and, for PLS-LDA, the classifier representation."
     )
     add_pseudocode_block(doc, GRAPH_INPUT_PSEUDOCODE_LINES)
 
@@ -2726,11 +3059,12 @@ def build_tex() -> None:
     body.append(r"\title{kodama-cpp: Cross-Validated Accuracy Maximization on CPU, CUDA, and Apple Metal}")
     body.append(r"\author{%")
     for name, markers, email in AUTHORS:
+        markers_tex = markers.replace("†", r"\dagger")
         body.append(
             r"\name "
             + tex_escape(name)
             + r"$^{"
-            + markers
+            + markers_tex
             + r"}$ \email "
             + tex_escape(email)
             + r" \\"
@@ -2746,6 +3080,10 @@ def build_tex() -> None:
                 r"Medicine (IDM), \\ \addr University",
             )
         body.append(r"\addr $^{" + marker + r"}$ " + affiliation_tex + r" \\")
+    body.append(r"\addr $^{*}$ Moussa Kassim and Martin Ocharo contributed equally. \\")
+    body.append(
+        r"\addr $^{\dagger}$ Leonardo Tenori and Stefano Cacciatore are co-corresponding authors. \\"
+    )
     body.append(r"}")
     body.append(r"\editor{To be assigned}")
     body.append(r"\maketitle")
@@ -2781,6 +3119,23 @@ def build_tex() -> None:
             body.append(r"c^\star = \arg\max_c \; A(c; X, F, \Pi),")
             body.append(r"\end{equation}")
             body.append("where A is the held-out accuracy of classifier family F under fold assignment Pi.")
+            body.append("")
+            body.append(r"\subsection{Landmark-projection strategy}")
+            for paragraph in LANDMARKING_NOVELTY_PARAGRAPHS:
+                body.append(tex_escape(paragraph))
+                body.append("")
+            body.append(r"\begin{table}[h]")
+            body.append(r"\caption{Validation of the landmark-projection implementation.}")
+            body.append(r"\small")
+            body.append(r"\begin{tabularx}{\linewidth}{p{0.22\linewidth}X}")
+            body.append(r"\toprule")
+            body.append(r"Validation dimension & Current manuscript evidence \\")
+            body.append(r"\midrule")
+            for dimension, evidence in LANDMARK_VALIDATION_ROWS:
+                body.append(f"{tex_escape(dimension)} & {tex_escape(evidence)} \\\\")
+            body.append(r"\bottomrule")
+            body.append(r"\end{tabularx}")
+            body.append(r"\end{table}")
             body.append("")
             body.append(r"\subsection{Label-vector search mechanics}")
             for paragraph in LABEL_SEARCH_DETAIL_PARAGRAPHS:
@@ -2819,6 +3174,19 @@ def build_tex() -> None:
             for paragraph in GRAPH_CONSTRUCTION_PARAGRAPHS:
                 body.append(tex_escape(paragraph))
                 body.append("")
+            body.append(r"\subsection{Main algorithm pseudocode}")
+            body.append(tex_escape(
+                "The compact algorithm below connects landmark selection, guided label evolution, "
+                "projection, and agreement-graph construction. Each inner cycle contributes exactly "
+                "one new CV evaluation; the initial state contributes one baseline CV evaluation."
+            ))
+            body.append("")
+            body.append(r"\begin{scriptsize}")
+            body.append(r"\begin{verbatim}")
+            body.extend(MAIN_ALGORITHM_PSEUDOCODE_LINES)
+            body.append(r"\end{verbatim}")
+            body.append(r"\end{scriptsize}")
+            body.append("")
         if heading == "3. Implementation architecture":
             body.append(r"\begin{figure}[h]")
             body.append(r"\centering")
@@ -2865,6 +3233,51 @@ def build_tex() -> None:
             body.append(r"\end{tabularx}")
             body.append(r"\end{table}")
             body.append("")
+            body.append(r"\subsection{Graph-first input contract}")
+            body.append(tex_escape(
+                "KODAMA.graph returns graph arrays, backend-matched PCA starts, metadata, and timings, "
+                "but never the source matrix. Raw features remain caller-owned when supplied separately."
+            ))
+            body.append("")
+            body.append(r"\begin{table}[h]")
+            body.append(r"\caption{Graph-first KODAMA.matrix input contract.}")
+            body.append(r"\small")
+            body.append(r"\begin{tabularx}{\linewidth}{p{0.12\linewidth}X X X p{0.10\linewidth}}")
+            body.append(r"\toprule")
+            body.append(r"Input & Working geometry & KNN evolution & PLS--LDA evolution & Graph builds \\")
+            body.append(r"\midrule")
+            for input_form, geometry, knn_path, pls_path, builds in GRAPH_INPUT_CONTRACT_ROWS:
+                body.append(
+                    f"{tex_escape(input_form)} & {tex_escape(geometry)} & {tex_escape(knn_path)} & "
+                    f"{tex_escape(pls_path)} & {tex_escape(builds)} \\\\"
+                )
+            body.append(r"\bottomrule")
+            body.append(r"\end{tabularx}")
+            body.append(r"\end{table}")
+            body.append("")
+            body.append(r"\begin{scriptsize}")
+            body.append(r"\begin{verbatim}")
+            body.extend(GRAPH_PREPARATION_PSEUDOCODE_LINES)
+            body.append(r"\end{verbatim}")
+            body.append(r"\end{scriptsize}")
+            body.append("")
+            body.append(r"\begin{table}[h]")
+            body.append(r"\caption{MetRef CUDA graph-API smoke validation ($n=873$, $p=375$, $k=100$, $M=T=10$). Times are core seconds.}")
+            body.append(r"\small")
+            body.append(r"\begin{tabular}{llrrrr}")
+            body.append(r"\toprule")
+            body.append(r"Classifier & Input & Builds & Time & Best CV & Agreement \\")
+            body.append(r"\midrule")
+            for classifier, input_form, builds, runtime, best_cv, agreement in GRAPH_API_SMOKE_ROWS:
+                body.append(
+                    f"{tex_escape(classifier)} & {tex_escape(input_form)} & {builds} & "
+                    f"{runtime} & {best_cv} & {agreement} \\\\"
+                )
+            body.append(r"\bottomrule")
+            body.append(r"\end{tabular}")
+            body.append(r"\end{table}")
+            body.append(tex_escape(GRAPH_API_SMOKE_NOTE))
+            body.append("")
             body.append(r"\subsection{Computational scaling}")
             body.append(r"\begin{table}[h]")
             body.append(r"\caption{Dominant computational work in the KODAMA pipeline.}")
@@ -2892,6 +3305,20 @@ def build_tex() -> None:
             body.append(r"\bottomrule")
             body.append(r"\end{tabularx}")
             body.append(r"\end{table}")
+            body.append("")
+            body.append(r"\clearpage")
+            body.append(r"\subsection{KODAMA directly from a KNN matrix}")
+            for paragraph in GRAPH_INPUT_PROCEDURE_PARAGRAPHS:
+                body.append(tex_escape(paragraph))
+                body.append("")
+            body.append(r"\vfill\newpage")
+            body.append(r"\noindent\begin{minipage}{\linewidth}")
+            body.append(r"\begin{scriptsize}")
+            body.append(r"\begin{verbatim}")
+            body.extend(GRAPH_INPUT_USAGE_LINES)
+            body.append(r"\end{verbatim}")
+            body.append(r"\end{scriptsize}")
+            body.append(r"\end{minipage}")
             body.append("")
         if heading == "4. Relationship to public KODAMA literature":
             body.append(r"\begin{table}[h]")
@@ -3248,7 +3675,7 @@ def build_tex() -> None:
                 body.append(r"\begin{figure}[h]")
                 body.append(r"\centering")
                 body.append(r"\includegraphics[width=\linewidth]{jmlr_nonspatial_panel_20260718/nonspatial_visualization_validation.png}")
-                body.append(r"\caption{Fixed M = 100 and Tcycle = 100 nonspatial visualization validation. Panels A and B compare truth-label silhouette; panel C reports complete KODAMA.matrix wall time on a logarithmic scale; panel D reports selected-run ARI. Reference labels were used only after optimization.}")
+                body.append(r"\caption{Fixed M = 100 and Tcycle = 100 matrix-input visualization validation. Panels A and B compare truth-label silhouette; panel C reports complete KODAMA.matrix wall time on a logarithmic scale; panel D reports selected-run ARI. Reference labels were used only after optimization.}")
                 body.append(r"\end{figure}")
                 body.append("")
             body.append(r"\subsection{Sensitivity of M and Tcycle}")
@@ -3296,7 +3723,7 @@ def build_tex() -> None:
                     body.append(r"\begin{figure}[h]")
                     body.append(r"\centering")
                     body.append(r"\includegraphics[width=\linewidth]{kodama_m_tcycle_sensitivity.png}")
-                    body.append(r"\caption{Sensitivity of KODAMA quality and runtime to Tcycle and M on named nonspatial datasets.}")
+                    body.append(r"\caption{Sensitivity of KODAMA quality and runtime to Tcycle and M on named matrix-input datasets.}")
                     body.append(r"\end{figure}")
                     body.append("")
                 body.append(r"\begin{table}[h]")
@@ -3324,7 +3751,7 @@ def build_tex() -> None:
                     body.append("")
             else:
                 body.append(tex_escape(
-                    "Named nonspatial release results are pending. Preliminary anonymized development rows are deliberately excluded from this submission draft."
+                    "Named matrix-input release results are pending. Preliminary anonymized development rows are deliberately excluded from this submission draft."
                 ))
                 body.append("")
             evidence_chunks = (
@@ -3383,7 +3810,8 @@ def build_tex() -> None:
     body.append(tex_escape(
         "Algorithm 2 repeats Algorithm 1 independently M times, projects each optimized run "
         "back to all samples, and builds the final KODAMA-corrected graph from agreement "
-        "across the optimized label vectors."
+        "across the optimized label vectors. The full-data neighbor graph is constructed once "
+        "before the M loop; an optional single PCA supplies both stored visualization starts."
     ))
     body.append("")
     body.append(r"\begin{scriptsize}")
@@ -3392,12 +3820,14 @@ def build_tex() -> None:
     body.append(r"\end{verbatim}")
     body.append(r"\end{scriptsize}")
     body.append("")
+    body.append(r"\clearpage")
     body.append(r"\subsection{KODAMA.matrix.graph from supplied neighbors}")
     body.append(tex_escape(
-        "Algorithm 3 keeps the same label-evolution objective while replacing the initial "
-        "neighbor search with caller-supplied indices and distances. KNN uses the supplied "
-        "graph directly; PLS-LDA uses self-tuning Laplacian features only when the original "
-        "feature matrix is not supplied."
+        "Algorithm 3 keeps the applicable classifier-specific label-evolution policy while replacing "
+        "global neighbor-search construction with caller-supplied indices and distances. KNN voting, "
+        "label projection, and agreement correction use the supplied graph. When the original feature "
+        "matrix is absent, self-tuning Laplacian features provide selection and initialization geometry "
+        "and, for PLS-LDA, the classifier representation."
     ))
     body.append("")
     body.append(r"\begin{scriptsize}")
@@ -3443,6 +3873,15 @@ def build_bib() -> None:
               pages={621--623},
               year={2017},
               doi={10.1093/bioinformatics/btw705}
+            }
+
+            @article{abdelshafy2025landmarks,
+              title={KODAMA enables self-guided weakly supervised learning in spatial transcriptomics},
+              author={Abdel-Shafy, Ebtesam A. and Kassim, Moussa and Vignoli, Alessia and Mamdouh, Farag and Tyekucheva, Svitlana and Ahmed, Dalia and Ojo, Dupe and Price, Brendon and Socciarelli, Fabio and Duarte-Delgado, Nancy Paola and Ocharo, Martin and Okeke, Chiamaka Jessica and Triboli, Luca and MacIntyre, David A. and Loda, Massimo and Sarkar, Devanand and Gupta, Dinesh and Piazza, Silvano and Zerbini, Luiz Fernando and Tenori, Leonardo and Cacciatore, Stefano},
+              journal={bioRxiv},
+              year={2025},
+              doi={10.1101/2025.05.28.656544},
+              note={Preprint}
             }
 
             @book{chapelle2006semisupervised,

@@ -14,6 +14,8 @@
 #include <cstring>
 #include <cmath>
 #include <cfloat>
+#include <exception>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <numeric>
@@ -120,11 +122,164 @@ int effective_cpu_threads(const int n_threads, const int n_items) {
   return std::max(1, std::min(std::min(n_threads, 4), n_items));
 }
 
+class ParallelExecutor {
+ public:
+  explicit ParallelExecutor(const int max_threads)
+      : max_threads_(std::max(1, max_threads)) {
+    workers_.reserve(static_cast<std::size_t>(max_threads_ - 1));
+    for (int thread_id = 1; thread_id < max_threads_; ++thread_id) {
+      workers_.emplace_back([this, thread_id]() { worker_loop(thread_id); });
+    }
+  }
+
+  ParallelExecutor(const ParallelExecutor&) = delete;
+  ParallelExecutor& operator=(const ParallelExecutor&) = delete;
+
+  ~ParallelExecutor() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+      ++generation_;
+    }
+    start_cv_.notify_all();
+    for (std::thread& worker : workers_) worker.join();
+  }
+
+  int max_threads() const {
+    return max_threads_;
+  }
+
+  template <typename Function>
+  void run(const int n, const int requested_threads, Function& fn) {
+    const int active_threads = std::max(
+      1,
+      std::min(std::min(requested_threads, max_threads_), std::max(1, n))
+    );
+    if (active_threads <= 1 || n < 2) {
+      fn(0, n, 0);
+      return;
+    }
+
+    const int chunk = (n + active_threads - 1) / active_threads;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      task_ = [&fn](const int begin, const int end, const int thread_id) {
+        fn(begin, end, thread_id);
+      };
+      n_ = n;
+      active_threads_ = active_threads;
+      chunk_ = chunk;
+      completed_workers_ = 0;
+      worker_error_ = nullptr;
+      ++generation_;
+    }
+    start_cv_.notify_all();
+
+    std::exception_ptr main_error;
+    try {
+      fn(0, std::min(n, chunk), 0);
+    } catch (...) {
+      main_error = std::current_exception();
+    }
+
+    std::exception_ptr worker_error;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      done_cv_.wait(lock, [this]() {
+        return completed_workers_ == static_cast<int>(workers_.size());
+      });
+      worker_error = worker_error_;
+      task_ = nullptr;
+    }
+    if (main_error != nullptr) std::rethrow_exception(main_error);
+    if (worker_error != nullptr) std::rethrow_exception(worker_error);
+  }
+
+ private:
+  void worker_loop(const int thread_id) {
+    std::uint64_t observed_generation = 0;
+    while (true) {
+      std::function<void(int, int, int)> task;
+      int begin = 0;
+      int end = 0;
+      bool active = false;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        start_cv_.wait(lock, [this, observed_generation]() {
+          return stop_ || generation_ != observed_generation;
+        });
+        if (stop_) return;
+        observed_generation = generation_;
+        task = task_;
+        active = thread_id < active_threads_;
+        if (active) {
+          begin = thread_id * chunk_;
+          end = std::min(n_, begin + chunk_);
+          active = begin < end;
+        }
+      }
+
+      if (active) {
+        try {
+          task(begin, end, thread_id);
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (worker_error_ == nullptr) worker_error_ = std::current_exception();
+        }
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++completed_workers_;
+        if (completed_workers_ == static_cast<int>(workers_.size())) {
+          done_cv_.notify_one();
+        }
+      }
+    }
+  }
+
+  int max_threads_ = 1;
+  std::vector<std::thread> workers_;
+  std::mutex mutex_;
+  std::condition_variable start_cv_;
+  std::condition_variable done_cv_;
+  std::function<void(int, int, int)> task_;
+  std::uint64_t generation_ = 0;
+  int n_ = 0;
+  int active_threads_ = 1;
+  int chunk_ = 0;
+  int completed_workers_ = 0;
+  std::exception_ptr worker_error_;
+  bool stop_ = false;
+};
+
+thread_local ParallelExecutor* active_parallel_executor = nullptr;
+
+class ParallelExecutorScope {
+ public:
+  explicit ParallelExecutorScope(ParallelExecutor* executor)
+      : previous_(active_parallel_executor) {
+    active_parallel_executor = executor;
+  }
+
+  ~ParallelExecutorScope() {
+    active_parallel_executor = previous_;
+  }
+
+ private:
+  ParallelExecutor* previous_;
+};
+
 template <typename Worker>
 void parallel_for_chunks(const int n_items, const int n_threads, Worker worker) {
   const int threads = effective_cpu_threads(n_threads, n_items);
   if (threads == 1) {
     worker(0, n_items, 0);
+    return;
+  }
+  if (active_parallel_executor != nullptr &&
+      threads <= active_parallel_executor->max_threads()) {
+    active_parallel_executor->run(n_items, threads, worker);
     return;
   }
   std::vector<std::thread> workers;
@@ -1868,18 +2023,69 @@ int tsne_fft_grid_size(const int n) {
 }
 
 template <typename T>
-void fft_1d_t(std::complex<T>* a, const int n, const bool inverse) {
-  for (int i = 1, j = 0; i < n; ++i) {
-    int bit = n >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
+struct FftPlanT {
+  int size = 0;
+  int thread_capacity = 0;
+  std::vector<int> bit_reverse;
+  std::vector<std::complex<T>> forward_roots;
+  std::vector<std::complex<T>> inverse_roots;
+  std::vector<std::complex<T>> column_scratch;
+
+  void ensure(const int requested_size, const int requested_threads) {
+    const int threads = std::max(1, requested_threads);
+    if (size == requested_size) {
+      if (thread_capacity < threads) {
+        thread_capacity = threads;
+        column_scratch.resize(static_cast<std::size_t>(size) * thread_capacity);
+      }
+      return;
+    }
+    size = requested_size;
+    thread_capacity = threads;
+    bit_reverse.resize(static_cast<std::size_t>(size));
+    int bits = 0;
+    for (int value = size; value > 1; value >>= 1) ++bits;
+    for (int i = 0; i < size; ++i) {
+      unsigned int value = static_cast<unsigned int>(i);
+      unsigned int reversed = 0u;
+      for (int bit = 0; bit < bits; ++bit) {
+        reversed = (reversed << 1u) | (value & 1u);
+        value >>= 1u;
+      }
+      bit_reverse[static_cast<std::size_t>(i)] = static_cast<int>(reversed);
+    }
+    forward_roots.clear();
+    inverse_roots.clear();
+    forward_roots.reserve(static_cast<std::size_t>(bits));
+    inverse_roots.reserve(static_cast<std::size_t>(bits));
+    for (int len = 2; len <= size; len <<= 1) {
+      const T angle = static_cast<T>(6.283185307179586476925286766559) /
+        static_cast<T>(len);
+      forward_roots.emplace_back(std::cos(angle), std::sin(angle));
+      inverse_roots.emplace_back(std::cos(-angle), std::sin(-angle));
+    }
+    column_scratch.resize(static_cast<std::size_t>(size) * thread_capacity);
+  }
+};
+
+template <typename T>
+void fft_1d_t(
+  std::complex<T>* a,
+  const int n,
+  const bool inverse,
+  const FftPlanT<T>& plan
+) {
+  for (int i = 1; i < n; ++i) {
+    const int j = plan.bit_reverse[static_cast<std::size_t>(i)];
     if (i < j) std::swap(a[i], a[j]);
   }
-  const T direction = inverse ? static_cast<T>(-1.0) : static_cast<T>(1.0);
-  for (int len = 2; len <= n; len <<= 1) {
-    const T angle = direction * static_cast<T>(6.283185307179586476925286766559) /
-                    static_cast<T>(len);
-    const std::complex<T> root(std::cos(angle), std::sin(angle));
+
+  const std::vector<std::complex<T>>& roots = inverse ?
+    plan.inverse_roots :
+    plan.forward_roots;
+  int stage = 0;
+  for (int len = 2; len <= n; len <<= 1, ++stage) {
+    const std::complex<T> root = roots[static_cast<std::size_t>(stage)];
     for (int i = 0; i < n; i += len) {
       std::complex<T> w(static_cast<T>(1.0), static_cast<T>(0.0));
       const int half = len >> 1;
@@ -1899,23 +2105,35 @@ void fft_1d_t(std::complex<T>* a, const int n, const bool inverse) {
 }
 
 template <typename T>
-void fft_2d_t(std::vector<std::complex<T>>& values, const int size, const bool inverse, const int n_threads) {
+void fft_2d_t(
+  std::vector<std::complex<T>>& values,
+  const int size,
+  const bool inverse,
+  const int n_threads,
+  FftPlanT<T>& plan
+) {
   parallel_for_chunks(size, n_threads, [&](const int begin, const int end, const int) {
     for (int row = begin; row < end; ++row) {
-      fft_1d_t<T>(values.data() + static_cast<std::size_t>(row) * size, size, inverse);
+      fft_1d_t<T>(
+        values.data() + static_cast<std::size_t>(row) * size,
+        size,
+        inverse,
+        plan
+      );
     }
   });
-  parallel_for_chunks(size, n_threads, [&](const int begin, const int end, const int) {
-    std::vector<std::complex<T>> column(static_cast<std::size_t>(size));
+  parallel_for_chunks(size, n_threads, [&](const int begin, const int end, const int thread_id) {
+    std::complex<T>* column = plan.column_scratch.data() +
+      static_cast<std::size_t>(thread_id) * size;
     for (int col = begin; col < end; ++col) {
       for (int row = 0; row < size; ++row) {
-        column[static_cast<std::size_t>(row)] =
+        column[row] =
           values[static_cast<std::size_t>(row) * size + col];
       }
-      fft_1d_t<T>(column.data(), size, inverse);
+      fft_1d_t<T>(column, size, inverse, plan);
       for (int row = 0; row < size; ++row) {
         values[static_cast<std::size_t>(row) * size + col] =
-          column[static_cast<std::size_t>(row)];
+          column[row];
       }
     }
   });
@@ -1963,6 +2181,7 @@ struct FftGridWorkspaceT {
   std::vector<std::complex<T>> kernel_q;
   std::vector<std::complex<T>> kernel_q2;
   std::vector<std::complex<T>> work;
+  FftPlanT<T> fft_plan;
 
   void ensure(const int requested_grid_size, const int requested_n, const int requested_threads) {
     grid_size = requested_grid_size;
@@ -1987,6 +2206,7 @@ struct FftGridWorkspaceT {
     kernel_q.resize(fft_total);
     kernel_q2.resize(fft_total);
     work.resize(fft_total);
+    fft_plan.ensure(fft_size, n_threads);
   }
 
   void clear_grid_mass() {
@@ -2001,15 +2221,24 @@ void copy_grid_to_fft_t(
   const std::vector<T>& grid,
   const int grid_size,
   const int fft_size,
-  std::vector<std::complex<T>>& out
+  std::vector<std::complex<T>>& out,
+  const int n_threads
 ) {
-  std::fill(out.begin(), out.end(), std::complex<T>(static_cast<T>(0.0), static_cast<T>(0.0)));
-  for (int y_cell = 0; y_cell < grid_size; ++y_cell) {
-    for (int x_cell = 0; x_cell < grid_size; ++x_cell) {
-      out[static_cast<std::size_t>(y_cell) * fft_size + x_cell] =
-        grid[static_cast<std::size_t>(y_cell) * grid_size + x_cell];
+  parallel_for_chunks(fft_size, n_threads, [&](const int begin, const int end, const int) {
+    const std::complex<T> zero(static_cast<T>(0.0), static_cast<T>(0.0));
+    for (int y_cell = begin; y_cell < end; ++y_cell) {
+      std::complex<T>* output_row =
+        out.data() + static_cast<std::size_t>(y_cell) * fft_size;
+      std::fill(output_row, output_row + fft_size, zero);
+      if (y_cell < grid_size) {
+        const T* input_row =
+          grid.data() + static_cast<std::size_t>(y_cell) * grid_size;
+        for (int x_cell = 0; x_cell < grid_size; ++x_cell) {
+          output_row[x_cell] = input_row[x_cell];
+        }
+      }
     }
-  }
+  });
 }
 
 template <typename T>
@@ -2017,15 +2246,18 @@ void copy_fft_to_grid_t(
   const std::vector<std::complex<T>>& values,
   const int grid_size,
   const int fft_size,
-  std::vector<T>& out
+  std::vector<T>& out,
+  const int n_threads
 ) {
   out.resize(static_cast<std::size_t>(grid_size) * grid_size);
-  for (int y_cell = 0; y_cell < grid_size; ++y_cell) {
-    for (int x_cell = 0; x_cell < grid_size; ++x_cell) {
-      out[static_cast<std::size_t>(y_cell) * grid_size + x_cell] =
-        values[static_cast<std::size_t>(y_cell) * fft_size + x_cell].real();
+  parallel_for_chunks(grid_size, n_threads, [&](const int begin, const int end, const int) {
+    for (int y_cell = begin; y_cell < end; ++y_cell) {
+      for (int x_cell = 0; x_cell < grid_size; ++x_cell) {
+        out[static_cast<std::size_t>(y_cell) * grid_size + x_cell] =
+          values[static_cast<std::size_t>(y_cell) * fft_size + x_cell].real();
+      }
     }
-  }
+  });
 }
 
 template <typename T>
@@ -2040,36 +2272,49 @@ void compute_fft_grid_convolution_workspace_t(
 ) {
   const int fft_size = grid_size << 1;
   const std::size_t fft_total = static_cast<std::size_t>(fft_size) * fft_size;
-  copy_grid_to_fft_t<T>(mass, grid_size, fft_size, ws.mass_fft);
-  copy_grid_to_fft_t<T>(mass_x, grid_size, fft_size, ws.mass_x_fft);
-  copy_grid_to_fft_t<T>(mass_y, grid_size, fft_size, ws.mass_y_fft);
-  std::fill(ws.kernel_q.begin(), ws.kernel_q.end(), std::complex<T>(static_cast<T>(0.0), static_cast<T>(0.0)));
-  std::fill(ws.kernel_q2.begin(), ws.kernel_q2.end(), std::complex<T>(static_cast<T>(0.0), static_cast<T>(0.0)));
-  for (int dy = -(grid_size - 1); dy <= grid_size - 1; ++dy) {
-    const int yy = dy < 0 ? dy + fft_size : dy;
-    const T y_offset = static_cast<T>(dy) * spacing;
-    for (int dx = -(grid_size - 1); dx <= grid_size - 1; ++dx) {
-      const int xx = dx < 0 ? dx + fft_size : dx;
-      const T x_offset = static_cast<T>(dx) * spacing;
-      const T d2 = x_offset * x_offset + y_offset * y_offset;
-      const T q = static_cast<T>(1.0) / (static_cast<T>(1.0) + d2);
-      const T q2 = q * q;
-      const std::size_t pos = static_cast<std::size_t>(yy) * fft_size + xx;
-      ws.kernel_q[pos] = q;
-      ws.kernel_q2[pos] = q2;
+  copy_grid_to_fft_t<T>(mass, grid_size, fft_size, ws.mass_fft, n_threads);
+  copy_grid_to_fft_t<T>(mass_x, grid_size, fft_size, ws.mass_x_fft, n_threads);
+  copy_grid_to_fft_t<T>(mass_y, grid_size, fft_size, ws.mass_y_fft, n_threads);
+  parallel_for_chunks(static_cast<int>(fft_total), n_threads, [&](const int begin, const int end, const int) {
+    const std::complex<T> zero(static_cast<T>(0.0), static_cast<T>(0.0));
+    std::fill(ws.kernel_q.begin() + begin, ws.kernel_q.begin() + end, zero);
+    std::fill(ws.kernel_q2.begin() + begin, ws.kernel_q2.begin() + end, zero);
+  });
+  const int kernel_rows = 2 * grid_size - 1;
+  parallel_for_chunks(kernel_rows, n_threads, [&](const int begin, const int end, const int) {
+    for (int row = begin; row < end; ++row) {
+      const int dy = row - (grid_size - 1);
+      const int yy = dy < 0 ? dy + fft_size : dy;
+      const T y_offset = static_cast<T>(dy) * spacing;
+      for (int dx = -(grid_size - 1); dx <= grid_size - 1; ++dx) {
+        const int xx = dx < 0 ? dx + fft_size : dx;
+        const T x_offset = static_cast<T>(dx) * spacing;
+        const T d2 = x_offset * x_offset + y_offset * y_offset;
+        const T q = static_cast<T>(1.0) / (static_cast<T>(1.0) + d2);
+        const T q2 = q * q;
+        const std::size_t pos = static_cast<std::size_t>(yy) * fft_size + xx;
+        ws.kernel_q[pos] = q;
+        ws.kernel_q2[pos] = q2;
+      }
     }
-  }
-  fft_2d_t<T>(ws.mass_fft, fft_size, false, n_threads);
-  fft_2d_t<T>(ws.mass_x_fft, fft_size, false, n_threads);
-  fft_2d_t<T>(ws.mass_y_fft, fft_size, false, n_threads);
-  fft_2d_t<T>(ws.kernel_q, fft_size, false, n_threads);
-  fft_2d_t<T>(ws.kernel_q2, fft_size, false, n_threads);
+  });
+  fft_2d_t<T>(ws.mass_fft, fft_size, false, n_threads, ws.fft_plan);
+  fft_2d_t<T>(ws.mass_x_fft, fft_size, false, n_threads, ws.fft_plan);
+  fft_2d_t<T>(ws.mass_y_fft, fft_size, false, n_threads, ws.fft_plan);
+  fft_2d_t<T>(ws.kernel_q, fft_size, false, n_threads, ws.fft_plan);
+  fft_2d_t<T>(ws.kernel_q2, fft_size, false, n_threads, ws.fft_plan);
   auto convolve = [&](const std::vector<std::complex<T>>& mass_values,
                       const std::vector<std::complex<T>>& kernel_values,
                       std::vector<T>& out) {
-    for (std::size_t i = 0; i < fft_total; ++i) ws.work[i] = mass_values[i] * kernel_values[i];
-    fft_2d_t<T>(ws.work, fft_size, true, n_threads);
-    copy_fft_to_grid_t<T>(ws.work, grid_size, fft_size, out);
+    parallel_for_chunks(static_cast<int>(fft_total), n_threads, [&](const int begin, const int end, const int) {
+      for (int index = begin; index < end; ++index) {
+        ws.work[static_cast<std::size_t>(index)] =
+          mass_values[static_cast<std::size_t>(index)] *
+          kernel_values[static_cast<std::size_t>(index)];
+      }
+    });
+    fft_2d_t<T>(ws.work, fft_size, true, n_threads, ws.fft_plan);
+    copy_fft_to_grid_t<T>(ws.work, grid_size, fft_size, out, n_threads);
   };
   convolve(ws.mass_fft, ws.kernel_q, ws.q_grid);
   convolve(ws.mass_fft, ws.kernel_q2, ws.q2_grid);
@@ -2308,6 +2553,8 @@ std::vector<float> optimize_opentsne_cpu(
   const int n = graph.samples;
   validate_opentsne_options(options, n);
   const int threads = effective_cpu_threads(options.n_threads, n);
+  ParallelExecutor parallel_executor(threads);
+  ParallelExecutorScope parallel_scope(&parallel_executor);
   SparseProbabilitiesF p = build_tsne_probabilities_float(graph, options.perplexity, threads);
 
   std::vector<float> y = options.init;
@@ -2456,7 +2703,169 @@ void validate_umap_options(const UMAPOptions& options) {
     throw std::invalid_argument("UMAP n_threads must be positive.");
   }
 }
+
+std::vector<float> centered_pca_scores(
+  const PCAResult& pca,
+  const int requested_components
+) {
+  std::vector<float> out(
+    static_cast<std::size_t>(pca.samples) * requested_components,
+    0.0f
+  );
+  const int copied_components = std::min(pca.components, requested_components);
+  for (int row = 0; row < pca.samples; ++row) {
+    for (int component = 0; component < copied_components; ++component) {
+      out[static_cast<std::size_t>(row) * requested_components + component] =
+        pca.scores[static_cast<std::size_t>(row) * pca.components + component];
+    }
+  }
+  for (int component = 0; component < requested_components; ++component) {
+    float mean = 0.0f;
+    for (int row = 0; row < pca.samples; ++row) {
+      mean += out[static_cast<std::size_t>(row) * requested_components + component];
+    }
+    mean /= static_cast<float>(pca.samples);
+    for (int row = 0; row < pca.samples; ++row) {
+      out[static_cast<std::size_t>(row) * requested_components + component] -= mean;
+    }
+  }
+  return out;
+}
+
+void scale_opentsne_pca_init(
+  std::vector<float>& init,
+  const int samples,
+  const int components
+) {
+  float max_sd = 0.0f;
+  for (int component = 0; component < components; ++component) {
+    float sum_squares = 0.0f;
+    for (int row = 0; row < samples; ++row) {
+      const float value = init[static_cast<std::size_t>(row) * components + component];
+      sum_squares += value * value;
+    }
+    const float variance = samples > 1 ?
+      sum_squares / static_cast<float>(samples - 1) :
+      0.0f;
+    max_sd = std::max(max_sd, std::sqrt(std::max(0.0f, variance)));
+  }
+  if (std::isfinite(max_sd) && max_sd > 0.0f) {
+    const float multiplier = 1.0e-4f / max_sd;
+    for (float& value : init) value *= multiplier;
+  }
+}
+
+void scale_umap_pca_init(
+  std::vector<float>& init,
+  const int samples,
+  const int components,
+  const std::uint64_t seed
+) {
+  float max_abs = 0.0f;
+  for (const float value : init) max_abs = std::max(max_abs, std::abs(value));
+  if (std::isfinite(max_abs) && max_abs > 0.0f) {
+    const float multiplier = 10.0f / max_abs;
+    for (float& value : init) value *= multiplier;
+  }
+
+  std::mt19937 rng(static_cast<std::uint32_t>(seed));
+  std::normal_distribution<float> noise(0.0f, 1.0e-4f);
+  for (float& value : init) value += noise(rng);
+  for (int component = 0; component < components; ++component) {
+    float mean = 0.0f;
+    for (int row = 0; row < samples; ++row) {
+      mean += init[static_cast<std::size_t>(row) * components + component];
+    }
+    mean /= static_cast<float>(samples);
+    for (int row = 0; row < samples; ++row) {
+      init[static_cast<std::size_t>(row) * components + component] -= mean;
+    }
+  }
+}
+
+void set_embedding_initialization(
+  EmbeddingResult& result,
+  const bool has_explicit_init,
+  const std::string& requested_source,
+  const Backend requested_backend,
+  const char* fallback_source
+) {
+  if (has_explicit_init) {
+    result.initialization = requested_source.empty() ? "explicit" : requested_source;
+    result.initialization_backend = requested_backend == Backend::Auto ?
+      result.backend :
+      requested_backend;
+  } else {
+    result.initialization = fallback_source;
+    result.initialization_backend = Backend::CPU;
+  }
+}
+
+void validate_raw_initialization_rows(
+  const NeighborGraph& graph,
+  const MatrixView raw_data
+) {
+  if (graph.neighbors < 1 ||
+      graph.indices.size() % static_cast<std::size_t>(graph.neighbors) != 0u) {
+    throw std::invalid_argument("Visualization graph has inconsistent dimensions.");
+  }
+  const std::size_t graph_samples =
+    graph.indices.size() / static_cast<std::size_t>(graph.neighbors);
+  if (raw_data.rows != graph_samples) {
+    throw std::invalid_argument(
+      "Raw initialization data must have one row per graph sample."
+    );
+  }
+}
 }  // namespace
+
+VisualizationInitResult KODAMAVisualizationPCAInit(
+  const MatrixView raw_data,
+  const VisualizationInitOptions& options
+) {
+  if (raw_data.data == nullptr || raw_data.rows < 2 || raw_data.cols < 1) {
+    throw std::invalid_argument(
+      "Visualization PCA initialization requires at least two rows and one column."
+    );
+  }
+  if (options.n_components < 1) {
+    throw std::invalid_argument("Visualization initialization components must be positive.");
+  }
+  if (options.n_threads < 1) {
+    throw std::invalid_argument("Visualization initialization threads must be positive.");
+  }
+
+  const auto started = Clock::now();
+  PCAOptions pca_options;
+  pca_options.n_components = std::min<int>(
+    options.n_components,
+    std::min<std::size_t>(raw_data.cols, raw_data.rows - 1)
+  );
+  pca_options.center = true;
+  pca_options.scale = false;
+  pca_options.n_threads = options.n_threads;
+  pca_options.seed = options.seed;
+  pca_options.gpu_device = options.gpu_device;
+  pca_options.backend = options.backend;
+  const PCAResult pca = PCA(raw_data, pca_options);
+
+  VisualizationInitResult result;
+  result.samples = pca.samples;
+  result.components = options.n_components;
+  result.backend = pca.backend;
+  result.opentsne = centered_pca_scores(pca, options.n_components);
+  result.umap = result.opentsne;
+  scale_opentsne_pca_init(result.opentsne, result.samples, result.components);
+  scale_umap_pca_init(
+    result.umap,
+    result.samples,
+    result.components,
+    options.seed
+  );
+  const auto finished = Clock::now();
+  result.runtime_seconds = std::chrono::duration<double>(finished - started).count();
+  return result;
+}
 
 EmbeddingResult KODAMAUMAP_CPU(
   const NeighborGraph& graph,
@@ -2474,6 +2883,13 @@ EmbeddingResult KODAMAUMAP_CPU(
   result.components = 2;
   result.backend = Backend::CPU;
   result.embedding = optimize_umap_csr_cpu(csr, options, prepared.samples);
+  set_embedding_initialization(
+    result,
+    options.init.size() == static_cast<std::size_t>(prepared.samples) * 2u,
+    options.init_source,
+    options.init_backend,
+    "graph_spectral"
+  );
   const auto finished = Clock::now();
   result.runtime_seconds = std::chrono::duration<double>(finished - started).count();
   return result;
@@ -2545,6 +2961,13 @@ EmbeddingResult KODAMAUMAP_CUDA(
   if (status != 0) {
     throw std::runtime_error(std::string("CUDA UMAP failed: ") + cuda_embedding_error());
   }
+  set_embedding_initialization(
+    result,
+    options.init.size() == static_cast<std::size_t>(prepared.samples) * 2u,
+    options.init_source,
+    options.init_backend,
+    "graph_spectral"
+  );
   const auto finished = Clock::now();
   result.runtime_seconds = std::chrono::duration<double>(finished - started).count();
   return result;
@@ -2565,6 +2988,14 @@ EmbeddingResult KODAMAOpenTSNE_CPU(
   result.components = options.n_components;
   result.backend = Backend::CPU;
   result.embedding = optimize_opentsne_cpu(prepared, options);
+  set_embedding_initialization(
+    result,
+    options.init.size() ==
+      static_cast<std::size_t>(prepared.samples) * options.n_components,
+    options.init_source,
+    options.init_backend,
+    "random"
+  );
   const auto finished = Clock::now();
   result.runtime_seconds = std::chrono::duration<double>(finished - started).count();
   return result;
@@ -2627,10 +3058,111 @@ EmbeddingResult KODAMAOpenTSNE_CUDA(
   if (status != 0) {
     throw std::runtime_error(std::string("CUDA openTSNE failed: ") + cuda_embedding_error());
   }
+  set_embedding_initialization(
+    result,
+    options.init.size() == static_cast<std::size_t>(prepared.samples) * 2u,
+    options.init_source,
+    options.init_backend,
+    "random"
+  );
   const auto finished = Clock::now();
   result.runtime_seconds = std::chrono::duration<double>(finished - started).count();
   return result;
 #endif
+}
+
+EmbeddingResult KODAMAUMAP_CPU(
+  const NeighborGraph& graph,
+  const MatrixView raw_data,
+  const UMAPOptions& options
+) {
+  validate_raw_initialization_rows(graph, raw_data);
+  UMAPOptions resolved = options;
+  if (resolved.init.size() != raw_data.rows * 2u) {
+    VisualizationInitOptions init_options;
+    init_options.n_components = 2;
+    init_options.n_threads = options.n_threads;
+    init_options.seed = static_cast<std::uint64_t>(options.seed);
+    init_options.gpu_device = options.gpu_device;
+    init_options.backend = Backend::CPU;
+    const VisualizationInitResult init =
+      KODAMAVisualizationPCAInit(raw_data, init_options);
+    resolved.init = init.umap;
+    resolved.init_source = "raw_pca";
+    resolved.init_backend = init.backend;
+  }
+  return KODAMAUMAP_CPU(graph, resolved);
+}
+
+EmbeddingResult KODAMAUMAP_CUDA(
+  const NeighborGraph& graph,
+  const MatrixView raw_data,
+  const UMAPOptions& options
+) {
+  validate_raw_initialization_rows(graph, raw_data);
+  UMAPOptions resolved = options;
+  if (resolved.init.size() != raw_data.rows * 2u) {
+    VisualizationInitOptions init_options;
+    init_options.n_components = 2;
+    init_options.n_threads = options.n_threads;
+    init_options.seed = static_cast<std::uint64_t>(options.seed);
+    init_options.gpu_device = options.gpu_device;
+    init_options.backend = Backend::CUDA;
+    const VisualizationInitResult init =
+      KODAMAVisualizationPCAInit(raw_data, init_options);
+    resolved.init = init.umap;
+    resolved.init_source = "raw_pca";
+    resolved.init_backend = init.backend;
+  }
+  return KODAMAUMAP_CUDA(graph, resolved);
+}
+
+EmbeddingResult KODAMAOpenTSNE_CPU(
+  const NeighborGraph& graph,
+  const MatrixView raw_data,
+  const OpenTSNEOptions& options
+) {
+  validate_raw_initialization_rows(graph, raw_data);
+  OpenTSNEOptions resolved = options;
+  if (resolved.init.size() !=
+      raw_data.rows * static_cast<std::size_t>(options.n_components)) {
+    VisualizationInitOptions init_options;
+    init_options.n_components = options.n_components;
+    init_options.n_threads = options.n_threads;
+    init_options.seed = static_cast<std::uint64_t>(options.seed);
+    init_options.gpu_device = options.gpu_device;
+    init_options.backend = Backend::CPU;
+    const VisualizationInitResult init =
+      KODAMAVisualizationPCAInit(raw_data, init_options);
+    resolved.init = init.opentsne;
+    resolved.init_source = "raw_pca";
+    resolved.init_backend = init.backend;
+  }
+  return KODAMAOpenTSNE_CPU(graph, resolved);
+}
+
+EmbeddingResult KODAMAOpenTSNE_CUDA(
+  const NeighborGraph& graph,
+  const MatrixView raw_data,
+  const OpenTSNEOptions& options
+) {
+  validate_raw_initialization_rows(graph, raw_data);
+  OpenTSNEOptions resolved = options;
+  if (resolved.init.size() !=
+      raw_data.rows * static_cast<std::size_t>(options.n_components)) {
+    VisualizationInitOptions init_options;
+    init_options.n_components = options.n_components;
+    init_options.n_threads = options.n_threads;
+    init_options.seed = static_cast<std::uint64_t>(options.seed);
+    init_options.gpu_device = options.gpu_device;
+    init_options.backend = Backend::CUDA;
+    const VisualizationInitResult init =
+      KODAMAVisualizationPCAInit(raw_data, init_options);
+    resolved.init = init.opentsne;
+    resolved.init_source = "raw_pca";
+    resolved.init_backend = init.backend;
+  }
+  return KODAMAOpenTSNE_CUDA(graph, resolved);
 }
 
 }  // namespace kodama

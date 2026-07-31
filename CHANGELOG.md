@@ -5,6 +5,33 @@ All notable changes to kodama-cpp are documented here. The project follows
 
 ## [Unreleased]
 
+- Made CUDA and Metal KODAMA state persistent across proposal cycles and
+  independent `M` runs. The full-data graph is uploaded once; each worker lane
+  reuses landmark/fold, label, projection, voting, SIMPLS, and LDA allocations,
+  refreshing only contents that mathematically change. CUDA SIMPLS now uses a
+  dedicated cuBLAS workspace per stream and a race-free fixed-order float32
+  label cross-product. The former hidden nonresident KODAMA switch was removed.
+- Replaced the three-copy KODAMA graph lifecycle (`global_graph`, `knn`, and
+  `base_knn`) with one owned graph buffer. Final trimming, optional graph
+  fusion, and KODAMA dissimilarity correction now operate in place before the
+  graph is moved into the result. `apply_kodama_dissimilarity=false` retains
+  that one base graph, and `KODAMADissimilarityInPlace` supports later lazy
+  correction. R and Python serialize only `knn` and expose
+  `knn_is_kodama_corrected` plus `graph_storage_bytes`.
+- Parallelized package-owned CPU HNSW construction and querying. Concurrent
+  insertion uses per-node locks, distance evaluation and candidate expansion
+  use reusable batches, graph queries use contiguous row batches, and input,
+  adjacency, and cached build distances remain contiguous float32 arrays.
+  Four-thread graph construction retained at least 0.99 exact-neighbor recall
+  and was 4.11x faster than the previous four-thread implementation on the
+  maintained 4000-by-32 benchmark.
+- Build the full-data KNN graph once before all independent `M` searches and
+  expose `graph_builds` as a lifecycle diagnostic. `KODAMA.matrix` now also
+  performs one native float32 PCA that produces and stores both UMAP and
+  openTSNE initializations; R/Python visualization reuses the returned graph
+  and matching initialization without repeating either calculation. A
+  backend-compatible stored start takes precedence over raw-data
+  recomputation, even when the raw matrix is supplied again.
 - Added an explicit move-only `ResidentIVFIndex` for CUDA and Metal. IVF
   assignments, centroid accumulation and repair, list-prefix construction,
   and ID scatter stay on-device; trained inputs and indexes can be reused by
@@ -20,6 +47,9 @@ All notable changes to kodama-cpp are documented here. The project follows
   Python APIs; binary weighting remains explicitly selectable.
 - Added a standalone float32 randomized PCA API with CPU, CUDA, and Metal
   entry points plus thin R and Python bindings.
+- Aligned the public Python wrapper with the R API across function signatures,
+  defaults, accepted choices, one-based best-run reporting, and result fields;
+  dotted R names use direct snake_case spellings in Python.
 - Complete the tagged release archive, checksum, and archival DOI.
 - Complete the final historical-R, backend, and visualization validation on
   the release hardware.

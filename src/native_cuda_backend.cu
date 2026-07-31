@@ -168,10 +168,78 @@ struct NativeCudaIVFIndex::Impl {
   CudaBuffer<std::int8_t> feature_signs;
 };
 
+struct NativeCudaKNNVoteGraph::Impl {
+  int samples = 0;
+  int neighbors = 0;
+  int device = 0;
+  CudaBuffer<int> neighbor_rows;
+  CudaBuffer<float> scores;
+  CudaBuffer<int> labels;
+  CudaBuffer<int> predictions;
+};
+
 namespace {
 
 __device__ bool better_pair(float distance_a, int id_a, float distance_b, int id_b) {
   return distance_a < distance_b || (distance_a == distance_b && id_a < id_b);
+}
+
+__global__ void resident_knn_vote_kernel(
+  const int* neighbor_rows,
+  const float* scores,
+  const int* labels,
+  int* predictions,
+  int samples,
+  int neighbors,
+  int fallback_label
+) {
+  const int query = blockIdx.x * blockDim.x + threadIdx.x;
+  if (query >= samples) return;
+  const std::size_t base =
+    static_cast<std::size_t>(query) * static_cast<std::size_t>(neighbors);
+  int best_label = fallback_label;
+  int best_count = -1;
+  double best_score = -CUDART_INF;
+  for (int rank = 0; rank < neighbors; ++rank) {
+    const int row = neighbor_rows[base + static_cast<std::size_t>(rank)];
+    if (row < 0 || row >= samples) continue;
+    const int candidate = labels[row];
+    bool seen = false;
+    for (int prior = 0; prior < rank; ++prior) {
+      const int prior_row =
+        neighbor_rows[base + static_cast<std::size_t>(prior)];
+      if (prior_row >= 0 && prior_row < samples &&
+          labels[prior_row] == candidate) {
+        seen = true;
+        break;
+      }
+    }
+    if (seen) continue;
+
+    int count = 0;
+    double score = 0.0;
+    for (int other = rank; other < neighbors; ++other) {
+      const int other_row =
+        neighbor_rows[base + static_cast<std::size_t>(other)];
+      if (other_row < 0 || other_row >= samples ||
+          labels[other_row] != candidate) {
+        continue;
+      }
+      ++count;
+      score += static_cast<double>(
+        scores[base + static_cast<std::size_t>(other)]
+      );
+    }
+    if (count > best_count ||
+        (count == best_count && score > best_score) ||
+        (count == best_count && score == best_score &&
+         candidate < best_label)) {
+      best_label = candidate;
+      best_count = count;
+      best_score = score;
+    }
+  }
+  predictions[query] = best_count < 0 ? fallback_label : best_label;
 }
 
 __device__ float warp_sum(float value) {
@@ -1419,6 +1487,31 @@ DistanceMetric NativeCudaIVFIndex::metric() const noexcept {
   return impl_ == nullptr ? DistanceMetric::Euclidean : impl_->metric;
 }
 
+NativeCudaKNNVoteGraph::NativeCudaKNNVoteGraph() = default;
+NativeCudaKNNVoteGraph::~NativeCudaKNNVoteGraph() = default;
+NativeCudaKNNVoteGraph::NativeCudaKNNVoteGraph(
+  NativeCudaKNNVoteGraph&&
+) noexcept = default;
+NativeCudaKNNVoteGraph& NativeCudaKNNVoteGraph::operator=(
+  NativeCudaKNNVoteGraph&&
+) noexcept = default;
+NativeCudaKNNVoteGraph::NativeCudaKNNVoteGraph(
+  std::unique_ptr<Impl> impl
+) : impl_(std::move(impl)) {}
+
+bool NativeCudaKNNVoteGraph::valid() const noexcept {
+  return impl_ != nullptr;
+}
+int NativeCudaKNNVoteGraph::samples() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->samples;
+}
+int NativeCudaKNNVoteGraph::neighbors() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->neighbors;
+}
+int NativeCudaKNNVoteGraph::device() const noexcept {
+  return impl_ == nullptr ? -1 : impl_->device;
+}
+
 bool native_cuda_backend_available(int device) {
   int count = 0;
   if (cudaGetDeviceCount(&count) != cudaSuccess) {
@@ -1905,6 +1998,64 @@ std::vector<int> native_cuda_kmeans_labels(
   );
   for (int& label : output.assignments) ++label;
   return output.assignments;
+}
+
+NativeCudaKNNVoteGraph native_cuda_build_knn_vote_graph(
+  const std::vector<int>& neighbor_rows,
+  const std::vector<float>& scores,
+  int samples,
+  int neighbors,
+  int device
+) {
+  const std::size_t expected =
+    static_cast<std::size_t>(samples) * static_cast<std::size_t>(neighbors);
+  if (samples < 1 || neighbors < 1 ||
+      neighbor_rows.size() != expected || scores.size() != expected) {
+    throw std::invalid_argument("Invalid resident CUDA KNN vote graph.");
+  }
+  CudaDeviceScope device_scope(device);
+  auto impl = std::make_unique<NativeCudaKNNVoteGraph::Impl>();
+  impl->samples = samples;
+  impl->neighbors = neighbors;
+  impl->device = device;
+  impl->neighbor_rows.allocate(expected);
+  impl->scores.allocate(expected);
+  impl->labels.allocate(static_cast<std::size_t>(samples));
+  impl->predictions.allocate(static_cast<std::size_t>(samples));
+  impl->neighbor_rows.copy_from_host(neighbor_rows.data(), expected);
+  impl->scores.copy_from_host(scores.data(), expected);
+  return NativeCudaKNNVoteGraph(std::move(impl));
+}
+
+std::vector<int> native_cuda_knn_vote_predict(
+  const NativeCudaKNNVoteGraph& graph,
+  const std::vector<int>& labels,
+  int fallback_label
+) {
+  if (!graph.valid()) {
+    throw std::invalid_argument("Resident CUDA KNN vote graph is empty.");
+  }
+  NativeCudaKNNVoteGraph::Impl& impl = *graph.impl_;
+  if (labels.size() != static_cast<std::size_t>(impl.samples)) {
+    throw std::invalid_argument("Resident CUDA KNN label size mismatch.");
+  }
+  CudaDeviceScope device_scope(impl.device);
+  impl.labels.copy_from_host(labels.data(), labels.size());
+  const int threads = 128;
+  const int blocks = (impl.samples + threads - 1) / threads;
+  resident_knn_vote_kernel<<<blocks, threads>>>(
+    impl.neighbor_rows.get(),
+    impl.scores.get(),
+    impl.labels.get(),
+    impl.predictions.get(),
+    impl.samples,
+    impl.neighbors,
+    fallback_label
+  );
+  cuda_check(cudaGetLastError(), "resident CUDA KNN vote kernel");
+  std::vector<int> predictions(static_cast<std::size_t>(impl.samples));
+  impl.predictions.copy_to_host(predictions.data(), predictions.size());
+  return predictions;
 }
 
 }  // namespace kodama::detail

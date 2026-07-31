@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -11,6 +12,7 @@
 namespace kodama::detail {
 
 bool metal_backend_available();
+void metal_set_pls_residency_epoch(std::uint64_t epoch);
 
 NativeKNNResult metal_exact_knn_search(
   const std::vector<float>& train,
@@ -78,6 +80,85 @@ class NativeMetalIVFIndex {
   );
 };
 
+class NativeMetalKNNVoteGraph {
+ public:
+  NativeMetalKNNVoteGraph();
+  ~NativeMetalKNNVoteGraph();
+  NativeMetalKNNVoteGraph(NativeMetalKNNVoteGraph&&) noexcept;
+  NativeMetalKNNVoteGraph& operator=(NativeMetalKNNVoteGraph&&) noexcept;
+
+  NativeMetalKNNVoteGraph(const NativeMetalKNNVoteGraph&) = delete;
+  NativeMetalKNNVoteGraph& operator=(const NativeMetalKNNVoteGraph&) = delete;
+
+  bool valid() const noexcept;
+  int samples() const noexcept;
+  int neighbors() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  explicit NativeMetalKNNVoteGraph(std::unique_ptr<Impl> impl);
+
+  friend NativeMetalKNNVoteGraph metal_build_knn_vote_graph(
+    const std::vector<int>&,
+    const std::vector<float>&,
+    int,
+    int
+  );
+  friend std::vector<int> metal_knn_vote_predict(
+    const NativeMetalKNNVoteGraph&,
+    const std::vector<int>&,
+    int
+  );
+};
+
+class NativeMetalKODAMAGraph {
+ public:
+  NativeMetalKODAMAGraph();
+  ~NativeMetalKODAMAGraph();
+  NativeMetalKODAMAGraph(NativeMetalKODAMAGraph&&) noexcept;
+  NativeMetalKODAMAGraph& operator=(NativeMetalKODAMAGraph&&) noexcept;
+
+  NativeMetalKODAMAGraph(const NativeMetalKODAMAGraph&) = delete;
+  NativeMetalKODAMAGraph& operator=(const NativeMetalKODAMAGraph&) = delete;
+
+  bool valid() const noexcept;
+  int samples() const noexcept;
+  int neighbors() const noexcept;
+  int lanes() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  explicit NativeMetalKODAMAGraph(std::unique_ptr<Impl> impl);
+
+  friend NativeMetalKODAMAGraph metal_build_resident_kodama_graph(
+    const NeighborGraph&,
+    int,
+    int
+  );
+  friend std::vector<int> metal_project_landmark_labels(
+    const NativeMetalKODAMAGraph&,
+    const std::vector<char>&,
+    const std::vector<int>&,
+    int,
+    int,
+    int
+  );
+  friend void metal_apply_resident_kodama_dissimilarity(
+    NativeMetalKODAMAGraph&,
+    const std::vector<int>&,
+    int,
+    bool,
+    bool
+  );
+  friend NeighborGraph metal_download_resident_kodama_graph(
+    const NativeMetalKODAMAGraph&
+  );
+};
+
 NativeKNNResult metal_ivf_knn_search(
   const std::vector<float>& train,
   int train_rows,
@@ -127,6 +208,46 @@ std::vector<int> metal_kmeans_labels(
   int clusters,
   const std::vector<int>& initial_point_indices,
   int max_iterations
+);
+
+NativeMetalKNNVoteGraph metal_build_knn_vote_graph(
+  const std::vector<int>& neighbor_rows,
+  const std::vector<float>& scores,
+  int samples,
+  int neighbors
+);
+
+std::vector<int> metal_knn_vote_predict(
+  const NativeMetalKNNVoteGraph& graph,
+  const std::vector<int>& labels,
+  int fallback_label
+);
+
+NativeMetalKODAMAGraph metal_build_resident_kodama_graph(
+  const NeighborGraph& graph,
+  int samples,
+  int lanes
+);
+
+std::vector<int> metal_project_landmark_labels(
+  const NativeMetalKODAMAGraph& graph,
+  const std::vector<char>& is_landmark,
+  const std::vector<int>& labels,
+  int projection_k,
+  int fallback_label,
+  int lane
+);
+
+void metal_apply_resident_kodama_dissimilarity(
+  NativeMetalKODAMAGraph& graph,
+  const std::vector<int>& res,
+  int runs,
+  bool input_one_based_indices = false,
+  bool output_one_based_indices = false
+);
+
+NeighborGraph metal_download_resident_kodama_graph(
+  const NativeMetalKODAMAGraph& graph
 );
 
 std::vector<float> metal_matrix_multiply(

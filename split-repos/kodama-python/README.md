@@ -5,6 +5,37 @@ Thin Python wrapper for the standalone `kodama-cpp` C++/CUDA/Metal library.
 The Python package exposes KODAMA optimization, float32 PCA, graph utilities,
 and UMAP/openTSNE while keeping numerical work in the standalone C++ core.
 
+## R/Python API Parity
+
+The public Python functions mirror the R wrapper. Dotted R argument names use
+the direct Python spelling with underscores, for example `n.cores` becomes
+`n_cores`, `graph.neighbors` becomes `graph_neighbors`, and `raw.data` becomes
+`raw_data`. Defaults, accepted choices, label encoding, one-based `best_run`,
+and returned KODAMA fields are shared across wrappers.
+
+| R | Python |
+|---|---|
+| `KNNCV()` | `kodama.KNNCV()` |
+| `PLSLDACV()` | `kodama.PLSLDACV()` |
+| `CoreKNN()` | `kodama.CoreKNN()` |
+| `CorePLSLDA()` | `kodama.CorePLSLDA()` |
+| `KODAMA.matrix()` | `kodama.KODAMA.matrix()` or `kodama.matrix()` |
+| `KODAMA.matrix.graph()` | `kodama.KODAMA.matrix_graph()` or `kodama.matrix_graph()` |
+| `KODAMA.graph()` | `kodama.KODAMA.graph()` or `kodama.graph()` |
+| `KODAMA.pca()` | `kodama.KODAMA.pca()` or `kodama.kodama_pca()` |
+| `KODAMA.visualization()` | `kodama.KODAMA.visualization()` or `kodama.visualization()` |
+| `KODAMA.clustering()` | `kodama.KODAMA.clustering()` or `kodama.clustering()` |
+| `KODAMA.timing()` | `kodama.KODAMA.timing()` or `kodama.timing()` |
+| `KODAMA.diagnostics()` | `kodama.KODAMA.diagnostics()` or `kodama.diagnostics()` |
+
+The compiled `_core` module is an implementation detail and is not part of the
+public wrapper API.
+
+For `backend="cpu"`, `n_cores` controls both native HNSW construction and
+graph querying. Parallel builds are approximate; regression tests require at
+least 0.99 recall against exact neighbors rather than bitwise equality with a
+one-thread graph.
+
 ## Development Install
 
 Build `kodama-cpp` first:
@@ -49,14 +80,19 @@ import kodama
 pc = kodama.PCA(x, ncomp=20, backend="cpu")
 pc["scores"].shape
 
+prepared = kodama.graph(x, k=30, backend="cuda")
+assert "data" not in prepared
+
 kk = kodama.matrix(
-    x,
+    prepared,
+    raw_data=x,
     spatial=spatial,
     classifier="knn",
     backend="cuda",
     M=100,
     Tcycle=20,
     knn_k=30,
+    n_cores=4,
 )
 
 kodama.timing(kk)
@@ -75,6 +111,36 @@ dictionary with the raw C++ fields (`res`, `acc`, `knn`, `timing`). Convenience
 properties expose `best_labels`, `best_run`, `class_counts`, and `parameters`.
 UMAP uses fuzzy graph weighting by default; pass `graph_mode="binary"` only
 when binary graph compatibility is required.
+
+`kodama.graph()` contains graph arrays and backend-matched PCA starts, but does
+not retain the input array. `kodama.matrix()` accepts a prepared graph alone, a
+prepared graph plus `raw_data`, a raw array alone, or a bare dictionary with
+`indices` and `distances`. Graph-only PLS-LDA uses self-tuning Laplacian
+features; providing `raw_data` uses the ordinary data-input PLS-LDA geometry.
+
+The native `kodama.matrix()` call builds the full-data graph once before all
+`M` searches. By default it also performs one backend-native float32 PCA and
+stores separately scaled UMAP and openTSNE starts. `kodama.visualization()`
+reuses the returned graph and start without another graph or PCA calculation.
+Only `knn` is serialized; the former duplicate `base_knn` payload has been
+removed. Inspect `graph_builds`, `knn_is_kodama_corrected`,
+`graph_storage_bytes`, and `timing["visual_init_seconds"]` when profiling.
+Visualization prefers explicit `init`, then a stored initialization whose
+backend matches the selected CPU/CUDA backend, then explicit `raw_data`. Pass
+the raw matrix when changing backend:
+
+```python
+tsne_cpu = kodama.visualization(
+    kk,
+    "opentsne",
+    raw_data=x,
+    perplexity=30,
+    backend="cpu",
+)
+```
+
+The returned NumPy-compatible embedding exposes `initialization` and
+`initialization_backend` attributes reporting the selected path.
 
 ## Benchmark
 

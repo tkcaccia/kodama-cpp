@@ -81,6 +81,28 @@ struct KMeansParams {
   uint clusters;
 };
 
+struct KNNVoteParams {
+  uint samples;
+  uint neighbors;
+  int fallback_label;
+};
+
+struct LandmarkProjectionParams {
+  uint samples;
+  uint neighbors;
+  uint projection_k;
+  int fallback_label;
+};
+
+struct KODAMADissimilarityParams {
+  uint runs;
+  uint samples;
+  uint neighbors;
+  uint sort_width;
+  uint input_one_based;
+  uint output_one_based;
+};
+
 inline bool better_pair(float da, int ia, float db, int ib) {
   return da < db || (da == db && ia < ib);
 }
@@ -494,6 +516,211 @@ kernel void scatter_ivf_list_ids(
   );
   list_ids[position] = int(row);
 }
+
+kernel void resident_knn_vote(
+    device const int* neighbor_rows [[buffer(0)]],
+    device const float* scores [[buffer(1)]],
+    device const int* labels [[buffer(2)]],
+    device int* predictions [[buffer(3)]],
+    constant KNNVoteParams& params [[buffer(4)]],
+    uint query [[thread_position_in_grid]]) {
+  if (query >= params.samples) return;
+  const uint base = query * params.neighbors;
+  int best_label = params.fallback_label;
+  int best_count = -1;
+  float best_score = -INFINITY;
+  for (uint rank = 0; rank < params.neighbors; ++rank) {
+    const int row = neighbor_rows[base + rank];
+    if (row < 0 || uint(row) >= params.samples) continue;
+    const int candidate = labels[row];
+    bool seen = false;
+    for (uint prior = 0; prior < rank; ++prior) {
+      const int prior_row = neighbor_rows[base + prior];
+      if (prior_row >= 0 && uint(prior_row) < params.samples &&
+          labels[prior_row] == candidate) {
+        seen = true;
+        break;
+      }
+    }
+    if (seen) continue;
+    int count = 0;
+    float score = 0.0f;
+    for (uint other = rank; other < params.neighbors; ++other) {
+      const int other_row = neighbor_rows[base + other];
+      if (other_row < 0 || uint(other_row) >= params.samples ||
+          labels[other_row] != candidate) {
+        continue;
+      }
+      ++count;
+      score += scores[base + other];
+    }
+    if (count > best_count ||
+        (count == best_count && score > best_score) ||
+        (count == best_count && score == best_score &&
+         candidate < best_label)) {
+      best_label = candidate;
+      best_count = count;
+      best_score = score;
+    }
+  }
+  predictions[query] = best_count < 0 ? params.fallback_label : best_label;
+}
+
+kernel void project_landmark_labels(
+    device const int* graph_indices [[buffer(0)]],
+    device const char* is_landmark [[buffer(1)]],
+    device const int* labels [[buffer(2)]],
+    device int* projected [[buffer(3)]],
+    constant LandmarkProjectionParams& params [[buffer(4)]],
+    uint query [[thread_position_in_grid]]) {
+  if (query >= params.samples) return;
+  if (is_landmark[query] != 0) {
+    projected[query] = labels[query];
+    return;
+  }
+  const uint base = query * params.neighbors;
+  uint cutoff = params.neighbors;
+  uint accepted = 0;
+  for (uint rank = 0; rank < params.neighbors; ++rank) {
+    const int neighbor = graph_indices[base + rank];
+    if (neighbor < 0 || uint(neighbor) >= params.samples ||
+        is_landmark[neighbor] == 0) {
+      continue;
+    }
+    ++accepted;
+    if (accepted == params.projection_k) {
+      cutoff = rank + 1;
+      break;
+    }
+  }
+  if (accepted == 0) {
+    projected[query] = params.fallback_label;
+    return;
+  }
+
+  int best_label = params.fallback_label;
+  int best_count = -1;
+  for (uint rank = 0; rank < cutoff; ++rank) {
+    const int neighbor = graph_indices[base + rank];
+    if (neighbor < 0 || uint(neighbor) >= params.samples ||
+        is_landmark[neighbor] == 0) {
+      continue;
+    }
+    const int candidate = labels[neighbor];
+    bool seen = false;
+    for (uint prior = 0; prior < rank; ++prior) {
+      const int prior_neighbor = graph_indices[base + prior];
+      if (prior_neighbor >= 0 && uint(prior_neighbor) < params.samples &&
+          is_landmark[prior_neighbor] != 0 &&
+          labels[prior_neighbor] == candidate) {
+        seen = true;
+        break;
+      }
+    }
+    if (seen) continue;
+    int count = 0;
+    for (uint other = rank; other < cutoff; ++other) {
+      const int other_neighbor = graph_indices[base + other];
+      if (other_neighbor >= 0 && uint(other_neighbor) < params.samples &&
+          is_landmark[other_neighbor] != 0 &&
+          labels[other_neighbor] == candidate) {
+        ++count;
+      }
+    }
+    if (count > best_count ||
+        (count == best_count && candidate < best_label)) {
+      best_label = candidate;
+      best_count = count;
+    }
+  }
+  projected[query] = best_count < 0 ? params.fallback_label : best_label;
+}
+
+kernel void kodama_dissimilarity_resident(
+    device int* indices [[buffer(0)]],
+    device float* distances [[buffer(1)]],
+    device const int* result_labels [[buffer(2)]],
+    constant KODAMADissimilarityParams& params [[buffer(3)]],
+    threadgroup float* row_dist [[threadgroup(0)]],
+    threadgroup int* row_idx [[threadgroup(1)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]) {
+  if (row >= params.samples) return;
+  const uint row_offset = row * params.neighbors;
+  if (tid < params.neighbors) {
+    const uint offset = row_offset + tid;
+    const int stored_neighbor = indices[offset];
+    const int neighbor =
+      stored_neighbor >= 0 && params.input_one_based != 0 ?
+        stored_neighbor - 1 :
+        stored_neighbor;
+    float distance = distances[offset];
+    if (neighbor < 0 || uint(neighbor) >= params.samples ||
+        !isfinite(distance)) {
+      row_dist[tid] = INFINITY;
+      row_idx[tid] = neighbor;
+    } else {
+      uint same = 0;
+      uint valid = 0;
+      for (uint run = 0; run < params.runs; ++run) {
+        const uint base = run * params.samples;
+        const int lhs = result_labels[base + row];
+        const int rhs = result_labels[base + uint(neighbor)];
+        if (lhs == 0 || rhs == 0) continue;
+        ++valid;
+        if (lhs == rhs) ++same;
+      }
+      if (same == 0 || valid == 0) {
+        distance = INFINITY;
+      } else {
+        const float agreement = float(same) / float(valid);
+        distance = (1.0f + distance) / (agreement * agreement);
+      }
+      row_dist[tid] = distance;
+      row_idx[tid] = neighbor;
+    }
+  } else if (tid < params.sort_width) {
+    row_dist[tid] = INFINITY;
+    row_idx[tid] = 0x7fffffff;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint width = 2; width <= params.sort_width; width <<= 1) {
+    for (uint stride = width >> 1; stride > 0; stride >>= 1) {
+      const uint other = tid ^ stride;
+      if (other > tid && other < params.sort_width) {
+        const bool ascending = (tid & width) == 0;
+        const float self_dist = row_dist[tid];
+        const int self_idx = row_idx[tid];
+        const float other_dist = row_dist[other];
+        const int other_idx = row_idx[other];
+        const bool self_greater =
+          self_dist > other_dist ||
+          (self_dist == other_dist && self_idx > other_idx);
+        const bool other_greater =
+          other_dist > self_dist ||
+          (other_dist == self_dist && other_idx > self_idx);
+        const bool swap_pair = ascending ? self_greater : other_greater;
+        if (swap_pair) {
+          row_dist[tid] = other_dist;
+          row_idx[tid] = other_idx;
+          row_dist[other] = self_dist;
+          row_idx[other] = self_idx;
+        }
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+  }
+
+  if (tid < params.neighbors) {
+    const uint offset = row_offset + tid;
+    distances[offset] = row_dist[tid];
+    indices[offset] =
+      row_idx[tid] >= 0 && params.output_one_based != 0 ?
+        row_idx[tid] + 1 :
+        row_idx[tid];
+  }
+}
 )METAL";
 
 struct ExactParamsHost {
@@ -527,6 +754,28 @@ struct KMeansParamsHost {
   std::uint32_t clusters;
 };
 
+struct KNNVoteParamsHost {
+  std::uint32_t samples;
+  std::uint32_t neighbors;
+  std::int32_t fallback_label;
+};
+
+struct LandmarkProjectionParamsHost {
+  std::uint32_t samples;
+  std::uint32_t neighbors;
+  std::uint32_t projection_k;
+  std::int32_t fallback_label;
+};
+
+struct KODAMADissimilarityParamsHost {
+  std::uint32_t runs;
+  std::uint32_t samples;
+  std::uint32_t neighbors;
+  std::uint32_t sort_width;
+  std::uint32_t input_one_based;
+  std::uint32_t output_one_based;
+};
+
 std::runtime_error metal_error(const std::string& context, NSError* error = nil) {
   const char* message = error == nil ? "unknown Metal error" : [[error localizedDescription] UTF8String];
   return std::runtime_error(context + ": " + message);
@@ -549,6 +798,9 @@ struct MetalState {
   id<MTLComputePipelineState> count_ivf_pipeline = nil;
   id<MTLComputePipelineState> prefix_ivf_pipeline = nil;
   id<MTLComputePipelineState> scatter_ivf_pipeline = nil;
+  id<MTLComputePipelineState> knn_vote_pipeline = nil;
+  id<MTLComputePipelineState> landmark_projection_pipeline = nil;
+  id<MTLComputePipelineState> kodama_dissimilarity_pipeline = nil;
 };
 
 }  // namespace
@@ -567,6 +819,31 @@ struct NativeMetalIVFIndex::Impl {
   id<MTLBuffer> feature_offsets = nil;
   id<MTLBuffer> feature_ids = nil;
   id<MTLBuffer> feature_signs = nil;
+};
+
+struct NativeMetalKNNVoteGraph::Impl {
+  int samples = 0;
+  int neighbors = 0;
+  id<MTLBuffer> neighbor_rows = nil;
+  id<MTLBuffer> scores = nil;
+  id<MTLBuffer> labels = nil;
+  id<MTLBuffer> predictions = nil;
+};
+
+struct NativeMetalKODAMAGraph::Impl {
+  struct Lane {
+    id<MTLBuffer> is_landmark = nil;
+    id<MTLBuffer> labels = nil;
+    id<MTLBuffer> projected = nil;
+  };
+
+  int samples = 0;
+  int neighbors = 0;
+  id<MTLBuffer> indices = nil;
+  id<MTLBuffer> distances = nil;
+  id<MTLBuffer> result_labels = nil;
+  std::size_t result_capacity = 0;
+  std::vector<Lane> lane_buffers;
 };
 
 namespace {
@@ -622,6 +899,11 @@ MetalState& metal_state() {
       state.count_ivf_pipeline = make_pipeline(@"count_ivf_assignments");
       state.prefix_ivf_pipeline = make_pipeline(@"prefix_ivf_list_counts");
       state.scatter_ivf_pipeline = make_pipeline(@"scatter_ivf_list_ids");
+      state.knn_vote_pipeline = make_pipeline(@"resident_knn_vote");
+      state.landmark_projection_pipeline =
+        make_pipeline(@"project_landmark_labels");
+      state.kodama_dissimilarity_pipeline =
+        make_pipeline(@"kodama_dissimilarity_resident");
     } catch (...) {
       initialization_error = std::current_exception();
     }
@@ -730,6 +1012,109 @@ id<MTLBuffer> make_matrix_buffer(
     );
   }
   return buffer;
+}
+
+struct MetalResidentMatrixSlot {
+  std::uint64_t epoch = 0;
+  const float* host = nullptr;
+  int rows = 0;
+  int columns = 0;
+  NSUInteger row_bytes = 0;
+  id<MTLBuffer> buffer = nil;
+};
+
+struct MetalPLSResidentWorkspace {
+  std::uint64_t epoch = 0;
+  std::vector<MetalResidentMatrixSlot> matrices;
+  id<MTLBuffer> right_matrix = nil;
+  id<MTLBuffer> result_matrix = nil;
+  id<MTLBuffer> simpls_weight = nil;
+  id<MTLBuffer> simpls_score = nil;
+  id<MTLBuffer> simpls_loading = nil;
+  id<MTLBuffer> cross_product = nil;
+  id<MTLBuffer> pls_weights = nil;
+  id<MTLBuffer> labels = nil;
+  std::uint64_t matrix_uploads = 0;
+  std::uint64_t matrix_reuses = 0;
+};
+
+thread_local MetalPLSResidentWorkspace g_metal_pls_workspace;
+
+void ensure_shared_buffer(
+  id<MTLDevice> device,
+  __strong id<MTLBuffer>& buffer,
+  std::size_t bytes
+) {
+  if (buffer != nil && [buffer length] >= bytes) return;
+  buffer = [device
+    newBufferWithLength:bytes
+    options:MTLResourceStorageModeShared];
+  if (buffer == nil) {
+    throw std::runtime_error("Failed to allocate a resident Metal buffer.");
+  }
+}
+
+void write_matrix_buffer(
+  id<MTLBuffer> buffer,
+  const std::vector<float>& values,
+  int rows,
+  int columns,
+  NSUInteger row_bytes
+) {
+  char* base = static_cast<char*>([buffer contents]);
+  std::memset(base, 0, row_bytes * static_cast<NSUInteger>(rows));
+  for (int row = 0; row < rows; ++row) {
+    std::memcpy(
+      base + static_cast<NSUInteger>(row) * row_bytes,
+      values.data() +
+        static_cast<std::size_t>(row) * static_cast<std::size_t>(columns),
+      static_cast<std::size_t>(columns) * sizeof(float)
+    );
+  }
+}
+
+id<MTLBuffer> resident_matrix_buffer(
+  id<MTLDevice> device,
+  const std::vector<float>& values,
+  int rows,
+  int columns,
+  NSUInteger row_bytes
+) {
+  MetalPLSResidentWorkspace& workspace = g_metal_pls_workspace;
+  for (MetalResidentMatrixSlot& slot : workspace.matrices) {
+    if (slot.epoch == workspace.epoch &&
+        slot.host == values.data() &&
+        slot.rows == rows &&
+        slot.columns == columns &&
+        slot.row_bytes == row_bytes) {
+      ++workspace.matrix_reuses;
+      return slot.buffer;
+    }
+  }
+  MetalResidentMatrixSlot* target = nullptr;
+  for (MetalResidentMatrixSlot& slot : workspace.matrices) {
+    if (slot.epoch != workspace.epoch) {
+      target = &slot;
+      break;
+    }
+  }
+  if (target == nullptr) {
+    workspace.matrices.emplace_back();
+    target = &workspace.matrices.back();
+  }
+  ensure_shared_buffer(
+    device,
+    target->buffer,
+    row_bytes * static_cast<std::size_t>(rows)
+  );
+  write_matrix_buffer(target->buffer, values, rows, columns, row_bytes);
+  target->epoch = workspace.epoch;
+  target->host = values.data();
+  target->rows = rows;
+  target->columns = columns;
+  target->row_bytes = row_bytes;
+  ++workspace.matrix_uploads;
+  return target->buffer;
 }
 
 float vector_dot(const std::vector<float>& left, const std::vector<float>& right) {
@@ -1061,10 +1446,384 @@ DistanceMetric NativeMetalIVFIndex::metric() const noexcept {
   return impl_ == nullptr ? DistanceMetric::Euclidean : impl_->metric;
 }
 
+NativeMetalKNNVoteGraph::NativeMetalKNNVoteGraph() = default;
+NativeMetalKNNVoteGraph::~NativeMetalKNNVoteGraph() = default;
+NativeMetalKNNVoteGraph::NativeMetalKNNVoteGraph(
+  NativeMetalKNNVoteGraph&&
+) noexcept = default;
+NativeMetalKNNVoteGraph& NativeMetalKNNVoteGraph::operator=(
+  NativeMetalKNNVoteGraph&&
+) noexcept = default;
+NativeMetalKNNVoteGraph::NativeMetalKNNVoteGraph(
+  std::unique_ptr<Impl> impl
+) : impl_(std::move(impl)) {}
+
+bool NativeMetalKNNVoteGraph::valid() const noexcept {
+  return impl_ != nullptr;
+}
+int NativeMetalKNNVoteGraph::samples() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->samples;
+}
+int NativeMetalKNNVoteGraph::neighbors() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->neighbors;
+}
+
+NativeMetalKODAMAGraph::NativeMetalKODAMAGraph() = default;
+NativeMetalKODAMAGraph::~NativeMetalKODAMAGraph() = default;
+NativeMetalKODAMAGraph::NativeMetalKODAMAGraph(
+  NativeMetalKODAMAGraph&&
+) noexcept = default;
+NativeMetalKODAMAGraph& NativeMetalKODAMAGraph::operator=(
+  NativeMetalKODAMAGraph&&
+) noexcept = default;
+NativeMetalKODAMAGraph::NativeMetalKODAMAGraph(
+  std::unique_ptr<Impl> impl
+) : impl_(std::move(impl)) {}
+
+bool NativeMetalKODAMAGraph::valid() const noexcept {
+  return impl_ != nullptr;
+}
+int NativeMetalKODAMAGraph::samples() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->samples;
+}
+int NativeMetalKODAMAGraph::neighbors() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->neighbors;
+}
+int NativeMetalKODAMAGraph::lanes() const noexcept {
+  return impl_ == nullptr ? 0 : static_cast<int>(impl_->lane_buffers.size());
+}
+
 bool metal_backend_available() {
   @autoreleasepool {
     id<MTLDevice> device = select_metal_device();
     return device != nil;
+  }
+}
+
+void metal_set_pls_residency_epoch(std::uint64_t epoch) {
+  g_metal_pls_workspace.epoch = epoch;
+}
+
+NativeMetalKNNVoteGraph metal_build_knn_vote_graph(
+  const std::vector<int>& neighbor_rows,
+  const std::vector<float>& scores,
+  int samples,
+  int neighbors
+) {
+  const std::size_t expected =
+    static_cast<std::size_t>(samples) * static_cast<std::size_t>(neighbors);
+  if (samples < 1 || neighbors < 1 ||
+      neighbor_rows.size() != expected || scores.size() != expected) {
+    throw std::invalid_argument("Invalid resident Metal KNN vote graph.");
+  }
+  @autoreleasepool {
+    MetalState& state = metal_state();
+    auto impl = std::make_unique<NativeMetalKNNVoteGraph::Impl>();
+    impl->samples = samples;
+    impl->neighbors = neighbors;
+    impl->neighbor_rows = [state.device
+      newBufferWithBytes:neighbor_rows.data()
+      length:expected * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    impl->scores = [state.device
+      newBufferWithBytes:scores.data()
+      length:expected * sizeof(float)
+      options:MTLResourceStorageModeShared];
+    impl->labels = [state.device
+      newBufferWithLength:static_cast<std::size_t>(samples) * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    impl->predictions = [state.device
+      newBufferWithLength:static_cast<std::size_t>(samples) * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    if (impl->neighbor_rows == nil || impl->scores == nil ||
+        impl->labels == nil || impl->predictions == nil) {
+      throw std::runtime_error(
+        "Failed to allocate resident Metal KNN vote buffers."
+      );
+    }
+    return NativeMetalKNNVoteGraph(std::move(impl));
+  }
+}
+
+std::vector<int> metal_knn_vote_predict(
+  const NativeMetalKNNVoteGraph& graph,
+  const std::vector<int>& labels,
+  int fallback_label
+) {
+  if (!graph.valid()) {
+    throw std::invalid_argument("Resident Metal KNN vote graph is empty.");
+  }
+  NativeMetalKNNVoteGraph::Impl& impl = *graph.impl_;
+  if (labels.size() != static_cast<std::size_t>(impl.samples)) {
+    throw std::invalid_argument("Resident Metal KNN label size mismatch.");
+  }
+  @autoreleasepool {
+    MetalState& state = metal_state();
+    std::memcpy(
+      [impl.labels contents],
+      labels.data(),
+      labels.size() * sizeof(int)
+    );
+    const KNNVoteParamsHost parameters{
+      static_cast<std::uint32_t>(impl.samples),
+      static_cast<std::uint32_t>(impl.neighbors),
+      static_cast<std::int32_t>(fallback_label)
+    };
+    id<MTLCommandBuffer> command = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:state.knn_vote_pipeline];
+    [encoder setBuffer:impl.neighbor_rows offset:0 atIndex:0];
+    [encoder setBuffer:impl.scores offset:0 atIndex:1];
+    [encoder setBuffer:impl.labels offset:0 atIndex:2];
+    [encoder setBuffer:impl.predictions offset:0 atIndex:3];
+    [encoder setBytes:&parameters length:sizeof(parameters) atIndex:4];
+    const NSUInteger threads = std::min<NSUInteger>(
+      256,
+      state.knn_vote_pipeline.maxTotalThreadsPerThreadgroup
+    );
+    [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(impl.samples), 1, 1)
+       threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+    [encoder endEncoding];
+    wait_for_command(command, "Resident Metal KNN vote failed");
+    std::vector<int> predictions(static_cast<std::size_t>(impl.samples));
+    std::memcpy(
+      predictions.data(),
+      [impl.predictions contents],
+      predictions.size() * sizeof(int)
+    );
+    return predictions;
+  }
+}
+
+NativeMetalKODAMAGraph metal_build_resident_kodama_graph(
+  const NeighborGraph& graph,
+  int samples,
+  int lanes
+) {
+  const std::size_t expected =
+    static_cast<std::size_t>(samples) *
+    static_cast<std::size_t>(graph.neighbors);
+  if (samples < 1 || graph.neighbors < 1 ||
+      graph.indices.size() != expected ||
+      graph.distances.size() != expected) {
+    throw std::invalid_argument("Invalid resident Metal KODAMA graph.");
+  }
+  @autoreleasepool {
+    MetalState& state = metal_state();
+    auto impl = std::make_unique<NativeMetalKODAMAGraph::Impl>();
+    impl->samples = samples;
+    impl->neighbors = graph.neighbors;
+    impl->indices = [state.device
+      newBufferWithBytes:graph.indices.data()
+      length:expected * sizeof(int)
+      options:MTLResourceStorageModeShared];
+    impl->distances = [state.device
+      newBufferWithBytes:graph.distances.data()
+      length:expected * sizeof(float)
+      options:MTLResourceStorageModeShared];
+    impl->lane_buffers.resize(static_cast<std::size_t>(std::max(1, lanes)));
+    for (NativeMetalKODAMAGraph::Impl::Lane& lane : impl->lane_buffers) {
+      lane.is_landmark = [state.device
+        newBufferWithLength:static_cast<std::size_t>(samples) * sizeof(char)
+        options:MTLResourceStorageModeShared];
+      lane.labels = [state.device
+        newBufferWithLength:static_cast<std::size_t>(samples) * sizeof(int)
+        options:MTLResourceStorageModeShared];
+      lane.projected = [state.device
+        newBufferWithLength:static_cast<std::size_t>(samples) * sizeof(int)
+        options:MTLResourceStorageModeShared];
+      if (lane.is_landmark == nil || lane.labels == nil ||
+          lane.projected == nil) {
+        throw std::runtime_error(
+          "Failed to allocate resident Metal KODAMA projection buffers."
+        );
+      }
+    }
+    if (impl->indices == nil || impl->distances == nil) {
+      throw std::runtime_error(
+        "Failed to allocate resident Metal KODAMA graph buffers."
+      );
+    }
+    return NativeMetalKODAMAGraph(std::move(impl));
+  }
+}
+
+std::vector<int> metal_project_landmark_labels(
+  const NativeMetalKODAMAGraph& graph,
+  const std::vector<char>& is_landmark,
+  const std::vector<int>& labels,
+  int projection_k,
+  int fallback_label,
+  int lane
+) {
+  if (!graph.valid()) {
+    throw std::invalid_argument("Resident Metal KODAMA graph is empty.");
+  }
+  NativeMetalKODAMAGraph::Impl& impl = *graph.impl_;
+  if (is_landmark.size() != static_cast<std::size_t>(impl.samples) ||
+      labels.size() != static_cast<std::size_t>(impl.samples)) {
+    throw std::invalid_argument(
+      "Resident Metal KODAMA projection input size mismatch."
+    );
+  }
+  @autoreleasepool {
+    MetalState& state = metal_state();
+    const int lane_id =
+      std::max(0, lane) % static_cast<int>(impl.lane_buffers.size());
+    NativeMetalKODAMAGraph::Impl::Lane& workspace =
+      impl.lane_buffers[static_cast<std::size_t>(lane_id)];
+    std::memcpy(
+      [workspace.is_landmark contents],
+      is_landmark.data(),
+      is_landmark.size() * sizeof(char)
+    );
+    std::memcpy(
+      [workspace.labels contents],
+      labels.data(),
+      labels.size() * sizeof(int)
+    );
+    const LandmarkProjectionParamsHost parameters{
+      static_cast<std::uint32_t>(impl.samples),
+      static_cast<std::uint32_t>(impl.neighbors),
+      static_cast<std::uint32_t>(
+        std::max(1, std::min(projection_k, impl.neighbors))
+      ),
+      static_cast<std::int32_t>(fallback_label)
+    };
+    id<MTLCommandBuffer> command = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:state.landmark_projection_pipeline];
+    [encoder setBuffer:impl.indices offset:0 atIndex:0];
+    [encoder setBuffer:workspace.is_landmark offset:0 atIndex:1];
+    [encoder setBuffer:workspace.labels offset:0 atIndex:2];
+    [encoder setBuffer:workspace.projected offset:0 atIndex:3];
+    [encoder setBytes:&parameters length:sizeof(parameters) atIndex:4];
+    const NSUInteger threads = std::min<NSUInteger>(
+      256,
+      state.landmark_projection_pipeline.maxTotalThreadsPerThreadgroup
+    );
+    [encoder
+      dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(impl.samples), 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+    [encoder endEncoding];
+    wait_for_command(command, "Resident Metal KODAMA projection failed");
+    std::vector<int> projected(static_cast<std::size_t>(impl.samples));
+    std::memcpy(
+      projected.data(),
+      [workspace.projected contents],
+      projected.size() * sizeof(int)
+    );
+    return projected;
+  }
+}
+
+void metal_apply_resident_kodama_dissimilarity(
+  NativeMetalKODAMAGraph& graph,
+  const std::vector<int>& res,
+  int runs,
+  bool input_one_based_indices,
+  bool output_one_based_indices
+) {
+  if (!graph.valid()) {
+    throw std::invalid_argument("Resident Metal KODAMA graph is empty.");
+  }
+  NativeMetalKODAMAGraph::Impl& impl = *graph.impl_;
+  if (runs < 1 ||
+      res.size() !=
+        static_cast<std::size_t>(runs) *
+        static_cast<std::size_t>(impl.samples)) {
+    throw std::invalid_argument(
+      "Resident Metal KODAMA dissimilarity label size mismatch."
+    );
+  }
+  @autoreleasepool {
+    MetalState& state = metal_state();
+    if (impl.result_capacity < res.size()) {
+      impl.result_labels = [state.device
+        newBufferWithLength:res.size() * sizeof(int)
+        options:MTLResourceStorageModeShared];
+      if (impl.result_labels == nil) {
+        throw std::runtime_error(
+          "Failed to allocate resident Metal KODAMA result labels."
+        );
+      }
+      impl.result_capacity = res.size();
+    }
+    std::memcpy(
+      [impl.result_labels contents],
+      res.data(),
+      res.size() * sizeof(int)
+    );
+    std::uint32_t sort_width = 1;
+    while (sort_width < static_cast<std::uint32_t>(impl.neighbors)) {
+      sort_width <<= 1;
+    }
+    if (sort_width >
+        state.kodama_dissimilarity_pipeline.maxTotalThreadsPerThreadgroup) {
+      throw std::invalid_argument(
+        "The Metal device cannot sort the requested KODAMA graph width."
+      );
+    }
+    const KODAMADissimilarityParamsHost parameters{
+      static_cast<std::uint32_t>(runs),
+      static_cast<std::uint32_t>(impl.samples),
+      static_cast<std::uint32_t>(impl.neighbors),
+      sort_width,
+      input_one_based_indices ? 1u : 0u,
+      output_one_based_indices ? 1u : 0u
+    };
+    id<MTLCommandBuffer> command = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:state.kodama_dissimilarity_pipeline];
+    [encoder setBuffer:impl.indices offset:0 atIndex:0];
+    [encoder setBuffer:impl.distances offset:0 atIndex:1];
+    [encoder setBuffer:impl.result_labels offset:0 atIndex:2];
+    [encoder setBytes:&parameters length:sizeof(parameters) atIndex:3];
+    [encoder
+      setThreadgroupMemoryLength:static_cast<NSUInteger>(sort_width) *
+        sizeof(float)
+      atIndex:0];
+    [encoder
+      setThreadgroupMemoryLength:static_cast<NSUInteger>(sort_width) *
+        sizeof(int)
+      atIndex:1];
+    [encoder
+      dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(impl.samples), 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(sort_width, 1, 1)];
+    [encoder endEncoding];
+    wait_for_command(
+      command,
+      "Resident Metal KODAMA dissimilarity failed"
+    );
+  }
+}
+
+NeighborGraph metal_download_resident_kodama_graph(
+  const NativeMetalKODAMAGraph& graph
+) {
+  if (!graph.valid()) {
+    throw std::invalid_argument("Resident Metal KODAMA graph is empty.");
+  }
+  const NativeMetalKODAMAGraph::Impl& impl = *graph.impl_;
+  @autoreleasepool {
+    NeighborGraph out;
+    out.neighbors = impl.neighbors;
+    const std::size_t items =
+      static_cast<std::size_t>(impl.samples) *
+      static_cast<std::size_t>(impl.neighbors);
+    out.indices.resize(items);
+    out.distances.resize(items);
+    std::memcpy(
+      out.indices.data(),
+      [impl.indices contents],
+      items * sizeof(int)
+    );
+    std::memcpy(
+      out.distances.data(),
+      [impl.distances contents],
+      items * sizeof(float)
+    );
+    return out;
   }
 }
 
@@ -2092,12 +2851,33 @@ std::vector<float> metal_matrix_multiply(
     const NSUInteger left_row_bytes = matrix_row_bytes(left_cols);
     const NSUInteger right_row_bytes = matrix_row_bytes(right_cols);
     const NSUInteger result_row_bytes = matrix_row_bytes(result_cols);
-    id<MTLBuffer> left_buffer = make_matrix_buffer(state.device, left, left_rows, left_cols, left_row_bytes);
-    id<MTLBuffer> right_buffer = make_matrix_buffer(state.device, right, right_rows, right_cols, right_row_bytes);
-    id<MTLBuffer> result_buffer = [state.device
-      newBufferWithLength:result_row_bytes * static_cast<NSUInteger>(result_rows)
-      options:MTLResourceStorageModeShared];
-    if (result_buffer == nil) throw std::runtime_error("Failed to allocate the Metal result matrix.");
+    MetalPLSResidentWorkspace& workspace = g_metal_pls_workspace;
+    id<MTLBuffer> left_buffer = resident_matrix_buffer(
+      state.device,
+      left,
+      left_rows,
+      left_cols,
+      left_row_bytes
+    );
+    ensure_shared_buffer(
+      state.device,
+      workspace.right_matrix,
+      right_row_bytes * static_cast<std::size_t>(right_rows)
+    );
+    write_matrix_buffer(
+      workspace.right_matrix,
+      right,
+      right_rows,
+      right_cols,
+      right_row_bytes
+    );
+    ensure_shared_buffer(
+      state.device,
+      workspace.result_matrix,
+      result_row_bytes * static_cast<std::size_t>(result_rows)
+    );
+    id<MTLBuffer> right_buffer = workspace.right_matrix;
+    id<MTLBuffer> result_buffer = workspace.result_matrix;
     std::memset([result_buffer contents], 0, result_row_bytes * static_cast<NSUInteger>(result_rows));
 
     MPSMatrixDescriptor* left_descriptor = [MPSMatrixDescriptor
@@ -2176,22 +2956,45 @@ MetalSIMPLSResult metal_simpls_fit(
 
   @autoreleasepool {
     MetalState& state = metal_state();
+    MetalPLSResidentWorkspace& workspace = g_metal_pls_workspace;
     const NSUInteger x_row_bytes = matrix_row_bytes(predictors);
     const NSUInteger predictor_vector_row_bytes = matrix_row_bytes(1);
     const NSUInteger sample_vector_row_bytes = matrix_row_bytes(1);
-    id<MTLBuffer> x_buffer = make_matrix_buffer(state.device, x, rows, predictors, x_row_bytes);
-    id<MTLBuffer> weight_buffer = [state.device
-      newBufferWithLength:predictor_vector_row_bytes * static_cast<NSUInteger>(predictors)
-      options:MTLResourceStorageModeShared];
-    id<MTLBuffer> score_buffer = [state.device
-      newBufferWithLength:sample_vector_row_bytes * static_cast<NSUInteger>(rows)
-      options:MTLResourceStorageModeShared];
-    id<MTLBuffer> loading_buffer = [state.device
-      newBufferWithLength:predictor_vector_row_bytes * static_cast<NSUInteger>(predictors)
-      options:MTLResourceStorageModeShared];
-    if (weight_buffer == nil || score_buffer == nil || loading_buffer == nil) {
-      throw std::runtime_error("Failed to allocate resident Metal SIMPLS buffers.");
-    }
+    id<MTLBuffer> x_buffer = resident_matrix_buffer(
+      state.device,
+      x,
+      rows,
+      predictors,
+      x_row_bytes
+    );
+    ensure_shared_buffer(
+      state.device,
+      workspace.simpls_weight,
+      predictor_vector_row_bytes * static_cast<std::size_t>(predictors)
+    );
+    ensure_shared_buffer(
+      state.device,
+      workspace.simpls_score,
+      sample_vector_row_bytes * static_cast<std::size_t>(rows)
+    );
+    ensure_shared_buffer(
+      state.device,
+      workspace.simpls_loading,
+      predictor_vector_row_bytes * static_cast<std::size_t>(predictors)
+    );
+    ensure_shared_buffer(
+      state.device,
+      workspace.cross_product,
+      cross_product.size() * sizeof(float)
+    );
+    std::memcpy(
+      [workspace.cross_product contents],
+      cross_product.data(),
+      cross_product.size() * sizeof(float)
+    );
+    id<MTLBuffer> weight_buffer = workspace.simpls_weight;
+    id<MTLBuffer> score_buffer = workspace.simpls_score;
+    id<MTLBuffer> loading_buffer = workspace.simpls_loading;
 
     MPSMatrixDescriptor* x_descriptor = [MPSMatrixDescriptor
       matrixDescriptorWithRows:static_cast<NSUInteger>(rows)
@@ -2360,6 +3163,16 @@ MetalSIMPLSResult metal_simpls_fit(
       result.weights = std::move(fitted_weights);
       result.y_weights = std::move(fitted_y_weights);
     }
+    ensure_shared_buffer(
+      state.device,
+      workspace.pls_weights,
+      result.weights.size() * sizeof(float)
+    );
+    std::memcpy(
+      [workspace.pls_weights contents],
+      result.weights.data(),
+      result.weights.size() * sizeof(float)
+    );
   }
   return result;
 }

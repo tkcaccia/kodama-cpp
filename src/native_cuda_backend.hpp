@@ -68,6 +68,41 @@ class NativeCudaIVFIndex {
   );
 };
 
+class NativeCudaKNNVoteGraph {
+ public:
+  NativeCudaKNNVoteGraph();
+  ~NativeCudaKNNVoteGraph();
+  NativeCudaKNNVoteGraph(NativeCudaKNNVoteGraph&&) noexcept;
+  NativeCudaKNNVoteGraph& operator=(NativeCudaKNNVoteGraph&&) noexcept;
+
+  NativeCudaKNNVoteGraph(const NativeCudaKNNVoteGraph&) = delete;
+  NativeCudaKNNVoteGraph& operator=(const NativeCudaKNNVoteGraph&) = delete;
+
+  bool valid() const noexcept;
+  int samples() const noexcept;
+  int neighbors() const noexcept;
+  int device() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  explicit NativeCudaKNNVoteGraph(std::unique_ptr<Impl> impl);
+
+  friend NativeCudaKNNVoteGraph native_cuda_build_knn_vote_graph(
+    const std::vector<int>&,
+    const std::vector<float>&,
+    int,
+    int,
+    int
+  );
+  friend std::vector<int> native_cuda_knn_vote_predict(
+    const NativeCudaKNNVoteGraph&,
+    const std::vector<int>&,
+    int
+  );
+};
+
 bool native_cuda_backend_available(int device = 0);
 
 NativeKNNResult native_cuda_exact_knn_search(
@@ -135,6 +170,20 @@ std::vector<int> native_cuda_kmeans_labels(
   int max_iterations,
   std::uint64_t seed,
   int device
+);
+
+NativeCudaKNNVoteGraph native_cuda_build_knn_vote_graph(
+  const std::vector<int>& neighbor_rows,
+  const std::vector<float>& scores,
+  int samples,
+  int neighbors,
+  int device
+);
+
+std::vector<int> native_cuda_knn_vote_predict(
+  const NativeCudaKNNVoteGraph& graph,
+  const std::vector<int>& labels,
+  int fallback_label
 );
 
 }  // namespace kodama::detail

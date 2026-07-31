@@ -96,11 +96,26 @@ int main() {
   kodama::GraphClusterOptions graph_options;
   graph_options.k = 30;
   graph_options.metric = kodama::DistanceMetric::Euclidean;
+  graph_options.n_threads = 1;
+  kodama::NeighborGraph serial_cpu_graph;
+  graph_options.backend = kodama::Backend::CPU;
+  const double serial_cpu_graph_seconds = timed([&]() {
+    serial_cpu_graph = kodama::KODAMAKNNGraph_CPU(graph_view, graph_options);
+  });
+  print_row("knn_graph", "native_hnsw_1_thread", serial_cpu_graph_seconds, 1.0, "reference");
+
   graph_options.n_threads = 4;
   kodama::NeighborGraph cpu_graph;
-  graph_options.backend = kodama::Backend::CPU;
-  const double cpu_graph_seconds = timed([&]() { cpu_graph = kodama::KODAMAKNNGraph_CPU(graph_view, graph_options); });
-  print_row("knn_graph", "native_hnsw", cpu_graph_seconds, 1.0, "reference");
+  const double cpu_graph_seconds = timed([&]() {
+    cpu_graph = kodama::KODAMAKNNGraph_CPU(graph_view, graph_options);
+  });
+  print_row(
+    "knn_graph",
+    "native_hnsw_4_threads",
+    cpu_graph_seconds,
+    graph_overlap(serial_cpu_graph, cpu_graph, graph_data.rows),
+    "overlap_vs_1_thread"
+  );
 
   if (!kodama::MetalAvailable()) return 0;
   kodama::NeighborGraph metal_graph;

@@ -1,0 +1,3 @@
+mode,samples,neighbors,retained_graph_bytes,max_rss_kib,elapsed_seconds,lifecycle_seconds
+legacy,1000021,100,2408050568,2354304,1.60,0.561389
+single,1000021,100,808016968,791808,1.07,0.0594479

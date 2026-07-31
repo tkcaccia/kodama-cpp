@@ -48,6 +48,12 @@ extern "C" bool kodama_fastpls_simpls_fit_cuda_float(const float*, int, int, con
 extern "C" bool kodama_fastpls_simpls_fit_cuda_float_crossprod(const float*, int, int, const float*, int, int, int, float*, float*);
 extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels(const float*, int, int, const int*, const float*, int, int, int, float*, float*);
 extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels_gram(const float*, int, int, const float*, const int*, const float*, int, int, int, float*, float*);
+extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels_device(
+  const float*, int, int, const float*, const int*, const float*, int, int, const float**
+);
+extern "C" void kodama_cuda_transpose_pls_weights_float(
+  const float*, float*, int, int, cudaStream_t
+);
 #endif
 
 namespace kodama {
@@ -282,6 +288,20 @@ class DeviceFloatBuffer {
 struct CudaPLSLDAFloatWorkspace {
   explicit CudaPLSLDAFloatWorkspace(int dev) : device(dev) {}
 
+  struct ResidentFold {
+    std::uint64_t epoch = 0;
+    const float* train_host = nullptr;
+    const float* validation_host = nullptr;
+    const float* train_colmajor_host = nullptr;
+    int train_rows = 0;
+    int validation_rows = 0;
+    int predictors = 0;
+    bool ready = false;
+    DeviceFloatBuffer train_rowmajor;
+    DeviceFloatBuffer validation_rowmajor;
+    DeviceFloatBuffer train_colmajor;
+  };
+
   int device = 0;
   DeviceFloatBuffer x_train;
   DeviceFloatBuffer x_val;
@@ -304,6 +324,9 @@ struct CudaPLSLDAFloatWorkspace {
   std::vector<float> class_counts;
   std::vector<float> weights_prefix;
   std::vector<int> pred_codes;
+  std::vector<ResidentFold> resident_folds;
+  std::uint64_t matrix_uploads = 0;
+  std::uint64_t matrix_reuses = 0;
 };
 
 CudaPLSLDAFloatWorkspace& cuda_pls_lda_float_workspace(int device) {
@@ -573,6 +596,7 @@ struct PLSFoldXCacheF {
   std::size_t constrain_hash = 0;
   bool train_colmajor = false;
   bool train_gram = false;
+  std::uint64_t generation = 0;
   std::vector<int> fold_assignments;
   std::vector<int> fold_ids;
   std::vector<PLSFoldDataF> folds_data;
@@ -585,13 +609,6 @@ std::size_t hash_int_vector(const std::vector<int>& values) {
     h *= 1099511628211ull;
   }
   return h;
-}
-
-bool env_flag_enabled(const char* key) {
-  const char* raw = std::getenv(key);
-  if (raw == nullptr) return false;
-  const std::string value(raw);
-  return value == "1" || value == "true" || value == "TRUE" || value == "on" || value == "ON";
 }
 
 bool cache_matches(
@@ -678,10 +695,22 @@ const PLSFoldXCacheF& get_pls_fold_x_cache_float(
   bool cache_train_gram = false
 ) {
   thread_local PLSFoldXCacheF cache;
+  thread_local std::uint64_t generation_counter = 0;
   if (cache_matches_float(cache, x, constrain, options, cache_train_colmajor)) {
     if (cache_train_gram && !cache.train_gram) {
       for (PLSFoldDataF& fold : cache.folds_data) {
-        if (fold.x_train.cols <= fold.x_train.rows) fold.x_train_gram = densef_gram(fold.x_train);
+        if (cache_train_colmajor) {
+#if defined(KODAMA_ENABLE_CUDA)
+          fold.x_train_gram_colmajor = densef_gram_colmajor_cuda(
+            fold.x_train_colmajor,
+            fold.x_train.rows,
+            fold.x_train.cols,
+            options.gpu_device
+          );
+#endif
+        } else if (fold.x_train.cols <= fold.x_train.rows) {
+          fold.x_train_gram = densef_gram(fold.x_train);
+        }
       }
       cache.train_gram = true;
     }
@@ -701,6 +730,7 @@ const PLSFoldXCacheF& get_pls_fold_x_cache_float(
   cache.constrain_hash = hash_int_vector(constrain);
   cache.train_colmajor = cache_train_colmajor;
   cache.train_gram = false;
+  cache.generation = ++generation_counter;
   cache.fold_assignments = detail::make_folds(labels, constrain, options.cv);
   cache.fold_ids = detail::sorted_unique_folds(cache.fold_assignments);
   cache.folds_data.reserve(cache.fold_ids.size());
@@ -716,12 +746,14 @@ const PLSFoldXCacheF& get_pls_fold_x_cache_float(
     if (cache_train_colmajor) {
       fold_data.x_train_colmajor = densef_to_colmajor(fold_data.x_train);
 #if defined(KODAMA_ENABLE_CUDA)
-      fold_data.x_train_gram_colmajor = densef_gram_colmajor_cuda(
-        fold_data.x_train_colmajor,
-        fold_data.x_train.rows,
-        fold_data.x_train.cols,
-        options.gpu_device
-      );
+      if (cache_train_gram) {
+        fold_data.x_train_gram_colmajor = densef_gram_colmajor_cuda(
+          fold_data.x_train_colmajor,
+          fold_data.x_train.rows,
+          fold_data.x_train.cols,
+          options.gpu_device
+        );
+      }
 #endif
     }
     cache.folds_data.push_back(std::move(fold_data));
@@ -2642,6 +2674,486 @@ std::vector<int> train_predict_pls_lda_projected_cuda(
   }
 }
 
+CudaPLSLDAFloatWorkspace::ResidentFold& prepare_cuda_resident_pls_fold(
+  CudaPLSLDAFloatWorkspace& workspace,
+  std::size_t fold_slot,
+  std::uint64_t epoch,
+  const DenseF& x_train,
+  const DenseF& x_val,
+  const std::vector<float>& x_train_colmajor,
+  cudaStream_t stream
+) {
+  if (workspace.resident_folds.size() <= fold_slot) {
+    workspace.resident_folds.resize(fold_slot + 1);
+  }
+  CudaPLSLDAFloatWorkspace::ResidentFold& resident =
+    workspace.resident_folds[fold_slot];
+  const bool matches =
+    resident.epoch == epoch &&
+    resident.train_host == x_train.data.data() &&
+    resident.validation_host == x_val.data.data() &&
+    resident.train_colmajor_host == x_train_colmajor.data() &&
+    resident.train_rows == x_train.rows &&
+    resident.validation_rows == x_val.rows &&
+    resident.predictors == x_train.cols &&
+    resident.ready;
+  if (matches) {
+    ++workspace.matrix_reuses;
+    return resident;
+  }
+
+  const std::size_t train_items = x_train.data.size();
+  const std::size_t validation_items = x_val.data.size();
+  resident.train_rowmajor.ensure(train_items);
+  resident.validation_rowmajor.ensure(validation_items);
+  resident.train_colmajor.ensure(x_train_colmajor.size());
+  check_cuda(
+    cudaMemcpyAsync(
+      resident.train_rowmajor.data(),
+      x_train.data.data(),
+      train_items * sizeof(float),
+      cudaMemcpyHostToDevice,
+      stream
+    ),
+    "cudaMemcpyAsync resident float32 PLS-LDA Xtrain"
+  );
+  check_cuda(
+    cudaMemcpyAsync(
+      resident.validation_rowmajor.data(),
+      x_val.data.data(),
+      validation_items * sizeof(float),
+      cudaMemcpyHostToDevice,
+      stream
+    ),
+    "cudaMemcpyAsync resident float32 PLS-LDA Xvalidation"
+  );
+  check_cuda(
+    cudaMemcpyAsync(
+      resident.train_colmajor.data(),
+      x_train_colmajor.data(),
+      x_train_colmajor.size() * sizeof(float),
+      cudaMemcpyHostToDevice,
+      stream
+    ),
+    "cudaMemcpyAsync resident float32 PLS-LDA Xtrain column-major"
+  );
+  check_cuda(
+    cudaStreamSynchronize(stream),
+    "cudaStreamSynchronize resident PLS-LDA fold upload"
+  );
+
+  resident.epoch = epoch;
+  resident.train_host = x_train.data.data();
+  resident.validation_host = x_val.data.data();
+  resident.train_colmajor_host = x_train_colmajor.data();
+  resident.train_rows = x_train.rows;
+  resident.validation_rows = x_val.rows;
+  resident.predictors = x_train.cols;
+  resident.ready = true;
+  ++workspace.matrix_uploads;
+  return resident;
+}
+
+std::vector<int> predict_pls_lda_device_float(
+  const float* x_train_device,
+  const float* x_val_device,
+  const float* weights_rowmajor_device,
+  int n,
+  int p,
+  int n_val,
+  int k,
+  const std::vector<int>& classes,
+  CudaPLSLDAFloatWorkspace& workspace,
+  CudaLDAContext& context
+) {
+  const int cnum = static_cast<int>(classes.size());
+  cudaStream_t stream = context.stream();
+  cublasHandle_t blas = context.blas();
+  cusolverDnHandle_t solver = context.solver();
+  workspace.train_scores.ensure(static_cast<std::size_t>(n) * static_cast<std::size_t>(k));
+  workspace.val_scores.ensure(static_cast<std::size_t>(n_val) * static_cast<std::size_t>(k));
+  workspace.means.ensure(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
+  workspace.pooled.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
+  workspace.cov.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
+  workspace.rhs.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(cnum));
+  workspace.linear.ensure(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
+  workspace.constants.ensure(static_cast<std::size_t>(cnum));
+  workspace.lambda.ensure(1);
+  workspace.info.ensure(1);
+  workspace.pred.ensure(static_cast<std::size_t>(n_val));
+
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  check_cublas(
+    cublasSgemm(
+      blas,
+      CUBLAS_OP_N,
+      CUBLAS_OP_N,
+      k,
+      n,
+      p,
+      &one,
+      weights_rowmajor_device,
+      k,
+      x_train_device,
+      p,
+      &zero,
+      workspace.train_scores.data(),
+      k
+    ),
+    "cublasSgemm resident float32 PLS-LDA train scores"
+  );
+  check_cublas(
+    cublasSgemm(
+      blas,
+      CUBLAS_OP_N,
+      CUBLAS_OP_N,
+      k,
+      n_val,
+      p,
+      &one,
+      weights_rowmajor_device,
+      k,
+      x_val_device,
+      p,
+      &zero,
+      workspace.val_scores.data(),
+      k
+    ),
+    "cublasSgemm resident float32 PLS-LDA validation scores"
+  );
+
+  kodama_cuda_lda_label_sums_row_float(
+    workspace.train_scores.data(),
+    workspace.labels.data(),
+    n,
+    k,
+    cnum,
+    workspace.means.data(),
+    stream
+  );
+  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA label sums");
+  kodama_cuda_lda_means_row_float(
+    workspace.means.data(),
+    workspace.counts.data(),
+    k,
+    cnum,
+    stream
+  );
+  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA means");
+  check_cublas(
+    cublasSsyrk(
+      blas,
+      CUBLAS_FILL_MODE_LOWER,
+      CUBLAS_OP_N,
+      k,
+      n,
+      &one,
+      workspace.train_scores.data(),
+      k,
+      &zero,
+      workspace.pooled.data(),
+      k
+    ),
+    "cublasSsyrk resident float32 CUDA LDA TtT"
+  );
+  kodama_cuda_symmetrize_lower_float(workspace.pooled.data(), k, stream);
+  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA symmetrize covariance");
+  kodama_cuda_lda_pooled_col_float(
+    workspace.pooled.data(),
+    workspace.means.data(),
+    workspace.counts.data(),
+    n,
+    k,
+    cnum,
+    stream
+  );
+  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA pooled covariance");
+  kodama_cuda_lda_means_to_rhs_float(
+    workspace.means.data(),
+    workspace.rhs.data(),
+    k,
+    k,
+    cnum,
+    stream
+  );
+  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA means RHS");
+
+  int lwork = 0;
+  check_cusolver(
+    cusolverDnSpotrf_bufferSize(
+      solver,
+      CUBLAS_FILL_MODE_LOWER,
+      k,
+      workspace.cov.data(),
+      k,
+      &lwork
+    ),
+    "cusolverDnSpotrf_bufferSize resident float32 PLS-LDA"
+  );
+  workspace.solver_work.ensure(static_cast<std::size_t>(std::max(lwork, 1)));
+  int info = 0;
+  bool factorized = false;
+  const float ridge_grid[] = {1e-8f, 1e-6f, 1e-5f, 1e-4f, 1e-3f, 1e-2f};
+  for (float ridge : ridge_grid) {
+    kodama_cuda_lda_copy_cov_float(
+      workspace.pooled.data(),
+      workspace.cov.data(),
+      k,
+      k,
+      stream
+    );
+    check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA covariance copy");
+    kodama_cuda_lda_add_ridge_float(
+      workspace.cov.data(),
+      k,
+      ridge,
+      workspace.lambda.data(),
+      stream
+    );
+    check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA ridge");
+    check_cusolver(
+      cusolverDnSpotrf(
+        solver,
+        CUBLAS_FILL_MODE_LOWER,
+        k,
+        workspace.cov.data(),
+        k,
+        workspace.solver_work.data(),
+        lwork,
+        workspace.info.data()
+      ),
+      "cusolverDnSpotrf resident float32 PLS-LDA"
+    );
+    check_cuda(
+      cudaMemcpyAsync(
+        &info,
+        workspace.info.data(),
+        sizeof(int),
+        cudaMemcpyDeviceToHost,
+        stream
+      ),
+      "cudaMemcpyAsync resident float32 PLS-LDA potrf info"
+    );
+    check_cuda(
+      cudaStreamSynchronize(stream),
+      "cudaStreamSynchronize resident float32 PLS-LDA potrf"
+    );
+    if (info == 0) {
+      factorized = true;
+      break;
+    }
+  }
+  if (!factorized) {
+    throw std::runtime_error(
+      "cusolverDnSpotrf resident float32 PLS-LDA returned non-zero info."
+    );
+  }
+  check_cusolver(
+    cusolverDnSpotrs(
+      solver,
+      CUBLAS_FILL_MODE_LOWER,
+      k,
+      cnum,
+      workspace.cov.data(),
+      k,
+      workspace.rhs.data(),
+      k,
+      workspace.info.data()
+    ),
+    "cusolverDnSpotrs resident float32 PLS-LDA"
+  );
+  check_cuda(
+    cudaMemcpyAsync(
+      &info,
+      workspace.info.data(),
+      sizeof(int),
+      cudaMemcpyDeviceToHost,
+      stream
+    ),
+    "cudaMemcpyAsync resident float32 PLS-LDA potrs info"
+  );
+  kodama_cuda_lda_finalize_linear_row_float(
+    workspace.rhs.data(),
+    workspace.means.data(),
+    workspace.counts.data(),
+    workspace.linear.data(),
+    workspace.constants.data(),
+    n,
+    k,
+    k,
+    cnum,
+    stream
+  );
+  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA finalize");
+  check_cuda(
+    cudaStreamSynchronize(stream),
+    "cudaStreamSynchronize resident float32 PLS-LDA solve"
+  );
+  if (info != 0) {
+    throw std::runtime_error(
+      "cusolverDnSpotrs resident float32 PLS-LDA returned non-zero info."
+    );
+  }
+
+  kodama_cuda_lda_score_argmax_row_float(
+    workspace.val_scores.data(),
+    workspace.linear.data(),
+    workspace.constants.data(),
+    workspace.pred.data(),
+    n_val,
+    k,
+    cnum,
+    stream
+  );
+  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA prediction");
+  workspace.pred_codes.assign(static_cast<std::size_t>(n_val), 1);
+  check_cuda(
+    cudaMemcpyAsync(
+      workspace.pred_codes.data(),
+      workspace.pred.data(),
+      workspace.pred_codes.size() * sizeof(int),
+      cudaMemcpyDeviceToHost,
+      stream
+    ),
+    "cudaMemcpyAsync resident float32 PLS-LDA labels"
+  );
+  check_cuda(
+    cudaStreamSynchronize(stream),
+    "cudaStreamSynchronize resident float32 PLS-LDA predict"
+  );
+
+  std::vector<int> pred(static_cast<std::size_t>(n_val), classes.front());
+  for (int i = 0; i < n_val; ++i) {
+    const int cls =
+      std::max(1, std::min(cnum, workspace.pred_codes[static_cast<std::size_t>(i)])) - 1;
+    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
+  }
+  return pred;
+}
+
+std::vector<int> fit_predict_pls_lda_resident_cuda_float(
+  const DenseF& x_train,
+  const std::vector<float>& x_train_colmajor,
+  const std::vector<int>& y_train,
+  const DenseF& x_val,
+  int max_components,
+  const std::vector<int>& classes,
+  int gpu_device,
+  std::uint64_t epoch,
+  std::size_t fold_slot,
+  int& fitted_components
+) {
+  if (x_train.rows < 1 || x_train.cols < 1 || x_val.rows < 1) {
+    throw std::invalid_argument("Resident CUDA PLS-LDA requires non-empty fold matrices.");
+  }
+  if (static_cast<int>(y_train.size()) != x_train.rows) {
+    throw std::invalid_argument("Resident CUDA PLS-LDA label size mismatch.");
+  }
+  CudaLDAContext& context = cuda_lda_context(gpu_device);
+  cudaStream_t stream = context.stream();
+  CudaPLSLDAFloatWorkspace& workspace = cuda_pls_lda_float_workspace(gpu_device);
+  CudaPLSLDAFloatWorkspace::ResidentFold& resident =
+    prepare_cuda_resident_pls_fold(
+      workspace,
+      fold_slot,
+      epoch,
+      x_train,
+      x_val,
+      x_train_colmajor,
+      stream
+    );
+
+  encode_labels_from_sorted_classes(
+    y_train,
+    classes,
+    workspace.encoded,
+    workspace.class_counts,
+    1
+  );
+  workspace.labels.ensure(workspace.encoded.size());
+  workspace.counts.ensure(workspace.class_counts.size());
+  check_cuda(
+    cudaMemcpyAsync(
+      workspace.labels.data(),
+      workspace.encoded.data(),
+      workspace.encoded.size() * sizeof(int),
+      cudaMemcpyHostToDevice,
+      stream
+    ),
+    "cudaMemcpyAsync resident PLS-LDA labels"
+  );
+  check_cuda(
+    cudaMemcpyAsync(
+      workspace.counts.data(),
+      workspace.class_counts.data(),
+      workspace.class_counts.size() * sizeof(float),
+      cudaMemcpyHostToDevice,
+      stream
+    ),
+    "cudaMemcpyAsync resident PLS-LDA class counts"
+  );
+  check_cuda(
+    cudaStreamSynchronize(stream),
+    "cudaStreamSynchronize resident PLS-LDA label upload"
+  );
+
+  const int max_rank = pls_component_limit(
+    max_components,
+    x_train.rows,
+    x_train.cols
+  );
+  const float* weights_column_major = nullptr;
+  fitted_components = 0;
+  for (int trial_rank = max_rank; trial_rank >= 1; --trial_rank) {
+    const bool ok = kodama_fastpls_simpls_fit_cuda_float_labels_device(
+      resident.train_colmajor.data(),
+      x_train.rows,
+      x_train.cols,
+      nullptr,
+      workspace.labels.data(),
+      workspace.counts.data(),
+      static_cast<int>(classes.size()),
+      trial_rank,
+      &weights_column_major
+    );
+    if (ok) {
+      fitted_components = trial_rank;
+      break;
+    }
+  }
+  if (fitted_components < 1 || weights_column_major == nullptr) {
+    throw std::runtime_error(
+      "Resident CUDA label-aware float32 SIMPLS fit failed."
+    );
+  }
+
+  workspace.weights.ensure(
+    static_cast<std::size_t>(x_train.cols) *
+    static_cast<std::size_t>(fitted_components)
+  );
+  kodama_cuda_transpose_pls_weights_float(
+    weights_column_major,
+    workspace.weights.data(),
+    x_train.cols,
+    fitted_components,
+    stream
+  );
+  check_cuda(cudaGetLastError(), "resident CUDA PLS weight transpose");
+  return predict_pls_lda_device_float(
+    resident.train_rowmajor.data(),
+    resident.validation_rowmajor.data(),
+    workspace.weights.data(),
+    x_train.rows,
+    x_train.cols,
+    x_val.rows,
+    fitted_components,
+    classes,
+    workspace,
+    context
+  );
+}
+
 std::vector<int> train_predict_pls_lda_projected_cuda_float(
   const DenseF& x_train,
   const std::vector<int>& y_train,
@@ -2875,6 +3387,13 @@ PLSCVResult run_plscv_host(
   const bool use_fold_cache = !options.cv.stratified;
   const PLSFoldXCacheF* fold_cache = use_fold_cache ?
     &get_pls_fold_x_cache_float(x, labels, constrain, options, false, backend == Backend::CPU) : nullptr;
+  if (backend == Backend::Metal) {
+    const std::uint64_t epoch = fold_cache != nullptr ?
+      fold_cache->generation :
+      (options.cv.seed ^ static_cast<std::uint64_t>(x.rows << 1U) ^
+       static_cast<std::uint64_t>(x.cols));
+    detail::metal_set_pls_residency_epoch(epoch);
+  }
   result.fold_assignments = fold_cache != nullptr ?
     fold_cache->fold_assignments :
     detail::make_folds(labels, constrain, options.cv);
@@ -2974,7 +3493,9 @@ PLSCVResult run_plscv_host(
     }
   };
 
-  const int fold_workers = std::max(1, std::min(options.n_threads, static_cast<int>(fold_ids.size())));
+  const int fold_workers = backend == Backend::Metal ?
+    1 :
+    std::max(1, std::min(options.n_threads, static_cast<int>(fold_ids.size())));
   if (fold_workers <= 1) {
     for (std::size_t fold_pos = 0; fold_pos < fold_ids.size(); ++fold_pos) process_fold(fold_pos);
   } else {
@@ -3053,7 +3574,14 @@ PLSCVResult run_plscv_cuda(
   result.true_labels = labels;
   const bool use_fold_cache = !options.cv.stratified;
   const PLSFoldXCacheF* fold_cache = use_fold_cache ?
-    &get_pls_fold_x_cache_float(x, labels, constrain, options, true) : nullptr;
+    &get_pls_fold_x_cache_float(
+      x,
+      labels,
+      constrain,
+      options,
+      true,
+      mode != PLSMode::PLS_LDA
+    ) : nullptr;
   result.fold_assignments = fold_cache != nullptr ?
     fold_cache->fold_assignments :
     detail::make_folds(labels, constrain, options.cv);
@@ -3108,6 +3636,35 @@ PLSCVResult run_plscv_cuda(
       }
       continue;
     }
+    if (mode == PLSMode::PLS_LDA &&
+        fold_cache != nullptr &&
+        x_train_colmajor != nullptr) {
+      int fitted_components = 0;
+      const std::vector<int> fold_pred =
+        fit_predict_pls_lda_resident_cuda_float(
+          *x_train,
+          *x_train_colmajor,
+          y_train_labels,
+          *x_val,
+          options.max_components,
+          fold_classes,
+          options.gpu_device,
+          fold_cache->generation,
+          fold_pos,
+          fitted_components
+        );
+      const int requested = options.fixed_components > 0 ?
+        options.fixed_components : options.max_components;
+      evaluated_component = std::min(
+        evaluated_component,
+        std::min(requested, fitted_components)
+      );
+      for (std::size_t i = 0; i < validation->size(); ++i) {
+        selected_pred[static_cast<std::size_t>((*validation)[i])] = fold_pred[i];
+      }
+      continue;
+    }
+
     PLSFitF fit = fit_pls_components_cuda_labels_float(
         *x_train,
         y_train_labels,

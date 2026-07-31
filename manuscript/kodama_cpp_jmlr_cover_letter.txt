@@ -18,7 +18,7 @@ Python binding source: https://github.com/tkcaccia/kodama-cpp/tree/main/split-re
 
 Software version: 0.1.0 release candidate
 
-Reviewed baseline: 9da48ee03d4ce76d50adf7cae0189b8ea7d65c62
+Reviewed baseline: a32f71844fb0860f8faec0169c2850f800a68da4
 
 Reviewed R-wrapper baseline: 4d5506bde8918162dae0ad1d19c4f6f7a4df64ba
 
@@ -28,11 +28,11 @@ Archived source: AUTHOR ACTION REQUIRED: deposit the tagged source archive, inse
 
 Significance and software contribution
 
-The submission preserves KODAMA's cross-validated label-predictability objective while moving its repeated work into one typed float32 core. It contributes package-owned nearest-neighbor, SIMPLS/LDA, graph, and visualization paths; strict and observable CPU/CUDA/Metal execution; matrix and supplied-graph entry points; and a common API for R and Python. The repository contains installation instructions, API examples, tests, benchmark drivers, a public API snapshot, and a machine-checkable licensing/provenance audit.
+The submission preserves KODAMA's cross-validated label-predictability signal while making four contributions: a standalone C++17 core for thin R/Python wrappers; native and observable CPU/CUDA/Metal execution; guided label evolution based on out-of-fold predictions and class transitions; and an exact-quota landmark-projection strategy that generalizes the landmark idea introduced in the KODAMA bioRxiv work. The repository contains installation instructions, API examples, explicit pseudocode, tests, benchmark drivers, a public API snapshot, and a machine-checkable licensing/provenance audit.
 
 Prior publications and delta
 
-The KODAMA method was published by Cacciatore, Luchinat, and Tenori in PNAS (2014), and the historical R package was described by Cacciatore et al. in Bioinformatics (2017). Prior publication of the method is disclosed. This submission concerns the new standalone software: a C++17 core independent of R, native CUDA and Metal backends, float32 and label-aware SIMPLS/LDA, package-owned neighbor search, graph-input APIs, strict backend metadata, and separately maintained R/Python bindings. The detailed delta is recorded in docs/previous-version-delta.md. The two prior papers will be supplied as supplementary material.
+The KODAMA method was published by Cacciatore, Luchinat, and Tenori in PNAS (2014), and the historical R package was described by Cacciatore et al. in Bioinformatics (2017). Prior publication of the method is disclosed. The landmark-projection principle was subsequently introduced in the 2025 KODAMA bioRxiv preprint. This submission concerns its general formalization and the new standalone software: a C++17 core independent of R, native CUDA and Metal backends, guided search mechanics, exact-quota landmark selection, float32 label-aware SIMPLS/LDA, package-owned neighbor search, strict backend metadata, and separately maintained R/Python bindings. The detailed delta is recorded in docs/previous-version-delta.md. The prior papers and preprint will be supplied as supplementary material.
 
 Evidence of use and openness
 
@@ -56,6 +56,6 @@ KODAMA; cross-validation; unsupervised learning; heterogeneous computing; manifo
 
 Sincerely,
 
-Stefano Cacciatore
-Corresponding author
-stefano.cacciatore@icgeb.org
+Leonardo Tenori and Stefano Cacciatore
+Co-corresponding authors
+tenori@cerm.unifi.it; stefano.cacciatore@icgeb.org

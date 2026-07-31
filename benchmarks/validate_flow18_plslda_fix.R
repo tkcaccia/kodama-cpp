@@ -1,4 +1,6 @@
 #!/usr/bin/env Rscript
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
 
 args <- commandArgs(trailingOnly = TRUE)
 dataset_file <- if (length(args) >= 1L) {

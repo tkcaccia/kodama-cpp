@@ -71,6 +71,7 @@ Rcpp::List graph_to_r(const kodama::NeighborGraph& graph, int samples) {
       distances(i, j) = graph.distances[offset];
     }
   }
+  Rcpp::List graph = graph_to_r(result.knn, result.samples);
   return Rcpp::List::create(
     Rcpp::Named("indices") = indices,
     Rcpp::Named("distances") = distances,
@@ -199,8 +200,10 @@ Rcpp::List kodama_matrix_cpp_temp(
     Rcpp::Named("acc") = acc,
     Rcpp::Named("v") = v,
     Rcpp::Named("res") = res,
-    Rcpp::Named("knn_Rnanoflann") = graph_to_r(result.knn, result.samples),
-    Rcpp::Named("base_knn") = graph_to_r(result.base_knn, result.samples),
+    Rcpp::Named("knn_Rnanoflann") = graph,
+    Rcpp::Named("knn_is_kodama_corrected") = result.knn_is_kodama_corrected,
+    Rcpp::Named("graph_storage_bytes") =
+      static_cast<double>(result.graph_storage_bytes),
     Rcpp::Named("data") = data,
     Rcpp::Named("res_constrain") = res_constrain,
     Rcpp::Named("n.cores") = result.n_threads,

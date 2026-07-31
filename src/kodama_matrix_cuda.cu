@@ -9,8 +9,11 @@
 #include <cmath>
 #include <climits>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <cuda_runtime.h>
 
@@ -50,6 +53,78 @@ T* device_alloc_copy(const std::vector<T>& host, const char* what) {
   check_cuda(cudaMalloc(&device, host.size() * sizeof(T)), what);
   check_cuda(cudaMemcpy(device, host.data(), host.size() * sizeof(T), cudaMemcpyHostToDevice), what);
   return device;
+}
+
+__global__ void project_landmark_labels_kernel(
+  const int* graph_indices,
+  const char* is_landmark,
+  const int* labels,
+  int* projected,
+  int samples,
+  int neighbors,
+  int projection_k,
+  int fallback_label
+) {
+  const int query = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (query >= samples) return;
+  if (is_landmark[query] != 0) {
+    projected[query] = labels[query];
+    return;
+  }
+
+  const std::size_t base =
+    static_cast<std::size_t>(query) * static_cast<std::size_t>(neighbors);
+  int cutoff = neighbors;
+  int accepted = 0;
+  for (int rank = 0; rank < neighbors; ++rank) {
+    const int neighbor = graph_indices[base + static_cast<std::size_t>(rank)];
+    if (neighbor < 0 || neighbor >= samples || is_landmark[neighbor] == 0) continue;
+    ++accepted;
+    if (accepted == projection_k) {
+      cutoff = rank + 1;
+      break;
+    }
+  }
+  if (accepted == 0) {
+    projected[query] = fallback_label;
+    return;
+  }
+
+  int best_label = fallback_label;
+  int best_count = -1;
+  for (int rank = 0; rank < cutoff; ++rank) {
+    const int neighbor = graph_indices[base + static_cast<std::size_t>(rank)];
+    if (neighbor < 0 || neighbor >= samples || is_landmark[neighbor] == 0) continue;
+    const int candidate = labels[neighbor];
+    bool seen = false;
+    for (int prior = 0; prior < rank; ++prior) {
+      const int prior_neighbor =
+        graph_indices[base + static_cast<std::size_t>(prior)];
+      if (prior_neighbor >= 0 && prior_neighbor < samples &&
+          is_landmark[prior_neighbor] != 0 &&
+          labels[prior_neighbor] == candidate) {
+        seen = true;
+        break;
+      }
+    }
+    if (seen) continue;
+    int count = 0;
+    for (int other = rank; other < cutoff; ++other) {
+      const int other_neighbor =
+        graph_indices[base + static_cast<std::size_t>(other)];
+      if (other_neighbor >= 0 && other_neighbor < samples &&
+          is_landmark[other_neighbor] != 0 &&
+          labels[other_neighbor] == candidate) {
+        ++count;
+      }
+    }
+    if (count > best_count ||
+        (count == best_count && candidate < best_label)) {
+      best_label = candidate;
+      best_count = count;
+    }
+  }
+  projected[query] = best_count < 0 ? fallback_label : best_label;
 }
 
 __device__ bool kodama_pair_greater(float lhs_dist, int lhs_idx, float rhs_dist, int rhs_idx) {
@@ -283,7 +358,8 @@ __global__ void kodama_dissimilarity_shared_kernel(
   int samples,
   int neighbors,
   int sort_width,
-  bool one_based_indices
+  bool input_one_based_indices,
+  bool output_one_based_indices
 ) {
   const int row_id = static_cast<int>(blockIdx.x);
   if (row_id >= samples) return;
@@ -297,7 +373,11 @@ __global__ void kodama_dissimilarity_shared_kernel(
 
   if (tid < neighbors) {
     const int offset = row_offset + tid;
-    const int neighbor = indices[offset];
+    const int stored_neighbor = indices[offset];
+    const int neighbor =
+      stored_neighbor >= 0 && input_one_based_indices ?
+        stored_neighbor - 1 :
+        stored_neighbor;
     float distance = distances[offset];
     if (neighbor < 0 || neighbor >= samples || !isfinite(distance)) {
       row_dist[tid] = kCudaInfinity;
@@ -355,11 +435,295 @@ __global__ void kodama_dissimilarity_shared_kernel(
   if (tid < neighbors) {
     const int offset = row_offset + tid;
     distances[offset] = row_dist[tid];
-    indices[offset] = row_idx[tid] >= 0 && one_based_indices ? row_idx[tid] + 1 : row_idx[tid];
+    indices[offset] =
+      row_idx[tid] >= 0 && output_one_based_indices ?
+        row_idx[tid] + 1 :
+        row_idx[tid];
   }
 }
 
 }  // namespace
+
+struct CudaResidentKODAMAGraph::Impl {
+  struct Lane {
+    char* is_landmark = nullptr;
+    int* labels = nullptr;
+    int* projected = nullptr;
+    cudaStream_t stream = nullptr;
+  };
+
+  int samples = 0;
+  int neighbors = 0;
+  int device = 0;
+  int* indices = nullptr;
+  float* distances = nullptr;
+  int* result_labels = nullptr;
+  std::size_t result_capacity = 0;
+  std::vector<Lane> lane_buffers;
+
+  ~Impl() {
+    cudaSetDevice(device);
+    for (Lane& lane : lane_buffers) {
+      if (lane.stream != nullptr) cudaStreamSynchronize(lane.stream);
+      cudaFree(lane.is_landmark);
+      cudaFree(lane.labels);
+      cudaFree(lane.projected);
+      if (lane.stream != nullptr) cudaStreamDestroy(lane.stream);
+    }
+    cudaFree(indices);
+    cudaFree(distances);
+    cudaFree(result_labels);
+  }
+};
+
+CudaResidentKODAMAGraph::CudaResidentKODAMAGraph() = default;
+CudaResidentKODAMAGraph::~CudaResidentKODAMAGraph() = default;
+CudaResidentKODAMAGraph::CudaResidentKODAMAGraph(
+  CudaResidentKODAMAGraph&&
+) noexcept = default;
+CudaResidentKODAMAGraph& CudaResidentKODAMAGraph::operator=(
+  CudaResidentKODAMAGraph&&
+) noexcept = default;
+CudaResidentKODAMAGraph::CudaResidentKODAMAGraph(
+  std::unique_ptr<Impl> impl
+) : impl_(std::move(impl)) {}
+
+bool CudaResidentKODAMAGraph::valid() const noexcept {
+  return impl_ != nullptr;
+}
+int CudaResidentKODAMAGraph::samples() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->samples;
+}
+int CudaResidentKODAMAGraph::neighbors() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->neighbors;
+}
+int CudaResidentKODAMAGraph::lanes() const noexcept {
+  return impl_ == nullptr ? 0 : static_cast<int>(impl_->lane_buffers.size());
+}
+
+CudaResidentKODAMAGraph make_cuda_resident_kodama_graph(
+  const NeighborGraph& graph,
+  int samples,
+  int gpu_device,
+  int lanes
+) {
+  const std::size_t expected =
+    static_cast<std::size_t>(samples) *
+    static_cast<std::size_t>(graph.neighbors);
+  if (samples < 1 || graph.neighbors < 1 ||
+      graph.indices.size() != expected ||
+      graph.distances.size() != expected) {
+    throw std::invalid_argument("Invalid CUDA resident KODAMA graph.");
+  }
+  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice resident KODAMA graph");
+  auto impl = std::make_unique<CudaResidentKODAMAGraph::Impl>();
+  impl->samples = samples;
+  impl->neighbors = graph.neighbors;
+  impl->device = gpu_device;
+  impl->indices = device_alloc_copy(
+    graph.indices,
+    "copy resident KODAMA graph indices"
+  );
+  impl->distances = device_alloc_copy(
+    graph.distances,
+    "copy resident KODAMA graph distances"
+  );
+  impl->lane_buffers.resize(static_cast<std::size_t>(std::max(1, lanes)));
+  for (CudaResidentKODAMAGraph::Impl::Lane& lane : impl->lane_buffers) {
+    check_cuda(
+      cudaStreamCreateWithFlags(&lane.stream, cudaStreamNonBlocking),
+      "create resident KODAMA graph stream"
+    );
+    check_cuda(
+      cudaMalloc(&lane.is_landmark, static_cast<std::size_t>(samples) * sizeof(char)),
+      "allocate resident KODAMA landmark mask"
+    );
+    check_cuda(
+      cudaMalloc(&lane.labels, static_cast<std::size_t>(samples) * sizeof(int)),
+      "allocate resident KODAMA labels"
+    );
+    check_cuda(
+      cudaMalloc(&lane.projected, static_cast<std::size_t>(samples) * sizeof(int)),
+      "allocate resident KODAMA projected labels"
+    );
+  }
+  return CudaResidentKODAMAGraph(std::move(impl));
+}
+
+std::vector<int> cuda_resident_project_landmark_labels(
+  const CudaResidentKODAMAGraph& graph,
+  const std::vector<char>& is_landmark,
+  const std::vector<int>& labels,
+  int projection_k,
+  int fallback_label,
+  int lane
+) {
+  if (!graph.valid()) {
+    throw std::invalid_argument("CUDA resident KODAMA graph is empty.");
+  }
+  CudaResidentKODAMAGraph::Impl& impl = *graph.impl_;
+  if (is_landmark.size() != static_cast<std::size_t>(impl.samples) ||
+      labels.size() != static_cast<std::size_t>(impl.samples)) {
+    throw std::invalid_argument(
+      "CUDA resident KODAMA projection input size mismatch."
+    );
+  }
+  check_cuda(cudaSetDevice(impl.device), "cudaSetDevice resident KODAMA projection");
+  const int lane_id =
+    std::max(0, lane) % static_cast<int>(impl.lane_buffers.size());
+  CudaResidentKODAMAGraph::Impl::Lane& workspace =
+    impl.lane_buffers[static_cast<std::size_t>(lane_id)];
+  check_cuda(
+    cudaMemcpyAsync(
+      workspace.is_landmark,
+      is_landmark.data(),
+      is_landmark.size() * sizeof(char),
+      cudaMemcpyHostToDevice,
+      workspace.stream
+    ),
+    "upload resident KODAMA landmark mask"
+  );
+  check_cuda(
+    cudaMemcpyAsync(
+      workspace.labels,
+      labels.data(),
+      labels.size() * sizeof(int),
+      cudaMemcpyHostToDevice,
+      workspace.stream
+    ),
+    "upload resident KODAMA landmark labels"
+  );
+  const int threads = 128;
+  const int blocks = (impl.samples + threads - 1) / threads;
+  project_landmark_labels_kernel<<<blocks, threads, 0, workspace.stream>>>(
+    impl.indices,
+    workspace.is_landmark,
+    workspace.labels,
+    workspace.projected,
+    impl.samples,
+    impl.neighbors,
+    std::max(1, std::min(projection_k, impl.neighbors)),
+    fallback_label
+  );
+  check_cuda(cudaGetLastError(), "launch resident KODAMA label projection");
+  std::vector<int> projected(static_cast<std::size_t>(impl.samples));
+  check_cuda(
+    cudaMemcpyAsync(
+      projected.data(),
+      workspace.projected,
+      projected.size() * sizeof(int),
+      cudaMemcpyDeviceToHost,
+      workspace.stream
+    ),
+    "download resident KODAMA projected labels"
+  );
+  check_cuda(
+    cudaStreamSynchronize(workspace.stream),
+    "synchronize resident KODAMA label projection"
+  );
+  return projected;
+}
+
+void cuda_resident_apply_kodama_dissimilarity(
+  CudaResidentKODAMAGraph& graph,
+  const std::vector<int>& res,
+  int runs,
+  bool input_one_based_indices,
+  bool output_one_based_indices
+) {
+  if (!graph.valid()) {
+    throw std::invalid_argument("CUDA resident KODAMA graph is empty.");
+  }
+  CudaResidentKODAMAGraph::Impl& impl = *graph.impl_;
+  if (runs < 1 ||
+      res.size() !=
+        static_cast<std::size_t>(runs) *
+        static_cast<std::size_t>(impl.samples)) {
+    throw std::invalid_argument(
+      "CUDA resident KODAMA dissimilarity label size mismatch."
+    );
+  }
+  if (impl.neighbors > kMaxGraphNeighbors) {
+    throw std::invalid_argument(
+      "CUDA KODAMA dissimilarity supports at most 1024 graph neighbors."
+    );
+  }
+  check_cuda(cudaSetDevice(impl.device), "cudaSetDevice resident KODAMA dissimilarity");
+  if (impl.result_capacity < res.size()) {
+    cudaFree(impl.result_labels);
+    impl.result_labels = nullptr;
+    check_cuda(
+      cudaMalloc(&impl.result_labels, res.size() * sizeof(int)),
+      "allocate resident KODAMA result labels"
+    );
+    impl.result_capacity = res.size();
+  }
+  check_cuda(
+    cudaMemcpy(
+      impl.result_labels,
+      res.data(),
+      res.size() * sizeof(int),
+      cudaMemcpyHostToDevice
+    ),
+    "upload resident KODAMA result labels"
+  );
+  int sort_width = 1;
+  while (sort_width < impl.neighbors) sort_width <<= 1;
+  const std::size_t shared_bytes =
+    static_cast<std::size_t>(sort_width) * (sizeof(float) + sizeof(int));
+  kodama_dissimilarity_shared_kernel<<<impl.samples, sort_width, shared_bytes>>>(
+    impl.indices,
+    impl.distances,
+    impl.result_labels,
+    runs,
+    impl.samples,
+    impl.neighbors,
+    sort_width,
+    input_one_based_indices,
+    output_one_based_indices
+  );
+  check_cuda(cudaGetLastError(), "launch resident KODAMA dissimilarity");
+  check_cuda(
+    cudaDeviceSynchronize(),
+    "synchronize resident KODAMA dissimilarity"
+  );
+}
+
+NeighborGraph download_cuda_resident_kodama_graph(
+  const CudaResidentKODAMAGraph& graph
+) {
+  if (!graph.valid()) {
+    throw std::invalid_argument("CUDA resident KODAMA graph is empty.");
+  }
+  const CudaResidentKODAMAGraph::Impl& impl = *graph.impl_;
+  check_cuda(cudaSetDevice(impl.device), "cudaSetDevice download resident KODAMA graph");
+  NeighborGraph out;
+  out.neighbors = impl.neighbors;
+  const std::size_t items =
+    static_cast<std::size_t>(impl.samples) *
+    static_cast<std::size_t>(impl.neighbors);
+  out.indices.resize(items);
+  out.distances.resize(items);
+  check_cuda(
+    cudaMemcpy(
+      out.indices.data(),
+      impl.indices,
+      items * sizeof(int),
+      cudaMemcpyDeviceToHost
+    ),
+    "download resident KODAMA graph indices"
+  );
+  check_cuda(
+    cudaMemcpy(
+      out.distances.data(),
+      impl.distances,
+      items * sizeof(float),
+      cudaMemcpyDeviceToHost
+    ),
+    "download resident KODAMA graph distances"
+  );
+  return out;
+}
 
 void apply_kodama_dissimilarity_cuda(
   NeighborGraph& graph,
@@ -367,7 +731,8 @@ void apply_kodama_dissimilarity_cuda(
   int runs,
   int samples,
   int gpu_device,
-  bool one_based_indices
+  bool input_one_based_indices,
+  bool output_one_based_indices
 ) {
   if (runs <= 0 || samples <= 0 || graph.neighbors <= 0) return;
   if (graph.neighbors > kMaxGraphNeighbors) {
@@ -396,7 +761,8 @@ void apply_kodama_dissimilarity_cuda(
     samples,
     graph.neighbors,
     sort_width,
-    one_based_indices
+    input_one_based_indices,
+    output_one_based_indices
   );
   check_cuda(cudaGetLastError(), "launch KODAMA dissimilarity kernel");
   check_cuda(cudaDeviceSynchronize(), "run KODAMA dissimilarity kernel");

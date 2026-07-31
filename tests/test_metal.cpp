@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 #include <algorithm>
-#include <iostream>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <vector>
 
 #include "kodama/kodama.hpp"
@@ -160,6 +161,7 @@ int main() {
   matrix_options.knn.cv.folds = 3;
   matrix_options.pls.cv.folds = 3;
   matrix_options.apply_kodama_dissimilarity = true;
+  matrix_options.compute_visual_init = true;
 
   matrix_options.classifier = kodama::CoreClassifier::KNN;
   const kodama::KODAMAMatrixResult matrix_knn = kodama::KODAMAMatrix_METAL(
@@ -170,8 +172,28 @@ int main() {
     matrix_options
   );
   if (matrix_knn.res.size() != static_cast<std::size_t>(matrix_options.runs * samples) ||
-      matrix_knn.knn.indices.empty() || !std::isfinite(matrix_knn.runtime_seconds)) {
+      matrix_knn.knn.indices.empty() ||
+      matrix_knn.graph_builds != 1 ||
+      !matrix_knn.has_visual_init ||
+      matrix_knn.visual_init.backend != kodama::Backend::Metal ||
+      matrix_knn.visual_init.umap.size() != static_cast<std::size_t>(samples * 2) ||
+      matrix_knn.visual_init.opentsne.size() != static_cast<std::size_t>(samples * 2) ||
+      !std::isfinite(matrix_knn.runtime_seconds)) {
     std::cerr << "Metal KODAMA KNN smoke test failed.\n";
+    return 1;
+  }
+
+  const kodama::KODAMAMatrixResult matrix_knn_repeat =
+    kodama::KODAMAMatrix_METAL(
+      kodama::MatrixView{x.data(), samples, dimensions},
+      {},
+      {},
+      {},
+      matrix_options
+    );
+  if (matrix_knn.res != matrix_knn_repeat.res ||
+      matrix_knn.knn.indices != matrix_knn_repeat.knn.indices) {
+    std::cerr << "Resident Metal KODAMA KNN is not repeatable.\n";
     return 1;
   }
 
@@ -186,6 +208,20 @@ int main() {
   if (matrix_pls.res.size() != static_cast<std::size_t>(matrix_options.runs * samples) ||
       matrix_pls.knn.indices.empty() || !std::isfinite(matrix_pls.runtime_seconds)) {
     std::cerr << "Metal KODAMA PLS-LDA smoke test failed.\n";
+    return 1;
+  }
+
+  const kodama::KODAMAMatrixResult matrix_pls_repeat =
+    kodama::KODAMAMatrix_METAL(
+      kodama::MatrixView{x.data(), samples, dimensions},
+      {},
+      {},
+      {},
+      matrix_options
+    );
+  if (matrix_pls.res != matrix_pls_repeat.res ||
+      matrix_pls.knn.indices != matrix_pls_repeat.knn.indices) {
+    std::cerr << "Resident Metal KODAMA PLS-LDA is not repeatable.\n";
     return 1;
   }
 

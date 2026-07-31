@@ -9,6 +9,7 @@
 namespace kodama::detail {
 
 struct NativeMetalIVFIndex::Impl {};
+struct NativeMetalKODAMAGraph::Impl {};
 
 NativeMetalIVFIndex::NativeMetalIVFIndex() = default;
 NativeMetalIVFIndex::~NativeMetalIVFIndex() = default;
@@ -24,9 +25,28 @@ DistanceMetric NativeMetalIVFIndex::metric() const noexcept {
   return DistanceMetric::Euclidean;
 }
 
+NativeMetalKODAMAGraph::NativeMetalKODAMAGraph() = default;
+NativeMetalKODAMAGraph::~NativeMetalKODAMAGraph() = default;
+NativeMetalKODAMAGraph::NativeMetalKODAMAGraph(
+  NativeMetalKODAMAGraph&&
+) noexcept = default;
+NativeMetalKODAMAGraph& NativeMetalKODAMAGraph::operator=(
+  NativeMetalKODAMAGraph&&
+) noexcept = default;
+NativeMetalKODAMAGraph::NativeMetalKODAMAGraph(
+  std::unique_ptr<Impl> impl
+) : impl_(std::move(impl)) {}
+
+bool NativeMetalKODAMAGraph::valid() const noexcept { return false; }
+int NativeMetalKODAMAGraph::samples() const noexcept { return 0; }
+int NativeMetalKODAMAGraph::neighbors() const noexcept { return 0; }
+int NativeMetalKODAMAGraph::lanes() const noexcept { return 0; }
+
 bool metal_backend_available() {
   return false;
 }
+
+void metal_set_pls_residency_epoch(std::uint64_t) {}
 
 NativeKNNResult metal_exact_knn_search(
   const std::vector<float>&,
@@ -98,6 +118,41 @@ std::vector<int> metal_kmeans_labels(
   int,
   const std::vector<int>&,
   int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+NativeMetalKODAMAGraph metal_build_resident_kodama_graph(
+  const NeighborGraph&,
+  int,
+  int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+std::vector<int> metal_project_landmark_labels(
+  const NativeMetalKODAMAGraph&,
+  const std::vector<char>&,
+  const std::vector<int>&,
+  int,
+  int,
+  int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+void metal_apply_resident_kodama_dissimilarity(
+  NativeMetalKODAMAGraph&,
+  const std::vector<int>&,
+  int,
+  bool,
+  bool
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+NeighborGraph metal_download_resident_kodama_graph(
+  const NativeMetalKODAMAGraph&
 ) {
   throw std::runtime_error("The Metal backend is not available in this build.");
 }

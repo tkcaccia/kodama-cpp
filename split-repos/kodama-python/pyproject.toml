@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "kodama-python"
 version = "0.1.0"
-description = "Python wrapper for the standalone kodama-cpp C++/CUDA library"
+description = "Python wrapper for the standalone kodama-cpp C++/CUDA/Metal library"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

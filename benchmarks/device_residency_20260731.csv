@@ -1,0 +1,8 @@
+dataset,samples,variables,backend,classifier,M,Tcycle,ncomp,threads,transfer_seconds,resident_seconds,speedup,best_cv_accuracy,best_ari,best_classes,output_match,scope
+MetRef,873,375,CUDA,KNN,10,10,50,4,0.464669,0.446407,1.04091,0.917557,0.188784,22,exact,single paired engineering run
+MetRef,873,375,CUDA,PLS-LDA,10,10,50,4,1.499994,1.441766,1.04039,0.900763,0.648966,50,exact,single paired engineering run
+Br8100,13938,50,CUDA,KNN,10,10,50,4,1.099490,1.108158,0.99218,0.850201,0.246499,48,exact,single paired engineering run
+Br8100,13938,50,CUDA,PLS-LDA,10,10,50,4,1.975572,1.804361,1.09489,0.919552,0.089944,87,exact,single paired engineering run
+Br8100,13938,50,CUDA,PLS-LDA,1,100,50,4,3.586089,3.245114,1.10507,0.927874,0.096644,81,exact,single paired engineering run
+MetRef,873,375,Metal,KNN,10,10,50,4,0.207876,0.181986,1.14226,0.928244,0.189462,24,exact,single paired engineering run
+MetRef,873,375,Metal,PLS-LDA,10,10,50,4,9.271611,8.973613,1.03321,0.891603,0.682522,42,exact,single paired engineering run

@@ -358,6 +358,49 @@ struct GraphClusterResult {
   Backend backend = Backend::CPU;
 };
 
+struct VisualizationInitOptions {
+  int n_components = 2;
+  int n_threads = 1;
+  std::uint64_t seed = 4;
+  int gpu_device = 0;
+  Backend backend = Backend::CPU;
+};
+
+struct VisualizationInitResult {
+  std::vector<float> umap;
+  std::vector<float> opentsne;
+  int samples = 0;
+  int components = 2;
+  Backend backend = Backend::CPU;
+  double runtime_seconds = 0.0;
+};
+
+struct KODAMAGraphOptions {
+  int neighbors = 100;
+  int n_threads = 1;
+  std::uint64_t seed = 1234;
+  DistanceMetric metric = DistanceMetric::Euclidean;
+  Backend backend = Backend::CPU;
+  KNNIndexType index_type = KNNIndexType::NativeHNSW;
+  int ivf_nlist = 0;
+  int ivf_nprobe = 0;
+  int gpu_device = 0;
+};
+
+struct KODAMAGraphResult {
+  NeighborGraph knn;
+  VisualizationInitResult visual_init;
+  int samples = 0;
+  int dimensions = 0;
+  int graph_builds = 0;
+  Backend backend = Backend::CPU;
+  double input_copy_seconds = 0.0;
+  double graph_seconds = 0.0;
+  double visual_init_seconds = 0.0;
+  double runtime_seconds = 0.0;
+  std::uint64_t graph_storage_bytes = 0;
+};
+
 struct KODAMAMatrixOptions {
   int runs = 100;
   int cycles = 20;
@@ -376,6 +419,7 @@ struct KODAMAMatrixOptions {
   CoreClassifier classifier = CoreClassifier::KNN;
   bool progress = false;
   bool apply_kodama_dissimilarity = true;
+  bool compute_visual_init = true;
   GraphFeatureMode graph_feature_mode = GraphFeatureMode::LaplacianSelfTuning;
   int graph_feature_components = 0;
   int graph_feature_steps = 3;
@@ -393,14 +437,17 @@ struct KODAMAMatrixResult {
   std::vector<int> landmark_represented_strata;
   std::vector<int> landmark_grid_bins;
   std::vector<double> landmark_seconds;
-  NeighborGraph base_knn;
   NeighborGraph knn;
+  VisualizationInitResult visual_init;
   int runs = 0;
   int samples = 0;
   int cycles = 0;
   int effective_landmarks = 0;
+  int graph_builds = 0;
   int n_threads = 1;
   Backend backend = Backend::CPU;
+  bool has_visual_init = false;
+  bool knn_is_kodama_corrected = false;
   bool gpu_auto_workers = false;
   bool gpu_scheduler_enabled = false;
   int gpu_scheduler_lanes = 0;
@@ -410,6 +457,7 @@ struct KODAMAMatrixResult {
   double gpu_worker_memory_estimate_mb = 0.0;
   double runtime_seconds = 0.0;
   double input_copy_seconds = 0.0;
+  double visual_init_seconds = 0.0;
   double graph_feature_seconds = 0.0;
   double spatial_precompute_seconds = 0.0;
   double graph_seconds = 0.0;
@@ -418,6 +466,7 @@ struct KODAMAMatrixResult {
   double optimization_sum_seconds = 0.0;
   double dissimilarity_seconds = 0.0;
   double peak_memory_mb = 0.0;
+  std::uint64_t graph_storage_bytes = 0;
 };
 
 struct UMAPOptions {
@@ -434,6 +483,8 @@ struct UMAPOptions {
   int gpu_device = 0;
   UMAPGraphMode graph_mode = UMAPGraphMode::Fuzzy;
   std::vector<float> init;
+  std::string init_source;
+  Backend init_backend = Backend::Auto;
 };
 
 struct OpenTSNEOptions {
@@ -455,6 +506,8 @@ struct OpenTSNEOptions {
   int seed = 4;
   int gpu_device = 0;
   std::vector<float> init;
+  std::string init_source;
+  Backend init_backend = Backend::Auto;
 };
 
 struct EmbeddingResult {
@@ -462,6 +515,8 @@ struct EmbeddingResult {
   int samples = 0;
   int components = 2;
   Backend backend = Backend::CPU;
+  std::string initialization;
+  Backend initialization_backend = Backend::Auto;
   double runtime_seconds = 0.0;
 };
 
@@ -723,6 +778,61 @@ KODAMAMatrixResult KODAMAMatrix(
   const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
 );
 
+KODAMAGraphResult KODAMAGraph_CPU(
+  MatrixView x,
+  const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
+KODAMAGraphResult KODAMAGraph_CUDA(
+  MatrixView x,
+  const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
+KODAMAGraphResult KODAMAGraph_METAL(
+  MatrixView x,
+  const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
+KODAMAGraphResult KODAMAGraph(
+  MatrixView x,
+  const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrix(
+  MatrixView x,
+  const KODAMAGraphResult& graph,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+KODAMAMatrixResult KODAMAMatrix(
+  const KODAMAGraphResult& graph,
+  const std::vector<int>& starting_labels = std::vector<int>(),
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const KODAMAMatrixOptions& options = KODAMAMatrixOptions()
+);
+
+/**
+ * Apply the KODAMA ensemble-agreement distance correction to a public,
+ * one-based neighbor graph without allocating another graph.
+ *
+ * KODAMAMatrix(..., apply_kodama_dissimilarity=false) returns the retained
+ * base graph. This function supports lazy correction of that graph when it is
+ * actually needed for visualization.
+ */
+void KODAMADissimilarityInPlace(
+  NeighborGraph& graph,
+  const std::vector<int>& run_labels,
+  int runs,
+  int samples,
+  Backend backend = Backend::CPU,
+  int n_threads = 1,
+  int gpu_device = 0
+);
+
 std::vector<float> KODAMAGraphFeatures_CPU(
   const NeighborGraph& graph,
   int samples,
@@ -806,8 +916,20 @@ EmbeddingResult KODAMAUMAP_CUDA(
   const UMAPOptions& options = UMAPOptions()
 );
 
+EmbeddingResult KODAMAUMAP_CUDA(
+  const NeighborGraph& graph,
+  MatrixView raw_data,
+  const UMAPOptions& options = UMAPOptions()
+);
+
 EmbeddingResult KODAMAUMAP_CPU(
   const NeighborGraph& graph,
+  const UMAPOptions& options = UMAPOptions()
+);
+
+EmbeddingResult KODAMAUMAP_CPU(
+  const NeighborGraph& graph,
+  MatrixView raw_data,
   const UMAPOptions& options = UMAPOptions()
 );
 
@@ -816,9 +938,26 @@ EmbeddingResult KODAMAOpenTSNE_CUDA(
   const OpenTSNEOptions& options = OpenTSNEOptions()
 );
 
+EmbeddingResult KODAMAOpenTSNE_CUDA(
+  const NeighborGraph& graph,
+  MatrixView raw_data,
+  const OpenTSNEOptions& options = OpenTSNEOptions()
+);
+
 EmbeddingResult KODAMAOpenTSNE_CPU(
   const NeighborGraph& graph,
   const OpenTSNEOptions& options = OpenTSNEOptions()
+);
+
+EmbeddingResult KODAMAOpenTSNE_CPU(
+  const NeighborGraph& graph,
+  MatrixView raw_data,
+  const OpenTSNEOptions& options = OpenTSNEOptions()
+);
+
+VisualizationInitResult KODAMAVisualizationPCAInit(
+  MatrixView raw_data,
+  const VisualizationInitOptions& options = VisualizationInitOptions()
 );
 
 PCAResult PCA(
