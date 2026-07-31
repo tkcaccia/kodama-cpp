@@ -77,6 +77,49 @@ not allocate a second graph. `result.knn_is_kodama_corrected` describes the
 state produced by `KODAMAMatrix`; `result.graph_storage_bytes` reports the
 retained index-distance capacity.
 
+## Normalize and scale float32 matrices
+
+The standalone preprocessing API accepts row-major training data and an
+optional test matrix. Test data always reuse the training PQN reference or
+the training centering/scaling statistics.
+
+```cpp
+kodama::NormalizationOptions normalization_options;
+normalization_options.method = kodama::NormalizationMethod::PQN;
+normalization_options.backend = kodama::Backend::CUDA; // CPU or Metal also supported
+normalization_options.n_threads = 4;
+
+auto normalized = kodama::Normalization(
+  kodama::MatrixView{x_train.data(), train_rows, variables},
+  kodama::MatrixView{x_test.data(), test_rows, variables},
+  normalization_options
+);
+
+kodama::ScalingOptions scaling_options;
+scaling_options.method = kodama::ScalingMethod::Autoscaling;
+scaling_options.backend = kodama::Backend::CPU;
+scaling_options.n_threads = 4;
+
+auto scaled = kodama::Scaling(
+  kodama::MatrixView{x_train.data(), train_rows, variables},
+  kodama::MatrixView{x_test.data(), test_rows, variables},
+  scaling_options
+);
+```
+
+Normalization methods are `PQN`, `Sum`, `Median`, `Sqrt`, and `None`.
+Scaling methods are `None`, `Centering`, `Autoscaling`, `RangeScaling`, and
+`ParetoScaling`. The implementation deliberately preserves the historical
+KODAMA train/test conventions, including signed training sums and absolute
+test sums for sum normalization. Division by zero and missing-value behavior
+follow the original formulas; the library does not insert an epsilon or
+silently impute values.
+
+`Normalization_CPU` and `Scaling_CPU` parallelize independent rows and
+columns. Their CUDA and Metal counterparts compute statistics, PQN medians,
+and transformations on device and throw when their requested backend is not
+compiled or available; they never fall back to CPU.
+
 ## Reuse a CUDA or Metal IVF index
 
 Use an explicit resident handle when several searches share one training

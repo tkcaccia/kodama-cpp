@@ -5,6 +5,13 @@ All notable changes to kodama-cpp are documented here. The project follows
 
 ## [Unreleased]
 
+- Added standalone float32 `Normalization` and `Scaling` APIs with explicit
+  CPU, CUDA, and Metal entry points. The five KODAMA normalization methods
+  (PQN, sum, median, Euclidean-norm, and none) and five variable-scaling
+  methods (none, centering, autoscaling, range, and Pareto) preserve the
+  original train/test rules. CPU rows and columns run concurrently; CUDA and
+  Metal compute statistics, deterministic PQN medians, and transforms on
+  device without a CPU fallback. R and Python now call these same kernels.
 - Made CUDA and Metal KODAMA state persistent across proposal cycles and
   independent `M` runs. The full-data graph is uploaded once; each worker lane
   reuses landmark/fold, label, projection, voting, SIMPLS, and LDA allocations,

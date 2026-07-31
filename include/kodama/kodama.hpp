@@ -65,6 +65,22 @@ enum class MatrixValueType {
   Float32
 };
 
+enum class NormalizationMethod {
+  PQN,
+  Sum,
+  Median,
+  Sqrt,
+  None
+};
+
+enum class ScalingMethod {
+  None,
+  Centering,
+  Autoscaling,
+  RangeScaling,
+  ParetoScaling
+};
+
 struct MatrixView {
   const void* data = nullptr;
   std::size_t rows = 0;
@@ -552,6 +568,48 @@ struct PCAResult {
   double runtime_seconds = 0.0;
 };
 
+struct NormalizationOptions {
+  NormalizationMethod method = NormalizationMethod::PQN;
+  Backend backend = Backend::CPU;
+  int n_threads = 1;
+  int gpu_device = 0;
+  std::vector<float> reference;
+};
+
+struct NormalizationResult {
+  std::vector<float> train;
+  std::vector<float> test;
+  std::vector<float> train_coefficients;
+  std::vector<float> test_coefficients;
+  std::vector<float> reference;
+  std::size_t train_rows = 0;
+  std::size_t test_rows = 0;
+  std::size_t variables = 0;
+  NormalizationMethod method = NormalizationMethod::PQN;
+  Backend backend = Backend::CPU;
+  double runtime_seconds = 0.0;
+};
+
+struct ScalingOptions {
+  ScalingMethod method = ScalingMethod::Autoscaling;
+  Backend backend = Backend::CPU;
+  int n_threads = 1;
+  int gpu_device = 0;
+};
+
+struct ScalingResult {
+  std::vector<float> train;
+  std::vector<float> test;
+  std::vector<float> center;
+  std::vector<float> scale;
+  std::size_t train_rows = 0;
+  std::size_t test_rows = 0;
+  std::size_t variables = 0;
+  ScalingMethod method = ScalingMethod::Autoscaling;
+  Backend backend = Backend::CPU;
+  double runtime_seconds = 0.0;
+};
+
 KNNCVResult KNNCV(
   MatrixView x,
   const std::vector<int>& labels,
@@ -978,6 +1036,94 @@ PCAResult PCA_CUDA(
 PCAResult PCA_METAL(
   MatrixView x,
   const PCAOptions& options = PCAOptions()
+);
+
+NormalizationResult Normalization(
+  MatrixView train,
+  MatrixView test = MatrixView(),
+  const NormalizationOptions& options = NormalizationOptions()
+);
+
+NormalizationResult Normalization(
+  MatrixView train,
+  const NormalizationOptions& options
+);
+
+NormalizationResult Normalization_CPU(
+  MatrixView train,
+  MatrixView test = MatrixView(),
+  const NormalizationOptions& options = NormalizationOptions()
+);
+
+NormalizationResult Normalization_CPU(
+  MatrixView train,
+  const NormalizationOptions& options
+);
+
+NormalizationResult Normalization_CUDA(
+  MatrixView train,
+  MatrixView test = MatrixView(),
+  const NormalizationOptions& options = NormalizationOptions()
+);
+
+NormalizationResult Normalization_CUDA(
+  MatrixView train,
+  const NormalizationOptions& options
+);
+
+NormalizationResult Normalization_METAL(
+  MatrixView train,
+  MatrixView test = MatrixView(),
+  const NormalizationOptions& options = NormalizationOptions()
+);
+
+NormalizationResult Normalization_METAL(
+  MatrixView train,
+  const NormalizationOptions& options
+);
+
+ScalingResult Scaling(
+  MatrixView train,
+  MatrixView test = MatrixView(),
+  const ScalingOptions& options = ScalingOptions()
+);
+
+ScalingResult Scaling(
+  MatrixView train,
+  const ScalingOptions& options
+);
+
+ScalingResult Scaling_CPU(
+  MatrixView train,
+  MatrixView test = MatrixView(),
+  const ScalingOptions& options = ScalingOptions()
+);
+
+ScalingResult Scaling_CPU(
+  MatrixView train,
+  const ScalingOptions& options
+);
+
+ScalingResult Scaling_CUDA(
+  MatrixView train,
+  MatrixView test = MatrixView(),
+  const ScalingOptions& options = ScalingOptions()
+);
+
+ScalingResult Scaling_CUDA(
+  MatrixView train,
+  const ScalingOptions& options
+);
+
+ScalingResult Scaling_METAL(
+  MatrixView train,
+  MatrixView test = MatrixView(),
+  const ScalingOptions& options = ScalingOptions()
+);
+
+ScalingResult Scaling_METAL(
+  MatrixView train,
+  const ScalingOptions& options
 );
 
 NeighborGraph KODAMAKNNGraph_CPU(

@@ -45,6 +45,10 @@ int main() {
       const kodama::NeighborGraph&, const kodama::OpenTSNEOptions&);
   using PCAFn = kodama::PCAResult (*)(
       kodama::MatrixView, const kodama::PCAOptions&);
+  using NormalizationFn = kodama::NormalizationResult (*)(
+      kodama::MatrixView, kodama::MatrixView, const kodama::NormalizationOptions&);
+  using ScalingFn = kodama::ScalingResult (*)(
+      kodama::MatrixView, kodama::MatrixView, const kodama::ScalingOptions&);
   using VisualizationInitFn = kodama::VisualizationInitResult (*)(
       kodama::MatrixView, const kodama::VisualizationInitOptions&);
   using DissimilarityInPlaceFn = void (*)(
@@ -95,6 +99,12 @@ int main() {
       &kodama::KODAMAOpenTSNE_CPU, &kodama::KODAMAOpenTSNE_CUDA};
   const PCAFn pca[] = {
       &kodama::PCA, &kodama::PCA_CPU, &kodama::PCA_CUDA, &kodama::PCA_METAL};
+  const NormalizationFn normalization[] = {
+      &kodama::Normalization, &kodama::Normalization_CPU,
+      &kodama::Normalization_CUDA, &kodama::Normalization_METAL};
+  const ScalingFn scaling[] = {
+      &kodama::Scaling, &kodama::Scaling_CPU,
+      &kodama::Scaling_CUDA, &kodama::Scaling_METAL};
   const VisualizationInitFn visualization_init =
       &kodama::KODAMAVisualizationPCAInit;
   const DissimilarityInPlaceFn dissimilarity_in_place =
@@ -110,7 +120,7 @@ int main() {
                  prepared_data_matrix && prepared_matrix && matrix_graph[0] &&
                  matrix_data_graph[0] && graph[0] && prepared_graph[0] &&
                  cluster[0] && umap[0] &&
-                 tsne[0] && pca[0] && visualization_init &&
+                 tsne[0] && pca[0] && normalization[0] && scaling[0] && visualization_init &&
                  dissimilarity_in_place && resident_ivf_build &&
                  resident_ivf_search && resident_ivf_self_search
              ? 0

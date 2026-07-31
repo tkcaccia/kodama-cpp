@@ -19,8 +19,10 @@ from ._core import (
     knncv as _knncv,
     matrix as _matrix,
     matrix_graph as _matrix_graph,
+    normalization as _normalization,
     opentsne as _opentsne,
     pca as _pca,
+    scaling as _scaling,
     plsldacv as _plsldacv,
     umap as _umap,
     visual_init as _visual_init,
@@ -230,6 +232,54 @@ def kodama_pca(
 
 
 PCA = kodama_pca
+
+
+def normalization(
+    Xtrain,
+    Xtest=None,
+    method="pqn",
+    ref=None,
+    backend="cpu",
+    n_cores=1,
+    gpu_device=0,
+):
+    """Float32 KODAMA sample normalization."""
+    method = _choice(method, "method", ("pqn", "sum", "median", "sqrt", "none"))
+    backend = _choice(backend, "backend", _BACKENDS)
+    return _normalization(
+        _matrix32(Xtrain, "Xtrain"),
+        test=None if Xtest is None else _matrix32(Xtest, "Xtest"),
+        method=method,
+        reference=None if ref is None else np.asarray(ref, dtype=np.float32),
+        backend=backend,
+        n_threads=int(n_cores),
+        gpu_device=int(gpu_device),
+    )
+
+
+def scaling(
+    Xtrain,
+    Xtest=None,
+    method="autoscaling",
+    backend="cpu",
+    n_cores=1,
+    gpu_device=0,
+):
+    """Float32 KODAMA variable scaling using training statistics."""
+    method = _choice(
+        method,
+        "method",
+        ("none", "centering", "autoscaling", "rangescaling", "paretoscaling"),
+    )
+    backend = _choice(backend, "backend", _BACKENDS)
+    return _scaling(
+        _matrix32(Xtrain, "Xtrain"),
+        test=None if Xtest is None else _matrix32(Xtest, "Xtest"),
+        method=method,
+        backend=backend,
+        n_threads=int(n_cores),
+        gpu_device=int(gpu_device),
+    )
 
 
 def _visual_initialization(data, backend="cpu", seed=4, n_cores=1, gpu_device=0):
@@ -864,6 +914,8 @@ KODAMA = SimpleNamespace(
     timing=timing,
     diagnostics=diagnostics,
     pca=kodama_pca,
+    normalization=normalization,
+    scaling=scaling,
 )
 
 knncv = KNNCV
@@ -896,6 +948,8 @@ __all__ = [
     "CoreKNN",
     "CorePLSLDA",
     "PCA",
+    "normalization",
+    "scaling",
     "KODAMA",
     "KODAMA_matrix",
     "KODAMA_matrix_graph",

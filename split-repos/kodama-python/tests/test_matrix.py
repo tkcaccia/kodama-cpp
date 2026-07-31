@@ -9,6 +9,26 @@ import pytest
 import kodama
 
 
+def test_native_preprocessing_cpu():
+    train = np.array([[1, 2, 3], [2, 4, 8], [4, 1, 5], [3, 6, 9]], dtype=np.float32)
+    test = np.array([[2, 3, 4], [5, 2, 1]], dtype=np.float32)
+    for method in ("pqn", "sum", "median", "sqrt", "none"):
+        result = kodama.normalization(train, test, method=method, n_cores=4)
+        np.testing.assert_allclose(
+            result["newXtrain"] * result["coeXtrain"][:, None], train, rtol=2e-6, atol=2e-6
+        )
+        assert result["backend"] == "cpu"
+        assert result["precision"] == "float32"
+    for method in ("none", "centering", "autoscaling", "rangescaling", "paretoscaling"):
+        result = kodama.scaling(train, test, method=method, n_cores=4)
+        np.testing.assert_allclose(
+            result["newXtrain"] * result["scale"] + result["center"],
+            train,
+            rtol=2e-6,
+            atol=2e-6,
+        )
+
+
 def test_matrix_knn_and_pls_lda_cpu(monkeypatch):
     rng = np.random.default_rng(1)
     x = rng.normal(size=(90, 6)).astype(np.float32)

@@ -28,6 +28,7 @@ add_library(kodama_cpp
   src/knncv.cpp
   src/native_knn.cpp
   src/pca.cpp
+  src/preprocessing.cpp
   src/plscv.cpp
   src/resident_ivf.cpp
   src/visualization.cpp
@@ -51,8 +52,8 @@ if(KODAMA_ENABLE_METAL)
     message(FATAL_ERROR "KODAMA_ENABLE_METAL=ON is supported only on Apple platforms.")
   endif()
   enable_language(OBJCXX)
-  target_sources(kodama_cpp PRIVATE src/metal_backend.mm)
-  set_source_files_properties(src/metal_backend.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  target_sources(kodama_cpp PRIVATE src/metal_backend.mm src/preprocessing_metal.mm)
+  set_source_files_properties(src/metal_backend.mm src/preprocessing_metal.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_METAL=1)
   target_link_libraries(kodama_cpp PRIVATE
     "-framework Metal"
@@ -133,9 +134,10 @@ if(KODAMA_ENABLE_CUDA)
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1)
   target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR})
   target_link_libraries(kodama_cpp PRIVATE ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
-  target_sources(kodama_cpp PRIVATE src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/cuda_simpls_float.cpp src/native_cuda_backend.cu src/pca_cuda.cu)
+  target_sources(kodama_cpp PRIVATE src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/cuda_simpls_float.cpp src/native_cuda_backend.cu src/pca_cuda.cu src/preprocessing_cuda.cu)
+  target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
   set_property(TARGET kodama_cpp PROPERTY CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
-  set_source_files_properties(src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/native_cuda_backend.cu src/pca_cuda.cu PROPERTIES LANGUAGE CUDA)
+  set_source_files_properties(src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/native_cuda_backend.cu src/pca_cuda.cu src/preprocessing_cuda.cu PROPERTIES LANGUAGE CUDA)
 endif()
 
 include(GNUInstallDirs)

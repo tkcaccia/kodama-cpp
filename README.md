@@ -49,6 +49,8 @@ The public library also provides:
 - persistent CUDA/Metal KODAMA workspaces for fold matrices, classifier state,
   projected labels, and the full-data graph across proposal cycles and `M` runs;
 - randomized PCA with float32 data and CPU, CUDA, and Metal entry points;
+- KODAMA-compatible float32 normalization and scaling with CPU, CUDA, and
+  Metal entry points;
 - KNN graph construction, UMAP, openTSNE, and random-walk clustering;
 - thin R and Python bindings to the same C++ implementation.
 

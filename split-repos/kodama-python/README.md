@@ -78,6 +78,11 @@ kodama.diagnostics()
 import kodama
 
 pc = kodama.PCA(x, ncomp=20, backend="cpu")
+
+normalized = kodama.normalization(x, method="pqn", backend="cpu", n_cores=4)
+scaled = kodama.scaling(
+    normalized["newXtrain"], method="autoscaling", backend="cpu", n_cores=4
+)
 pc["scores"].shape
 
 prepared = kodama.graph(x, k=30, backend="cuda")

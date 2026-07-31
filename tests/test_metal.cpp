@@ -148,6 +148,55 @@ int main() {
     }
   }
 
+  const std::vector<float> preprocessing_test = {
+    1.5f, 2.5f, 3.5f, 4.5f,
+    2.5f, 3.5f, 4.5f, 5.5f
+  };
+  for (const auto method : {kodama::NormalizationMethod::PQN,
+                            kodama::NormalizationMethod::Sum,
+                            kodama::NormalizationMethod::Median,
+                            kodama::NormalizationMethod::Sqrt,
+                            kodama::NormalizationMethod::None}) {
+    kodama::NormalizationOptions preprocessing_options;
+    preprocessing_options.method = method;
+    const auto cpu = kodama::Normalization_CPU(
+      kodama::MatrixView{x.data(), samples, dimensions},
+      kodama::MatrixView{preprocessing_test.data(), 2, dimensions}, preprocessing_options);
+    const auto metal = kodama::Normalization_METAL(
+      kodama::MatrixView{x.data(), samples, dimensions},
+      kodama::MatrixView{preprocessing_test.data(), 2, dimensions}, preprocessing_options);
+    if (metal.backend != kodama::Backend::Metal || cpu.train.size() != metal.train.size()) {
+      std::cerr << "Metal normalization metadata failed.\n";
+      return 1;
+    }
+    for (std::size_t i = 0; i < cpu.train.size(); ++i) {
+      if (std::abs(cpu.train[i] - metal.train[i]) > 3e-5f) {
+        std::cerr << "Metal normalization disagrees with CPU.\n";
+        return 1;
+      }
+    }
+  }
+  for (const auto method : {kodama::ScalingMethod::None,
+                            kodama::ScalingMethod::Centering,
+                            kodama::ScalingMethod::Autoscaling,
+                            kodama::ScalingMethod::RangeScaling,
+                            kodama::ScalingMethod::ParetoScaling}) {
+    kodama::ScalingOptions preprocessing_options;
+    preprocessing_options.method = method;
+    const auto cpu = kodama::Scaling_CPU(
+      kodama::MatrixView{x.data(), samples, dimensions},
+      kodama::MatrixView{preprocessing_test.data(), 2, dimensions}, preprocessing_options);
+    const auto metal = kodama::Scaling_METAL(
+      kodama::MatrixView{x.data(), samples, dimensions},
+      kodama::MatrixView{preprocessing_test.data(), 2, dimensions}, preprocessing_options);
+    for (std::size_t i = 0; i < cpu.train.size(); ++i) {
+      if (std::abs(cpu.train[i] - metal.train[i]) > 3e-5f) {
+        std::cerr << "Metal scaling disagrees with CPU.\n";
+        return 1;
+      }
+    }
+  }
+
   kodama::KODAMAMatrixOptions matrix_options;
   matrix_options.backend = kodama::Backend::Metal;
   matrix_options.runs = 2;
@@ -265,6 +314,6 @@ int main() {
     std::cerr << "Metal clustering silently fell back to CPU.\n";
     return 1;
   }
-  std::cout << "Metal KNN and PCA smoke tests passed.\n";
+  std::cout << "Metal KNN, PCA, and preprocessing smoke tests passed.\n";
   return 0;
 }

@@ -31,6 +31,24 @@ kodama::Backend parse_backend(const std::string& backend) {
   throw std::invalid_argument("Unsupported backend: " + backend);
 }
 
+kodama::NormalizationMethod parse_normalization_method(const std::string& method) {
+  if (method == "pqn") return kodama::NormalizationMethod::PQN;
+  if (method == "sum") return kodama::NormalizationMethod::Sum;
+  if (method == "median") return kodama::NormalizationMethod::Median;
+  if (method == "sqrt") return kodama::NormalizationMethod::Sqrt;
+  if (method == "none") return kodama::NormalizationMethod::None;
+  throw std::invalid_argument("Unsupported normalization method: " + method);
+}
+
+kodama::ScalingMethod parse_scaling_method(const std::string& method) {
+  if (method == "none") return kodama::ScalingMethod::None;
+  if (method == "centering") return kodama::ScalingMethod::Centering;
+  if (method == "autoscaling") return kodama::ScalingMethod::Autoscaling;
+  if (method == "rangescaling") return kodama::ScalingMethod::RangeScaling;
+  if (method == "paretoscaling") return kodama::ScalingMethod::ParetoScaling;
+  throw std::invalid_argument("Unsupported scaling method: " + method);
+}
+
 kodama::UMAPGraphMode parse_umap_graph_mode(const std::string& mode) {
   if (mode == "binary") return kodama::UMAPGraphMode::Binary;
   if (mode == "fuzzy") return kodama::UMAPGraphMode::Fuzzy;
@@ -335,6 +353,39 @@ py::dict pca_to_python(const kodama::PCAResult& result) {
   out["ncomp"] = result.components;
   out["oversample"] = result.oversample;
   out["power"] = result.power_iterations;
+  out["backend"] = kodama::to_string(result.backend);
+  out["precision"] = "float32";
+  out["runtime_seconds"] = result.runtime_seconds;
+  return out;
+}
+
+py::dict normalization_to_python(const kodama::NormalizationResult& result) {
+  py::dict out;
+  out["newXtrain"] = matrix_to_float_array(
+    result.train, static_cast<int>(result.train_rows), static_cast<int>(result.variables));
+  out["coeXtrain"] = vector_to_float_array(result.train_coefficients);
+  if (result.test_rows > 0) {
+    out["newXtest"] = matrix_to_float_array(
+      result.test, static_cast<int>(result.test_rows), static_cast<int>(result.variables));
+    out["coeXtest"] = vector_to_float_array(result.test_coefficients);
+  }
+  out["reference"] = vector_to_float_array(result.reference);
+  out["backend"] = kodama::to_string(result.backend);
+  out["precision"] = "float32";
+  out["runtime_seconds"] = result.runtime_seconds;
+  return out;
+}
+
+py::dict scaling_to_python(const kodama::ScalingResult& result) {
+  py::dict out;
+  out["newXtrain"] = matrix_to_float_array(
+    result.train, static_cast<int>(result.train_rows), static_cast<int>(result.variables));
+  if (result.test_rows > 0) {
+    out["newXtest"] = matrix_to_float_array(
+      result.test, static_cast<int>(result.test_rows), static_cast<int>(result.variables));
+  }
+  out["center"] = vector_to_float_array(result.center);
+  out["scale"] = vector_to_float_array(result.scale);
   out["backend"] = kodama::to_string(result.backend);
   out["precision"] = "float32";
   out["runtime_seconds"] = result.runtime_seconds;
@@ -795,6 +846,75 @@ py::dict pca(
   ));
 }
 
+py::dict normalization(
+  py::array_t<float, py::array::c_style | py::array::forcecast> train,
+  py::object test,
+  const std::string& method,
+  py::object reference,
+  const std::string& backend,
+  const int n_threads,
+  const int gpu_device
+) {
+  auto train_view = train.unchecked<2>();
+  py::array_t<float, py::array::c_style | py::array::forcecast> test_array;
+  int test_rows = 0;
+  if (!test.is_none()) {
+    test_array = py::array_t<float, py::array::c_style | py::array::forcecast>(test);
+    if (test_array.ndim() != 2 || test_array.shape(1) != train_view.shape(1)) {
+      throw std::invalid_argument("train and test must have the same variables.");
+    }
+    test_rows = static_cast<int>(test_array.shape(0));
+  }
+  kodama::NormalizationOptions options;
+  options.method = parse_normalization_method(method);
+  options.backend = parse_backend(backend);
+  options.n_threads = n_threads;
+  options.gpu_device = gpu_device;
+  if (!reference.is_none()) {
+    py::array_t<float, py::array::c_style | py::array::forcecast> values(reference);
+    if (values.ndim() != 1) throw std::invalid_argument("reference must be a vector.");
+    const float* pointer = static_cast<const float*>(values.request().ptr);
+    options.reference.assign(pointer, pointer + values.shape(0));
+  }
+  return normalization_to_python(kodama::Normalization(
+    kodama::MatrixView{static_cast<const float*>(train.request().ptr),
+      static_cast<std::size_t>(train_view.shape(0)), static_cast<std::size_t>(train_view.shape(1))},
+    test_rows == 0 ? kodama::MatrixView{} : kodama::MatrixView{
+      static_cast<const float*>(test_array.request().ptr), static_cast<std::size_t>(test_rows),
+      static_cast<std::size_t>(train_view.shape(1))}, options));
+}
+
+py::dict scaling(
+  py::array_t<float, py::array::c_style | py::array::forcecast> train,
+  py::object test,
+  const std::string& method,
+  const std::string& backend,
+  const int n_threads,
+  const int gpu_device
+) {
+  auto train_view = train.unchecked<2>();
+  py::array_t<float, py::array::c_style | py::array::forcecast> test_array;
+  int test_rows = 0;
+  if (!test.is_none()) {
+    test_array = py::array_t<float, py::array::c_style | py::array::forcecast>(test);
+    if (test_array.ndim() != 2 || test_array.shape(1) != train_view.shape(1)) {
+      throw std::invalid_argument("train and test must have the same variables.");
+    }
+    test_rows = static_cast<int>(test_array.shape(0));
+  }
+  kodama::ScalingOptions options;
+  options.method = parse_scaling_method(method);
+  options.backend = parse_backend(backend);
+  options.n_threads = n_threads;
+  options.gpu_device = gpu_device;
+  return scaling_to_python(kodama::Scaling(
+    kodama::MatrixView{static_cast<const float*>(train.request().ptr),
+      static_cast<std::size_t>(train_view.shape(0)), static_cast<std::size_t>(train_view.shape(1))},
+    test_rows == 0 ? kodama::MatrixView{} : kodama::MatrixView{
+      static_cast<const float*>(test_array.request().ptr), static_cast<std::size_t>(test_rows),
+      static_cast<std::size_t>(train_view.shape(1))}, options));
+}
+
 py::dict visual_init(
   py::array_t<float, py::array::c_style | py::array::forcecast> data,
   const std::string& backend,
@@ -1148,6 +1268,17 @@ PYBIND11_MODULE(_core, m) {
     py::arg("gpu_device") = 0,
     py::arg("oversample") = -1,
     py::arg("power") = -1
+  );
+  m.def(
+    "normalization", &normalization,
+    py::arg("train"), py::arg("test") = py::none(), py::arg("method") = "pqn",
+    py::arg("reference") = py::none(), py::arg("backend") = "cpu",
+    py::arg("n_threads") = 1, py::arg("gpu_device") = 0
+  );
+  m.def(
+    "scaling", &scaling,
+    py::arg("train"), py::arg("test") = py::none(), py::arg("method") = "autoscaling",
+    py::arg("backend") = "cpu", py::arg("n_threads") = 1, py::arg("gpu_device") = 0
   );
   m.def(
     "visual_init",

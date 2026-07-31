@@ -285,6 +285,7 @@ Graph preparation & KODAMA.graph / KODAMAGraph & One reusable KNN graph plus bac
 KODAMA matrix & KODAMA.matrix / KODAMAMatrix & Landmark selection, splitting, M runs, optimized label vectors, KODAMA dissimilarity, and graph output. \\
 Graph-input KODAMA & KODAMA.matrix.graph / KODAMAMatrixFromGraph & Runs the same KNN or PLS-LDA KODAMA optimizer from supplied neighbor indices/distances; KNN reuses the graph directly and PLS-LDA uses self-tuning Laplacian features when the data matrix is unavailable. \\
 Principal components & PCA / KODAMA.pca & Float32 randomized PCA scores, loadings, singular values, explained variance, preprocessing vectors, backend identity, and runtime on CPU, CUDA, or Metal. \\
+Preprocessing & Normalization / Scaling & Float32 KODAMA-compatible normalization and variable scaling, optional train-derived test transforms, coefficients/statistics, backend identity, and runtime on CPU, CUDA, or Metal. \\
 Visualization & KODAMA.visualization & Pinned fastEmbedR UMAP and openTSNE ports from standard or KODAMA-corrected float32 graphs; backend-matched raw-data PCA initialization is the default, fuzzy UMAP weighting is the default, and initialization provenance is returned. \\
 Graph and clustering & makeSNNGraph equivalent and random-walk clustering & CPU, CUDA, or Metal neighbor-graph construction followed by an explicit CPU random-walk clustering kernel. \\
 R compatibility utilities & normalization, scaling, dinisurface, helicoid, spirals, swissroll & Dependency-free R implementations preserve the preprocessing signatures, returned fields, and seeded synthetic-manifold constructions of KODAMA 3.3; they are wrapper conveniences rather than C++ kernels. \\
@@ -910,6 +911,9 @@ Visualization parity and initialization & src/visualization.cpp exposes KODAMAVi
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\paragraph{Float32 normalization and scaling evidence.}
+The typed preprocessing API implements PQN, sum, median, Euclidean-norm, and identity normalization together with centering, autoscaling, range, Pareto, and identity scaling. Independent CPU rows or columns are parallelized; CUDA and Metal compute statistics, deterministic PQN medians, and transforms on device without fallback. Tests cover all ten methods, one/four-thread identity, reconstruction, historical train/test conventions, CUDA agreement, and wrapper calls; the Metal suite contains the corresponding hardware parity checks. The implementation adds no epsilon, imputation, or backend-specific mathematical branch.
 
 \begin{table}[h]
 \caption{Release-validation evidence tracked by the project.}

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <set>
@@ -62,6 +63,160 @@ void check_constrained_folds(const std::vector<int>& constrain, const std::vecto
 
 void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
+}
+
+void require_close(
+  const std::vector<float>& left,
+  const std::vector<float>& right,
+  const float tolerance,
+  const char* message
+) {
+  require(left.size() == right.size(), message);
+  for (std::size_t i = 0; i < left.size(); ++i) {
+    if (std::isnan(left[i]) && std::isnan(right[i])) continue;
+    if (std::abs(left[i] - right[i]) > tolerance) throw std::runtime_error(message);
+  }
+}
+
+void test_preprocessing() {
+  const std::vector<float> train = {
+    1.0f, 2.0f, 3.0f,
+    2.0f, 4.0f, 8.0f,
+    4.0f, 1.0f, 5.0f,
+    3.0f, 6.0f, 9.0f
+  };
+  const std::vector<float> test = {2.0f, 3.0f, 4.0f, 5.0f, 2.0f, 1.0f};
+  const kodama::MatrixView train_view{train.data(), 4, 3};
+  const kodama::MatrixView test_view{test.data(), 2, 3};
+  const std::vector<kodama::NormalizationMethod> normalization_methods = {
+    kodama::NormalizationMethod::PQN,
+    kodama::NormalizationMethod::Sum,
+    kodama::NormalizationMethod::Median,
+    kodama::NormalizationMethod::Sqrt,
+    kodama::NormalizationMethod::None
+  };
+  const std::vector<std::vector<float>> expected_train_coefficients = {
+    {6.0f, 12.9230769231f, 10.0f, 18.0f},
+    {6.0f, 14.0f, 10.0f, 18.0f},
+    {2.0f, 4.0f, 4.0f, 6.0f},
+    {3.7416573868f, 9.1651513899f, 6.4807406984f, 11.2249721603f},
+    {1.0f, 1.0f, 1.0f, 1.0f}
+  };
+  for (std::size_t method_index = 0; method_index < normalization_methods.size(); ++method_index) {
+    const auto method = normalization_methods[method_index];
+    kodama::NormalizationOptions one;
+    one.method = method;
+    one.n_threads = 1;
+    kodama::NormalizationOptions four = one;
+    four.n_threads = 4;
+    const auto reference = kodama::Normalization_CPU(train_view, test_view, one);
+    const auto parallel = kodama::Normalization_CPU(train_view, test_view, four);
+    require(reference.backend == kodama::Backend::CPU, "Normalization CPU metadata mismatch.");
+    require_close(reference.train, parallel.train, 0.0f, "Normalization changed across CPU thread counts.");
+    require_close(reference.test, parallel.test, 0.0f, "Test normalization changed across CPU thread counts.");
+    require_close(reference.train_coefficients, parallel.train_coefficients, 0.0f,
+      "Normalization coefficients changed across CPU thread counts.");
+    require_close(reference.train_coefficients, expected_train_coefficients[method_index], 2e-5f,
+      "Normalization coefficients disagree with the KODAMA reference formulas.");
+    for (std::size_t row = 0; row < 4; ++row) {
+      for (std::size_t column = 0; column < 3; ++column) {
+        require(std::abs(reference.train[row * 3 + column] *
+          reference.train_coefficients[row] - train[row * 3 + column]) < 2e-6f,
+          "Training normalization does not reconstruct the input.");
+      }
+    }
+    if (method == kodama::NormalizationMethod::PQN) {
+      require(reference.reference.size() == 3, "PQN reference size mismatch.");
+    }
+#ifdef KODAMA_ENABLE_CUDA
+    kodama::NormalizationOptions cuda_options = one;
+    cuda_options.backend = kodama::Backend::CUDA;
+    const auto cuda = kodama::Normalization_CUDA(train_view, test_view, cuda_options);
+    require(cuda.backend == kodama::Backend::CUDA, "Normalization CUDA metadata mismatch.");
+    require_close(reference.train, cuda.train, 2e-6f, "Normalization CUDA disagrees with CPU.");
+    require_close(reference.test, cuda.test, 2e-6f, "Test normalization CUDA disagrees with CPU.");
+    require_close(reference.train_coefficients, cuda.train_coefficients, 2e-6f,
+      "Normalization CUDA coefficients disagree with CPU.");
+#endif
+  }
+
+  const std::vector<kodama::ScalingMethod> scaling_methods = {
+    kodama::ScalingMethod::None,
+    kodama::ScalingMethod::Centering,
+    kodama::ScalingMethod::Autoscaling,
+    kodama::ScalingMethod::RangeScaling,
+    kodama::ScalingMethod::ParetoScaling
+  };
+  const std::vector<std::vector<float>> expected_scales = {
+    {1.0f, 1.0f, 1.0f},
+    {1.0f, 1.0f, 1.0f},
+    {1.2909944487f, 2.2173557826f, 2.7537852736f},
+    {3.0f, 5.0f, 6.0f},
+    {1.1362193665f, 1.4890788369f, 1.6594533057f}
+  };
+  for (std::size_t method_index = 0; method_index < scaling_methods.size(); ++method_index) {
+    const auto method = scaling_methods[method_index];
+    kodama::ScalingOptions one;
+    one.method = method;
+    one.n_threads = 1;
+    kodama::ScalingOptions four = one;
+    four.n_threads = 4;
+    const auto reference = kodama::Scaling_CPU(train_view, test_view, one);
+    const auto parallel = kodama::Scaling_CPU(train_view, test_view, four);
+    require_close(reference.train, parallel.train, 0.0f, "Scaling changed across CPU thread counts.");
+    require_close(reference.test, parallel.test, 0.0f, "Test scaling changed across CPU thread counts.");
+    require_close(reference.center, parallel.center, 0.0f, "Scaling centers changed across CPU thread counts.");
+    require_close(reference.scale, parallel.scale, 0.0f, "Scaling factors changed across CPU thread counts.");
+    require_close(reference.scale, expected_scales[method_index], 2e-5f,
+      "Scaling factors disagree with the KODAMA reference formulas.");
+    for (std::size_t row = 0; row < 4; ++row) {
+      for (std::size_t column = 0; column < 3; ++column) {
+        require(std::abs(reference.train[row * 3 + column] * reference.scale[column] +
+          reference.center[column] - train[row * 3 + column]) < 2e-6f,
+          "Training scaling does not reconstruct the input.");
+      }
+    }
+#ifdef KODAMA_ENABLE_CUDA
+    kodama::ScalingOptions cuda_options = one;
+    cuda_options.backend = kodama::Backend::CUDA;
+    const auto cuda = kodama::Scaling_CUDA(train_view, test_view, cuda_options);
+    require(cuda.backend == kodama::Backend::CUDA, "Scaling CUDA metadata mismatch.");
+    require_close(reference.train, cuda.train, 2e-6f, "Scaling CUDA disagrees with CPU.");
+    require_close(reference.test, cuda.test, 2e-6f, "Test scaling CUDA disagrees with CPU.");
+    require_close(reference.center, cuda.center, 2e-6f, "Scaling CUDA centers disagree with CPU.");
+    require_close(reference.scale, cuda.scale, 2e-6f, "Scaling CUDA factors disagree with CPU.");
+#endif
+  }
+
+  const std::vector<float> signed_train = {-2.0f, 1.0f, 2.0f, 2.0f};
+  const std::vector<float> signed_test = {-2.0f, 1.0f};
+  kodama::NormalizationOptions sum_options;
+  sum_options.method = kodama::NormalizationMethod::Sum;
+  const auto signed_result = kodama::Normalization_CPU(
+    kodama::MatrixView{signed_train.data(), 2, 2},
+    kodama::MatrixView{signed_test.data(), 1, 2}, sum_options
+  );
+  require(signed_result.train_coefficients[0] == -1.0f,
+    "Training sum normalization no longer follows the KODAMA signed-sum rule.");
+  require(signed_result.test_coefficients[0] == 3.0f,
+    "Test sum normalization no longer follows the KODAMA absolute-sum rule.");
+
+  const float missing = std::numeric_limits<float>::quiet_NaN();
+  const std::vector<float> missing_train = {1.0f, missing, 3.0f, 2.0f, 4.0f, 6.0f};
+  const std::vector<float> missing_test = {1.0f, missing, 3.0f};
+  for (const auto method : {kodama::NormalizationMethod::Sum,
+                            kodama::NormalizationMethod::Median,
+                            kodama::NormalizationMethod::Sqrt}) {
+    kodama::NormalizationOptions options;
+    options.method = method;
+    const auto result = kodama::Normalization_CPU(
+      kodama::MatrixView{missing_train.data(), 2, 3},
+      kodama::MatrixView{missing_test.data(), 1, 3}, options);
+    require(std::isnan(result.train_coefficients[0]),
+      "Training normalization no longer propagates missing values.");
+    require(std::isfinite(result.test_coefficients[0]),
+      "Test normalization no longer removes missing values.");
+  }
 }
 
 double exact_graph_recall(
@@ -496,6 +651,7 @@ void check_pca_cpu() {
 }  // namespace
 
 int main() {
+  test_preprocessing();
   check_parallel_hnsw_graph();
   check_spatial_grid_graph();
   check_spatial_grid_query_nearest();
