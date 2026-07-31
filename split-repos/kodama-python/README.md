@@ -84,8 +84,8 @@ prepared = kodama.graph(x, k=30, backend="cuda")
 assert "data" not in prepared
 
 kk = kodama.matrix(
-    prepared,
-    raw_data=x,
+    data=x,
+    graph=prepared,
     spatial=spatial,
     classifier="knn",
     backend="cuda",
@@ -113,10 +113,11 @@ UMAP uses fuzzy graph weighting by default; pass `graph_mode="binary"` only
 when binary graph compatibility is required.
 
 `kodama.graph()` contains graph arrays and backend-matched PCA starts, but does
-not retain the input array. `kodama.matrix()` accepts a prepared graph alone, a
-prepared graph plus `raw_data`, a raw array alone, or a bare dictionary with
-`indices` and `distances`. Graph-only PLS-LDA uses self-tuning Laplacian
-features; providing `raw_data` uses the ordinary data-input PLS-LDA geometry.
+not retain the input array. `kodama.matrix()` reserves `data` for raw features
+and `graph` for a prepared graph or bare `indices`/`distances` dictionary.
+Either can be supplied alone, or both can be supplied together. Graph-only
+PLS-LDA uses self-tuning Laplacian features; providing `data` uses the ordinary
+data-input PLS-LDA geometry.
 
 The native `kodama.matrix()` call builds the full-data graph once before all
 `M` searches. By default it also performs one backend-native float32 PCA and

@@ -29,10 +29,11 @@ count, seed, thread count, and whether KODAMA dissimilarity correction was
 applied. External labels must not be used to choose the best run.
 
 `KODAMA.graph()` stores graph arrays, PCA starts, metadata, and timings, but not
-the input matrix. `KODAMA.matrix()` accepts a prepared KODAMA graph alone, a
-prepared or bare graph plus `raw.data`, a bare `indices`/`distances` graph, or a
-raw matrix. Graph-only PLS-LDA uses disclosed self-tuning Laplacian features;
-supplying `raw.data` uses the ordinary data-input PLS-LDA geometry.
+the input matrix. `KODAMA.matrix()` reserves `data` for raw features and
+`graph` for a prepared KODAMA graph or bare `indices`/`distances` graph. Either
+argument can be supplied alone, or both can be supplied together. Graph-only
+PLS-LDA uses disclosed self-tuning Laplacian features; supplying `data` uses
+the ordinary data-input PLS-LDA geometry.
 
 With raw input, `KODAMA.matrix()` builds its full-data KNN graph once before the `M` loop and
 returns it as `knn`; the per-run landmark and fold structures remain local to

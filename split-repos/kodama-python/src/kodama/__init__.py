@@ -321,7 +321,8 @@ def _default_splitting(n_samples):
 
 
 def matrix(
-    data,
+    data=None,
+    graph=None,
     spatial=None,
     W=None,
     constrain=None,
@@ -341,7 +342,6 @@ def matrix(
     classifier="knn",
     backend=None,
     seed=1234,
-    raw_data=None,
     visual_init=True,
     progress=True,
     apply_kodama_dissimilarity=True,
@@ -352,10 +352,23 @@ def matrix(
     ``visual_init=True`` it also performs one float32 PCA and stores both UMAP
     and openTSNE starts for :func:`visualization`.
     """
-    supplied_graph = _extract_graph(data)
-    if supplied_graph is not None:
-        raw = raw_data
+    supplied_graph = _extract_graph(graph)
+    if graph is not None:
+        if supplied_graph is None:
+            raise ValueError(
+                "graph must be a KODAMA.graph result or a dictionary "
+                "with indices and distances"
+            )
+        if _extract_graph(data) is not None:
+            raise ValueError(
+                "data must be the raw array; pass graph inputs through graph"
+            )
+        raw = data
         samples = np.asarray(supplied_graph["indices"]).shape[0]
+        if raw is not None and np.asarray(raw).shape[0] != samples:
+            raise ValueError(
+                "data and graph must contain the same number of samples"
+            )
         if ncomp is None:
             ncomp = 50 if raw is None else min(50, np.asarray(raw).shape[1])
         if splitting is None:
@@ -363,9 +376,9 @@ def matrix(
         if graph_neighbors is None:
             graph_neighbors = np.asarray(supplied_graph["indices"]).shape[1]
         if backend is None:
-            backend = data.get("backend", "cpu")
+            backend = graph.get("backend", "cpu")
         return matrix_graph(
-            data,
+            graph,
             data=raw,
             spatial=spatial,
             W=W,
@@ -390,6 +403,12 @@ def matrix(
             apply_kodama_dissimilarity=apply_kodama_dissimilarity,
         )
 
+    if data is None:
+        raise ValueError("data or graph is required")
+    if _extract_graph(data) is not None:
+        raise ValueError(
+            "data must be the raw array; pass graph inputs through graph"
+        )
     x = _matrix32(data)
     if ncomp is None:
         ncomp = min(50, x.shape[1])

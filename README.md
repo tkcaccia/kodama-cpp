@@ -183,10 +183,15 @@ The graph preparation step can also be called and reused explicitly:
 
 ```r
 prepared <- KODAMA.graph(x, k = 30, backend = "cpu")
-fit_graph <- KODAMA.matrix(prepared, classifier = "knn", M = 4, Tcycle = 4)
+fit_graph <- KODAMA.matrix(
+  graph = prepared,
+  classifier = "knn",
+  M = 4,
+  Tcycle = 4
+)
 fit_graph_x <- KODAMA.matrix(
-  prepared,
-  raw.data = x,
+  data = x,
+  graph = prepared,
   classifier = "pls_lda",
   M = 4,
   Tcycle = 4
@@ -195,10 +200,11 @@ fit_graph_x <- KODAMA.matrix(
 
 `KODAMA.graph()` returns one KNN graph, backend-matched PCA starts for UMAP and
 openTSNE, metadata, and timings. It deliberately does not retain `x`.
-`KODAMA.matrix()` accepts this prepared object alone, the prepared object plus
-`raw.data`, a bare `indices`/`distances` graph, or a raw matrix. For graph-only
-PLS-LDA, self-tuning Laplacian features provide the rectangular input; supplying
-`raw.data` retains the ordinary data-input PLS-LDA path.
+`KODAMA.matrix()` reserves `data` for raw features and `graph` for a prepared
+object or bare `indices`/`distances` graph. Either argument can be supplied
+alone, or both can be supplied together. For graph-only PLS-LDA, self-tuning
+Laplacian features provide the rectangular input; supplying `data` retains the
+ordinary data-input PLS-LDA path.
 
 With raw matrix input, `KODAMA.matrix()` implicitly performs the same graph
 preparation step. It constructs its full-data neighbor graph once, before the

@@ -237,10 +237,10 @@ def test_matrix_graph_cpu():
         seed=3,
         progress=False,
     )
-    from_raw = kodama.matrix(x, **common)
-    from_prepared = kodama.matrix(g, **common)
-    from_prepared_data = kodama.matrix(g, raw_data=x, **common)
-    from_bare = kodama.matrix(bare, **common)
+    from_raw = kodama.matrix(data=x, **common)
+    from_prepared = kodama.matrix(graph=g, **common)
+    from_prepared_data = kodama.matrix(data=x, graph=g, **common)
+    from_bare = kodama.matrix(graph=bare, **common)
 
     assert from_raw["graph_builds"] == 1
     assert from_prepared["graph_builds"] == 0
@@ -254,6 +254,8 @@ def test_matrix_graph_cpu():
         from_prepared["visual_init"]["umap"], g["visual_init"]["umap"]
     )
     assert "visual_init" not in from_bare or from_bare["visual_init"] is None
+    with pytest.raises(ValueError, match="pass graph inputs through graph"):
+        kodama.matrix(data=g, **common)
 
 
 def test_diagnostics():
@@ -323,6 +325,7 @@ def test_python_signatures_mirror_r_api():
     matrix_signature = inspect.signature(kodama.matrix)
     assert list(matrix_signature.parameters) == [
         "data",
+        "graph",
         "spatial",
         "W",
         "constrain",
@@ -342,7 +345,6 @@ def test_python_signatures_mirror_r_api():
         "classifier",
         "backend",
         "seed",
-        "raw_data",
         "visual_init",
         "progress",
         "apply_kodama_dissimilarity",
