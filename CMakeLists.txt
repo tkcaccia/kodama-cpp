@@ -12,6 +12,9 @@ project(kodama-cpp
 option(KODAMA_BUILD_TESTS "Build kodama-cpp tests" ON)
 option(KODAMA_BUILD_EXAMPLES "Build kodama-cpp examples" ON)
 option(KODAMA_ENABLE_CUDA "Build package-owned CUDA backends" OFF)
+option(KODAMA_ENABLE_WARNINGS "Enable compiler warnings for kodama-cpp" ON)
+set(KODAMA_SANITIZER "none" CACHE STRING "Runtime sanitizer: none, address, undefined, or thread")
+set_property(CACHE KODAMA_SANITIZER PROPERTY STRINGS none address undefined thread)
 if(APPLE)
   option(KODAMA_ENABLE_METAL "Build native Apple Metal backends" ON)
   option(KODAMA_ENABLE_OPENMP "Build optional OpenMP parallel CPU loops" OFF)
@@ -47,6 +50,28 @@ target_include_directories(kodama_cpp
 
 target_compile_features(kodama_cpp PUBLIC cxx_std_17)
 
+if(KODAMA_ENABLE_WARNINGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+  target_compile_options(kodama_cpp PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wextra>
+    $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-Wpedantic>
+  )
+endif()
+
+if(NOT KODAMA_SANITIZER STREQUAL "none")
+  if(KODAMA_ENABLE_CUDA)
+    message(FATAL_ERROR "KODAMA_SANITIZER is intended for CPU/Metal validation builds; disable CUDA.")
+  endif()
+  if(NOT KODAMA_SANITIZER MATCHES "^(address|undefined|thread)$")
+    message(FATAL_ERROR "KODAMA_SANITIZER must be none, address, undefined, or thread.")
+  endif()
+  # Inline standard-library operations may execute in consumers of this static
+  # library. Instrument both the library and linked test/example targets so
+  # libc++ container annotations remain consistent across translation units.
+  target_compile_options(kodama_cpp PUBLIC -fsanitize=${KODAMA_SANITIZER} -fno-omit-frame-pointer)
+  target_link_options(kodama_cpp PUBLIC -fsanitize=${KODAMA_SANITIZER})
+endif()
+
 if(KODAMA_ENABLE_METAL)
   if(NOT APPLE)
     message(FATAL_ERROR "KODAMA_ENABLE_METAL=ON is supported only on Apple platforms.")
@@ -77,9 +102,34 @@ endif()
 
 if(KODAMA_ENABLE_CUDA)
   enable_language(CUDA)
-  if(NOT CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 75)
+  message(STATUS "kodama-cpp CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES} (set CMAKE_CUDA_ARCHITECTURES explicitly for release binaries)")
+  set(_KODAMA_CONDA_CUDA_LIB_DIRS)
+  if(DEFINED ENV{CONDA_PREFIX} AND NOT "$ENV{CONDA_PREFIX}" STREQUAL "")
+    list(APPEND _KODAMA_CONDA_CUDA_LIB_DIRS
+      "$ENV{CONDA_PREFIX}/lib"
+      "$ENV{CONDA_PREFIX}/targets/x86_64-linux/lib"
+    )
+    # Do not bake the nvcc toolkit's implicit /usr/local/cuda RPATH into build
+    # executables. The documented LD_LIBRARY_PATH then selects one coherent
+    # conda CUDA runtime instead of mixing toolkit and environment libraries.
+    set(CMAKE_SKIP_BUILD_RPATH TRUE)
   endif()
+  macro(kodama_find_cuda_library output name)
+    unset(${output} CACHE)
+    if(_KODAMA_CONDA_CUDA_LIB_DIRS)
+      find_library(${output} NAMES ${name} PATHS ${_KODAMA_CONDA_CUDA_LIB_DIRS} NO_DEFAULT_PATH)
+    endif()
+    if(NOT ${output})
+      find_library(${output}
+        NAMES ${name}
+        HINTS
+          /usr/local/cuda/lib64
+          /usr/local/cuda-13.0/targets/x86_64-linux/lib
+          /usr/lib/x86_64-linux-gnu
+      )
+    endif()
+  endmacro()
+  unset(CUDA_TOOLKIT_INCLUDE_DIR CACHE)
   find_path(CUDA_TOOLKIT_INCLUDE_DIR
     NAMES cublas_v2.h cuda_runtime_api.h
     HINTS
@@ -88,55 +138,23 @@ if(KODAMA_ENABLE_CUDA)
       /usr/local/cuda-13.0/targets/x86_64-linux/include
       /usr/include
   )
-  find_library(CUDA_CUBLAS_LIBRARY
-    NAMES cublas
-    HINTS
-      $ENV{CONDA_PREFIX}/targets/x86_64-linux/lib
-      /usr/local/cuda/lib64
-      /usr/local/cuda-13.0/targets/x86_64-linux/lib
-      /usr/lib/x86_64-linux-gnu
-  )
-  find_library(CUDA_RUNTIME_LIBRARY
-    NAMES cudart
-    HINTS
-      $ENV{CONDA_PREFIX}/targets/x86_64-linux/lib
-      /usr/local/cuda/lib64
-      /usr/local/cuda-13.0/targets/x86_64-linux/lib
-      /usr/lib/x86_64-linux-gnu
-  )
-  find_library(CUDA_CUSOLVER_LIBRARY
-    NAMES cusolver
-    HINTS
-      $ENV{CONDA_PREFIX}/targets/x86_64-linux/lib
-      /usr/local/cuda/lib64
-      /usr/local/cuda-13.0/targets/x86_64-linux/lib
-      /usr/lib/x86_64-linux-gnu
-  )
-  find_library(CUDA_CURAND_LIBRARY
-    NAMES curand
-    HINTS
-      $ENV{CONDA_PREFIX}/targets/x86_64-linux/lib
-      /usr/local/cuda/lib64
-      /usr/local/cuda-13.0/targets/x86_64-linux/lib
-      /usr/lib/x86_64-linux-gnu
-  )
-  find_library(CUDA_CUFFT_LIBRARY
-    NAMES cufft
-    HINTS
-      $ENV{CONDA_PREFIX}/targets/x86_64-linux/lib
-      /usr/local/cuda/lib64
-      /usr/local/cuda-13.0/targets/x86_64-linux/lib
-      /usr/lib/x86_64-linux-gnu
-  )
-  if(NOT CUDA_TOOLKIT_INCLUDE_DIR OR NOT CUDA_CUBLAS_LIBRARY OR NOT CUDA_RUNTIME_LIBRARY OR NOT CUDA_CUSOLVER_LIBRARY OR NOT CUDA_CURAND_LIBRARY OR NOT CUDA_CUFFT_LIBRARY)
-    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires CUDA headers, libcublas, libcusolver, libcurand, libcufft, and libcudart.")
+  kodama_find_cuda_library(CUDA_CUBLAS_LIBRARY cublas)
+  kodama_find_cuda_library(CUDA_CUBLASLT_LIBRARY cublasLt)
+  kodama_find_cuda_library(CUDA_RUNTIME_LIBRARY cudart)
+  kodama_find_cuda_library(CUDA_CUSOLVER_LIBRARY cusolver)
+  kodama_find_cuda_library(CUDA_CURAND_LIBRARY curand)
+  kodama_find_cuda_library(CUDA_CUFFT_LIBRARY cufft)
+  if(NOT CUDA_TOOLKIT_INCLUDE_DIR OR NOT CUDA_CUBLAS_LIBRARY OR NOT CUDA_CUBLASLT_LIBRARY OR NOT CUDA_RUNTIME_LIBRARY OR NOT CUDA_CUSOLVER_LIBRARY OR NOT CUDA_CURAND_LIBRARY OR NOT CUDA_CUFFT_LIBRARY)
+    message(FATAL_ERROR "KODAMA_ENABLE_CUDA=ON requires CUDA headers, libcublas, libcublasLt, libcusolver, libcurand, libcufft, and libcudart.")
   endif()
   target_compile_definitions(kodama_cpp PRIVATE KODAMA_ENABLE_CUDA=1)
   target_include_directories(kodama_cpp PRIVATE ${CUDA_TOOLKIT_INCLUDE_DIR})
-  target_link_libraries(kodama_cpp PRIVATE ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
+  if(_KODAMA_CONDA_CUDA_LIB_DIRS)
+    target_link_directories(kodama_cpp BEFORE PRIVATE ${_KODAMA_CONDA_CUDA_LIB_DIRS})
+  endif()
+  target_link_libraries(kodama_cpp PRIVATE ${CUDA_CUBLAS_LIBRARY} ${CUDA_CUBLASLT_LIBRARY} ${CUDA_CUSOLVER_LIBRARY} ${CUDA_CURAND_LIBRARY} ${CUDA_CUFFT_LIBRARY} ${CUDA_RUNTIME_LIBRARY})
   target_sources(kodama_cpp PRIVATE src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/cuda_simpls_float.cpp src/native_cuda_backend.cu src/pca_cuda.cu src/preprocessing_cuda.cu)
   target_compile_options(kodama_cpp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
-  set_property(TARGET kodama_cpp PROPERTY CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
   set_source_files_properties(src/pls_lda_cuda.cu src/kodama_matrix_cuda.cu src/embedding_cuda_kernels.cu src/native_cuda_backend.cu src/pca_cuda.cu src/preprocessing_cuda.cu PROPERTIES LANGUAGE CUDA)
 endif()
 
@@ -187,6 +205,7 @@ install(FILES
   docs/previous-version-delta.md
   docs/release-validation.md
   docs/backend-validation.md
+  docs/accelerator-entrypoint-validation.md
   docs/coverage.md
   docs/getting-started.md
   docs/mainpage.md
@@ -209,8 +228,13 @@ if(KODAMA_BUILD_EXAMPLES)
   target_link_libraries(kodama_graph_storage_lifecycle PRIVATE kodama_cpp)
   add_executable(kodama_resident_ivf_benchmark benchmarks/run_resident_ivf_benchmark.cpp)
   target_link_libraries(kodama_resident_ivf_benchmark PRIVATE kodama_cpp)
+
+  add_executable(kodama_graph_backend_benchmark benchmarks/run_kodama_graph_backend_benchmark.cpp)
+  target_link_libraries(kodama_graph_backend_benchmark PRIVATE kodama_cpp)
   add_executable(kodama_backend_benchmark_bin benchmarks/run_kodama_backend_bin.cpp)
   target_link_libraries(kodama_backend_benchmark_bin PRIVATE kodama_cpp)
+  add_executable(kodama_dissimilarity_benchmark benchmarks/run_dissimilarity_benchmark.cpp)
+  target_link_libraries(kodama_dissimilarity_benchmark PRIVATE kodama_cpp)
   if(KODAMA_ENABLE_CUDA)
     add_executable(kodama_cuda_knn_benchmark benchmarks/run_cuda_knn_benchmark.cpp)
     target_link_libraries(kodama_cuda_knn_benchmark PRIVATE kodama_cpp)
@@ -229,6 +253,11 @@ if(KODAMA_BUILD_TESTS)
     add_test(
       NAME kodama_license_audit
       COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_license_headers.sh
+    )
+    add_test(
+      NAME kodama_standalone_namespace_audit
+      COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_standalone_namespace.sh
+        ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:kodama_cpp>
     )
   endif()
   add_executable(kodama_cpp_tests tests/test_cv.cpp)

@@ -206,15 +206,22 @@ fit <- KODAMA.matrix(
 
 fit$best_labels
 KODAMA.timing(fit)
+fit$landmark_seconds
 embedding <- KODAMA.visualization(fit, "UMAP", k = 30, backend = "cpu")
 ```
 
 The matrix call builds the full-data graph once before all `M` searches. It
-also computes one CPU PCA from `x`, derives both UMAP and openTSNE starts from
-those scores, and stores the graph and starts in `fit`. The visualization call
-uses them directly by default. Check `fit$graph_builds` (normally `1`) and
-`fit$timing$visual_init_seconds` when profiling. To visualize on another
-backend, pass the raw matrix so initialization is recomputed there:
+also computes one PCA with the selected matrix backend, derives both UMAP and
+openTSNE starts from those scores, and stores the graph and starts in `fit`.
+The visualization call reuses a stored start only when its backend matches the
+requested embedding backend. Check `fit$graph_builds` (normally `1`) and
+`fit$timing$visual_init_seconds` when profiling. Landmark selection is retained
+separately for every independent run in `fit$landmark_seconds`; its sum, mean,
+and median appear in `fit$timing`. Do not attribute this stage to the KNN or
+PLS-LDA classifier core. To visualize on another
+backend, pass the raw matrix so initialization is recomputed there. Native
+UMAP and openTSNE are available on CPU, CUDA, and Metal; no visualization
+backend is silently substituted for another:
 
 ```r
 embedding_cuda <- KODAMA.visualization(
@@ -263,7 +270,7 @@ embedding = kodama.visualization(fit, "UMAP", k=30, backend="cpu")
 ```
 
 `kodama.matrix()` stores raw-data PCA starts by default. Pass
-`raw_data=x` to `kodama.visualization()` when changing the CPU/CUDA
+`raw_data=x` to `kodama.visualization()` when changing the CPU/CUDA/Metal
 visualization backend, or pass `init=` to provide coordinates explicitly.
 
 ## CUDA and Metal

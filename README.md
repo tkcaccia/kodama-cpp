@@ -163,6 +163,7 @@ fit <- KODAMA.matrix(
 
 print(fit)
 KODAMA.timing(fit)
+fit$landmark_seconds
 head(fit$best_labels)
 
 embedding <- KODAMA.visualization(
@@ -184,7 +185,9 @@ plot(
 The graph preparation step can also be called and reused explicitly:
 
 ```r
-prepared <- KODAMA.graph(x, k = 30, backend = "cpu")
+prepared <- KODAMA.graph(
+  x, k = 30, backend = "cpu", storage = "handle"
+)
 fit_graph <- KODAMA.matrix(
   graph = prepared,
   classifier = "knn",
@@ -202,6 +205,11 @@ fit_graph_x <- KODAMA.matrix(
 
 `KODAMA.graph()` returns one KNN graph, backend-matched PCA starts for UMAP and
 openTSNE, metadata, and timings. It deliberately does not retain `x`.
+`storage = "handle"` keeps the native float32 graph behind an external pointer
+that is consumed directly by matrix optimization and visualization. The
+backward-compatible `storage = "matrix"` materializes R matrices using a
+cache-blocked conversion; `KODAMA.graph.materialize()` performs that conversion
+explicitly when needed.
 `KODAMA.matrix()` reserves `data` for raw features and `graph` for a prepared
 object or bare `indices`/`distances` graph. Either argument can be supplied
 alone, or both can be supplied together. For graph-only PLS-LDA, self-tuning
@@ -225,6 +233,13 @@ distance correction occur in place, then the graph is moved into `knn`.
 `knn_is_kodama_corrected` records whether correction was requested, and
 `graph_storage_bytes` reports retained C++ capacity. The former duplicate
 `base_knn` payload is no longer returned.
+
+For CUDA and Metal, graph matrices are not returned by default. The graph stays
+resident through correction and no wrapper-side matrix materialization occurs.
+Retain a reusable graph without R matrices with `return.graph = "handle"`.
+Request matrices explicitly with `return.graph = TRUE` in R or
+`return_graph=True` in Python when visualization or direct graph access is
+required.
 
 CUDA and Metal upload the full-data graph once and keep it resident through
 all independent `M` runs. Each worker lane owns persistent landmark/fold,
@@ -294,8 +309,14 @@ ctest --test-dir build-metal --output-on-failure
 ```
 
 Metal provides native nearest-neighbor search, k-means, KODAMA KNN/PLS-LDA,
-SIMPLS/LDA, and PCA. UMAP and openTSNE currently have explicit CPU and CUDA
-entry points.
+SIMPLS/LDA, PCA, UMAP, and FFT-grid openTSNE. The visualization code mirrors
+fastEmbedR's backend-specific execution: CPU uses the CSR UMAP epoch schedule,
+CUDA uses the atomic COO/CSR epoch schedule, and Metal uses the clean row
+sampler. openTSNE uses exact/FFT CPU paths and native CUDA/Metal FFT-grid
+optimizers. Device discovery
+falls back to enumerated Metal devices when the macOS default selector is
+unavailable. Independent `M` workers retain separate command queues and float32
+PLS workspaces, analogous to CUDA stream lanes.
 
 ### NVIDIA CUDA
 
@@ -407,8 +428,8 @@ manuscript/              JMLR manuscript sources and artifacts
 
 ## Implementation notes
 
-The CPU and CUDA UMAP/openTSNE implementations track fastEmbedR commit
-`ef064f2a13db0b28f257bcb25bd06fd031da6da6`. UMAP uses fuzzy graph weighting
+The CPU, CUDA, and Metal UMAP/openTSNE implementations track fastEmbedR commit
+`814350a5ca69b0c26e6df40377636f109055f84b`. UMAP uses fuzzy graph weighting
 by default and retains symmetric binary graph weighting as an explicit
 compatibility mode. The openTSNE default perplexity is 30. A controlled CPU
 openTSNE comparison with identical neighbors, raw-data PCA initialization, and
@@ -416,15 +437,24 @@ settings is numerically identical. UMAP uses the same fuzzy graph, optimizer
 equations, schedule, and initialization; later CPU coordinates need not be
 bitwise identical because kodama-cpp keeps the iterative state in float32,
 whereas the compared fastEmbedR R path stores its embedding in a double
-matrix. See [`docs/visualization-parity.md`](docs/visualization-parity.md).
+matrix. Native Metal openTSNE uses the fastEmbedR FFT-grid optimizer with a
+portable float-bit compare-and-swap implementation for grid accumulation.
+See [`docs/visualization-parity.md`](docs/visualization-parity.md).
 
-CUDA nearest-neighbor search is package-owned and provides exact and
-recall-tuned IVF-Flat paths. Metal provides exact search and an explicit
-IVF-Flat alternative. Both IVF builders keep assignments, centroid
+CUDA and Metal nearest-neighbor search is package-owned and provides exact
+and recall-tuned IVF-Flat paths. Full-data graph preparation automatically
+keeps exact search when `n <= 5000` or `n * n * p <= 2e8`; larger accelerator
+problems use resident IVF-Flat tuned to a fixed 0.99 exact-pilot recall target.
+Automatic `nlist` is `ceil(sqrt(n))`, bounded only by the backend list limit;
+it is independent of the smaller `nprobe` kernel limit.
+The graph result reports the selected index, `nlist`, `nprobe`, and pilot
+recall. Both IVF builders keep assignments, centroid
 accumulation, empty-cluster repair, and inverted-list construction on the
 accelerator. No FAISS, cuVS, RAFT, or RMM headers or binaries are required.
 
-The KODAMA CUDA/Metal lifecycle also retains its full graph and per-worker
+IVF self-search writes directly into the KODAMA resident graph buffers, so the
+full graph is not downloaded and uploaded between graph construction and the
+`M` runs. The KODAMA CUDA/Metal lifecycle also retains its full graph and per-worker
 classifier allocations across `M` runs. CUDA label-aware SIMPLS uses a
 dedicated persistent cuBLAS workspace per stream. Its float32 class
 cross-product uses fixed-order accumulation followed by separate column-sum
@@ -434,6 +464,8 @@ accepted SIMPLS formula.
 See [`docs/backend-validation.md`](docs/backend-validation.md) for backend
 acceptance results and [`docs/release-validation.md`](docs/release-validation.md)
 for the release benchmark protocol.
+The repository-wide correctness, memory, backend, and wrapper audit is in
+[`docs/full-code-audit-2026-08-07.md`](docs/full-code-audit-2026-08-07.md).
 
 ## License and provenance
 

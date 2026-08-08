@@ -178,6 +178,27 @@ struct NativeCudaKNNVoteGraph::Impl {
   CudaBuffer<int> predictions;
 };
 
+struct NativeCudaKMeansContext::Impl {
+  struct Lane {
+    CublasHandle handle;
+    CudaBuffer<float> centroids;
+    CudaBuffer<int> assignments;
+    CudaBuffer<float> centroid_norms;
+    CudaBuffer<float> scores;
+    CudaBuffer<unsigned int> changed;
+  };
+
+  int rows = 0;
+  int dimensions = 0;
+  int max_clusters = 0;
+  int device = 0;
+  const float* host_data = nullptr;
+  CudaBuffer<float> data;
+  CudaBuffer<float> data_norms;
+  std::vector<std::unique_ptr<Lane>> lane;
+  std::uint64_t input_uploads = 0;
+};
+
 namespace {
 
 __device__ bool better_pair(float distance_a, int id_a, float distance_b, int id_b) {
@@ -271,6 +292,7 @@ __global__ void exact_topk_kernel(
   const float* train,
   const float* query,
   const int* excluded_train_id,
+  const int* allowed_local_ids,
   int* output_ids,
   float* output_distances,
   int train_rows,
@@ -299,6 +321,8 @@ __global__ void exact_topk_kernel(
   int* warp_ids = local_ids + warp * k;
   for (int candidate = warp; candidate < train_rows; candidate += kCudaWarps) {
     if (candidate == excluded) continue;
+    const int output_id = allowed_local_ids == nullptr ? candidate : allowed_local_ids[candidate];
+    if (output_id < 0) continue;
     const float* train_row = train + static_cast<std::size_t>(candidate) * dimensions;
     float partial = 0.0f;
     if (metric == 0) {
@@ -313,7 +337,7 @@ __global__ void exact_topk_kernel(
       partial = -partial;
     }
     const float distance = warp_sum(partial);
-    if (lane == 0) insert_sorted(warp_distances, warp_ids, k, distance, candidate);
+    if (lane == 0) insert_sorted(warp_distances, warp_ids, k, distance, output_id);
   }
   __syncthreads();
 
@@ -524,6 +548,7 @@ __global__ void ivf_topk_kernel(
   const std::uint32_t* list_offsets,
   const int* list_ids,
   const int* excluded_train_id,
+  const int* allowed_local_ids,
   int* output_ids,
   float* output_distances,
   int train_rows,
@@ -608,6 +633,8 @@ __global__ void ivf_topk_kernel(
          position += static_cast<std::uint32_t>(kCudaWarps)) {
       const int candidate = list_ids[position];
       if (candidate < 0 || candidate >= train_rows || candidate == excluded) continue;
+      const int output_id = allowed_local_ids == nullptr ? candidate : allowed_local_ids[candidate];
+      if (output_id < 0) continue;
       const float* train_row = train + static_cast<std::size_t>(candidate) * dimensions;
       float partial = 0.0f;
       if (metric == 0) {
@@ -622,7 +649,7 @@ __global__ void ivf_topk_kernel(
         partial = -partial;
       }
       const float distance = warp_sum(partial);
-      if (lane == 0) insert_sorted(warp_local_distances, warp_local_ids, k, distance, candidate);
+      if (lane == 0) insert_sorted(warp_local_distances, warp_local_ids, k, distance, output_id);
     }
   }
   __syncthreads();
@@ -1185,6 +1212,7 @@ void launch_exact(
   const float* device_train,
   const float* device_query,
   const int* device_exclusions,
+  const int* device_allowed_local_ids,
   int* device_ids,
   float* device_distances,
   int train_rows,
@@ -1200,6 +1228,7 @@ void launch_exact(
     device_train,
     device_query,
     device_exclusions,
+    device_allowed_local_ids,
     device_ids,
     device_distances,
     train_rows,
@@ -1219,6 +1248,7 @@ void launch_ivf(
   const std::uint32_t* device_list_offsets,
   const int* device_list_ids,
   const int* device_exclusions,
+  const int* device_allowed_local_ids,
   int* device_ids,
   float* device_distances,
   int train_rows,
@@ -1243,6 +1273,7 @@ void launch_ivf(
     device_list_offsets,
     device_list_ids,
     device_exclusions,
+    device_allowed_local_ids,
     device_ids,
     device_distances,
     train_rows,
@@ -1338,27 +1369,45 @@ NativeKNNResult search_cuda_ivf_device(
   double target_recall,
   int device,
   const std::vector<int>& query_train_indices,
-  NativeCudaIVFStats* stats
+  NativeCudaIVFStats* stats,
+  int* resident_output_ids = nullptr,
+  float* resident_output_distances = nullptr,
+  bool materialize_host = true,
+  const std::vector<int>* allowed_local_ids = nullptr
 ) {
   if (requested_nprobe > kMaximumCudaProbe) {
     throw std::invalid_argument("Native CUDA IVF supports nprobe <= 256.");
   }
-  const int available = train_rows - (query_train_indices.empty() ? 0 : 1);
+  if (allowed_local_ids != nullptr && static_cast<int>(allowed_local_ids->size()) != train_rows) {
+    throw std::invalid_argument("Native CUDA IVF landmark mask size mismatch.");
+  }
+  const int allowed = allowed_local_ids == nullptr ? train_rows :
+    static_cast<int>(std::count_if(
+      allowed_local_ids->begin(), allowed_local_ids->end(), [](int id) { return id >= 0; }
+    ));
+  const int available = allowed - (query_train_indices.empty() ? 0 : 1);
   k = std::min(k, std::max(0, available));
   NativeKNNResult output;
   output.queries = query_rows;
   output.neighbors = k;
-  output.indices.assign(static_cast<std::size_t>(query_rows) * k, -1);
-  output.distances.assign(
-    static_cast<std::size_t>(query_rows) * k,
-    std::numeric_limits<float>::infinity()
-  );
+  const std::size_t output_items = static_cast<std::size_t>(query_rows) * k;
+  if (materialize_host) {
+    output.indices.assign(output_items, -1);
+    output.distances.assign(output_items, std::numeric_limits<float>::infinity());
+  }
   if (query_rows == 0 || k == 0) return output;
 
   CudaDeviceScope device_scope(device);
   const std::vector<int> exclusions = normalized_exclusions(query_train_indices, query_rows);
   CudaBuffer<int> device_exclusions(exclusions.size());
   device_exclusions.copy_from_host(exclusions.data(), exclusions.size());
+  CudaBuffer<int> device_allowed_local_ids;
+  if (allowed_local_ids != nullptr) {
+    device_allowed_local_ids.allocate(allowed_local_ids->size());
+    device_allowed_local_ids.copy_from_host(
+      allowed_local_ids->data(), allowed_local_ids->size()
+    );
+  }
 
   const int max_probe = std::min(nlist, kMaximumCudaProbe);
   int nprobe = requested_nprobe > 0 ? requested_nprobe :
@@ -1376,6 +1425,7 @@ NativeKNNResult search_cuda_ivf_device(
     device_train,
     device_query,
     device_exclusions.get(),
+    device_allowed_local_ids.get(),
     device_pilot_exact_ids.get(),
     device_pilot_exact_distances.get(),
     train_rows,
@@ -1397,6 +1447,7 @@ NativeKNNResult search_cuda_ivf_device(
       device_list_offsets,
       device_list_ids,
       device_exclusions.get(),
+      device_allowed_local_ids.get(),
       device_pilot_ivf_ids.get(),
       device_pilot_ivf_distances.get(),
       train_rows,
@@ -1410,6 +1461,9 @@ NativeKNNResult search_cuda_ivf_device(
     );
     device_pilot_ivf_ids.copy_to_host(pilot_ivf.data(), pilot_ivf.size());
     return recall_at_k(pilot_exact, pilot_ivf, pilot_rows, k);
+  };
+  auto pilot_is_complete = [&]() {
+    return std::none_of(pilot_ivf.begin(), pilot_ivf.end(), [](int id) { return id < 0; });
   };
 
   double pilot_recall = 0.0;
@@ -1437,10 +1491,23 @@ NativeKNNResult search_cuda_ivf_device(
     nprobe = high;
   } else {
     pilot_recall = evaluate_probe(nprobe);
+    while (!pilot_is_complete() && nprobe < max_probe) {
+      nprobe = std::min(
+        max_probe,
+        std::max(nprobe + 1, static_cast<int>(std::ceil(nprobe * 1.5)))
+      );
+      pilot_recall = evaluate_probe(nprobe);
+    }
   }
 
-  CudaBuffer<int> device_output_ids(output.indices.size());
-  CudaBuffer<float> device_output_distances(output.distances.size());
+  CudaBuffer<int> owned_output_ids;
+  CudaBuffer<float> owned_output_distances;
+  if (resident_output_ids == nullptr || resident_output_distances == nullptr) {
+    owned_output_ids.allocate(output_items);
+    owned_output_distances.allocate(output_items);
+    resident_output_ids = owned_output_ids.get();
+    resident_output_distances = owned_output_distances.get();
+  }
   launch_ivf(
     device_train,
     device_query,
@@ -1449,8 +1516,9 @@ NativeKNNResult search_cuda_ivf_device(
     device_list_offsets,
     device_list_ids,
     device_exclusions.get(),
-    device_output_ids.get(),
-    device_output_distances.get(),
+    device_allowed_local_ids.get(),
+    resident_output_ids,
+    resident_output_distances,
     train_rows,
     query_rows,
     dimensions,
@@ -1460,8 +1528,45 @@ NativeKNNResult search_cuda_ivf_device(
     k,
     metric
   );
-  device_output_ids.copy_to_host(output.indices.data(), output.indices.size());
-  device_output_distances.copy_to_host(output.distances.data(), output.distances.size());
+  if (materialize_host) {
+    cuda_check(
+      cudaMemcpy(
+        output.indices.data(),
+        resident_output_ids,
+        output_items * sizeof(int),
+        cudaMemcpyDeviceToHost
+      ),
+      "download native CUDA IVF indices"
+    );
+    cuda_check(
+      cudaMemcpy(
+        output.distances.data(),
+        resident_output_distances,
+        output_items * sizeof(float),
+        cudaMemcpyDeviceToHost
+      ),
+      "download native CUDA IVF distances"
+    );
+    if (allowed_local_ids != nullptr &&
+        std::any_of(output.indices.begin(), output.indices.end(), [](int id) { return id < 0; })) {
+      launch_exact(
+        device_train, device_query, device_exclusions.get(),
+        device_allowed_local_ids.get(), resident_output_ids,
+        resident_output_distances, train_rows, query_rows, dimensions, k, metric
+      );
+      cuda_check(
+        cudaMemcpy(output.indices.data(), resident_output_ids,
+          output_items * sizeof(int), cudaMemcpyDeviceToHost),
+        "download exact CUDA landmark fallback indices"
+      );
+      cuda_check(
+        cudaMemcpy(output.distances.data(), resident_output_distances,
+          output_items * sizeof(float), cudaMemcpyDeviceToHost),
+        "download exact CUDA landmark fallback distances"
+      );
+      pilot_recall = 1.0;
+    }
+  }
   if (stats != nullptr) {
     stats->nlist = nlist;
     stats->nprobe = nprobe;
@@ -1512,6 +1617,26 @@ int NativeCudaKNNVoteGraph::device() const noexcept {
   return impl_ == nullptr ? -1 : impl_->device;
 }
 
+NativeCudaKMeansContext::NativeCudaKMeansContext() = default;
+NativeCudaKMeansContext::~NativeCudaKMeansContext() = default;
+NativeCudaKMeansContext::NativeCudaKMeansContext(NativeCudaKMeansContext&&) noexcept = default;
+NativeCudaKMeansContext& NativeCudaKMeansContext::operator=(NativeCudaKMeansContext&&) noexcept = default;
+NativeCudaKMeansContext::NativeCudaKMeansContext(
+  std::unique_ptr<Impl> impl
+) : impl_(std::move(impl)) {}
+
+bool NativeCudaKMeansContext::valid() const noexcept { return impl_ != nullptr; }
+int NativeCudaKMeansContext::rows() const noexcept { return impl_ == nullptr ? 0 : impl_->rows; }
+int NativeCudaKMeansContext::dimensions() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->dimensions;
+}
+int NativeCudaKMeansContext::lanes() const noexcept {
+  return impl_ == nullptr ? 0 : static_cast<int>(impl_->lane.size());
+}
+std::uint64_t NativeCudaKMeansContext::input_uploads() const noexcept {
+  return impl_ == nullptr ? 0 : impl_->input_uploads;
+}
+
 bool native_cuda_backend_available(int device) {
   int count = 0;
   if (cudaGetDeviceCount(&count) != cudaSuccess) {
@@ -1559,6 +1684,7 @@ NativeKNNResult native_cuda_exact_knn_search(
     device_train.get(),
     device_query.get(),
     device_exclusions.get(),
+    nullptr,
     device_ids.get(),
     device_distances.get(),
     train_rows,
@@ -1607,7 +1733,6 @@ NativeKNNResult native_cuda_ivf_knn_search(
     std::ceil(std::sqrt(static_cast<double>(train_rows)))
   );
   nlist = std::max(1, std::min({nlist, kMaximumCudaLists, train_rows}));
-  if (requested_nlist <= 0) nlist = std::min(nlist, kMaximumCudaProbe);
   const int max_probe = std::min(nlist, kMaximumCudaProbe);
   // A twice-square-root starting budget keeps the automatic path close to exact
   // recall while allowing the pilot search to increase it when needed.
@@ -1687,6 +1812,7 @@ NativeKNNResult native_cuda_ivf_knn_search(
     device_train.get(),
     device_query.get(),
     device_exclusions.get(),
+    nullptr,
     device_pilot_exact_ids.get(),
     device_pilot_exact_distances.get(),
     train_rows,
@@ -1708,6 +1834,7 @@ NativeKNNResult native_cuda_ivf_knn_search(
       lists.offsets.get(),
       lists.ids.get(),
       device_exclusions.get(),
+      nullptr,
       device_pilot_ivf_ids.get(),
       device_pilot_ivf_distances.get(),
       train_rows,
@@ -1760,6 +1887,7 @@ NativeKNNResult native_cuda_ivf_knn_search(
     lists.offsets.get(),
     lists.ids.get(),
     device_exclusions.get(),
+    nullptr,
     device_output_ids.get(),
     device_output_distances.get(),
     train_rows,
@@ -1800,7 +1928,6 @@ NativeCudaIVFIndex native_cuda_build_ivf_index(
     std::ceil(std::sqrt(static_cast<double>(train_rows)))
   );
   nlist = std::max(1, std::min({nlist, kMaximumCudaLists, train_rows}));
-  if (requested_nlist <= 0) nlist = std::min(nlist, kMaximumCudaProbe);
   const int projected_dimensions = projection_dimension(dimensions);
 
   std::vector<std::uint32_t> feature_offsets;
@@ -1935,6 +2062,53 @@ NativeKNNResult native_cuda_ivf_index_search(
   );
 }
 
+NativeKNNResult native_cuda_ivf_index_filtered_search(
+  const NativeCudaIVFIndex& index,
+  const std::vector<float>& query,
+  int query_rows,
+  int k,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  const std::vector<int>& allowed_local_ids,
+  NativeCudaIVFStats* stats
+) {
+  if (!index.valid()) throw std::invalid_argument("Native CUDA IVF index is empty.");
+  const NativeCudaIVFIndex::Impl& impl = *index.impl_;
+  if (query.size() != static_cast<std::size_t>(query_rows) * impl.dimensions) {
+    throw std::invalid_argument("Native CUDA IVF query matrix size mismatch.");
+  }
+  if (static_cast<int>(query_train_indices.size()) != query_rows) {
+    throw std::invalid_argument("Native CUDA IVF landmark exclusions are required per query.");
+  }
+  CudaDeviceScope device_scope(impl.device);
+  CudaBuffer<float> device_query(query.size());
+  CudaBuffer<float> device_projected_query(
+    static_cast<std::size_t>(query_rows) * impl.projected_dimensions
+  );
+  device_query.copy_from_host(query.data(), query.size());
+  const std::size_t projected_items =
+    static_cast<std::size_t>(query_rows) * impl.projected_dimensions;
+  signed_hash_project_kernel<<<blocks_for(projected_items), 256>>>(
+    device_query.get(),
+    impl.feature_offsets.get(),
+    impl.feature_ids.get(),
+    impl.feature_signs.get(),
+    device_projected_query.get(),
+    query_rows,
+    impl.dimensions,
+    impl.projected_dimensions
+  );
+  cuda_check(cudaGetLastError(), "native CUDA filtered IVF query projection");
+  return search_cuda_ivf_device(
+    impl.train.get(), device_query.get(), device_projected_query.get(),
+    impl.centroids.get(), impl.list_offsets.get(), impl.list_ids.get(),
+    impl.rows, query_rows, impl.dimensions, impl.projected_dimensions,
+    impl.nlist, k, impl.metric, requested_nprobe, target_recall, impl.device,
+    query_train_indices, stats, nullptr, nullptr, true, &allowed_local_ids
+  );
+}
+
 NativeKNNResult native_cuda_ivf_index_self_search(
   const NativeCudaIVFIndex& index,
   int k,
@@ -1974,6 +2148,53 @@ NativeKNNResult native_cuda_ivf_index_self_search(
   );
 }
 
+void native_cuda_ivf_index_self_search_device(
+  const NativeCudaIVFIndex& index,
+  int k,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  int* device_output_ids,
+  float* device_output_distances,
+  NativeCudaIVFStats* stats
+) {
+  if (!index.valid()) throw std::invalid_argument("Native CUDA IVF index is empty.");
+  if (device_output_ids == nullptr || device_output_distances == nullptr) {
+    throw std::invalid_argument("Native CUDA resident IVF output buffers are null.");
+  }
+  const NativeCudaIVFIndex::Impl& impl = *index.impl_;
+  if (!query_train_indices.empty() &&
+      static_cast<int>(query_train_indices.size()) != impl.rows) {
+    throw std::invalid_argument("Native CUDA IVF exclusion vector size mismatch.");
+  }
+  if (k < 1 || k > kMaximumCudaK) {
+    throw std::invalid_argument("Native CUDA IVF supports 1 <= k <= 256.");
+  }
+  (void)search_cuda_ivf_device(
+    impl.train.get(),
+    impl.train.get(),
+    impl.projected_train.get(),
+    impl.centroids.get(),
+    impl.list_offsets.get(),
+    impl.list_ids.get(),
+    impl.rows,
+    impl.rows,
+    impl.dimensions,
+    impl.projected_dimensions,
+    impl.nlist,
+    k,
+    impl.metric,
+    requested_nprobe,
+    target_recall,
+    impl.device,
+    query_train_indices,
+    stats,
+    device_output_ids,
+    device_output_distances,
+    false
+  );
+}
+
 std::vector<int> native_cuda_kmeans_labels(
   const std::vector<float>& data,
   int rows,
@@ -1998,6 +2219,140 @@ std::vector<int> native_cuda_kmeans_labels(
   );
   for (int& label : output.assignments) ++label;
   return output.assignments;
+}
+
+NativeCudaKMeansContext native_cuda_build_kmeans_context(
+  const std::vector<float>& data,
+  int rows,
+  int dimensions,
+  int lanes,
+  int max_clusters,
+  int device
+) {
+  if (rows < 1 || dimensions < 1 || lanes < 1 || max_clusters < 1 ||
+      max_clusters > rows ||
+      data.size() != static_cast<std::size_t>(rows) * dimensions) {
+    throw std::invalid_argument("Invalid native CUDA k-means context dimensions.");
+  }
+  CudaDeviceScope device_scope(device);
+  auto impl = std::make_unique<NativeCudaKMeansContext::Impl>();
+  impl->rows = rows;
+  impl->dimensions = dimensions;
+  impl->max_clusters = max_clusters;
+  impl->device = device;
+  impl->host_data = data.data();
+  impl->data.allocate(data.size());
+  impl->data.copy_from_host(data.data(), data.size());
+  impl->input_uploads = 1;
+  impl->data_norms.allocate(static_cast<std::size_t>(rows));
+  row_norms_kernel<<<blocks_for(static_cast<std::size_t>(rows)), 256>>>(
+    impl->data.get(), impl->data_norms.get(), rows, dimensions
+  );
+  cuda_check(cudaGetLastError(), "resident CUDA k-means row norms");
+
+  const std::size_t centroid_items =
+    static_cast<std::size_t>(max_clusters) * dimensions;
+  const std::size_t score_items = std::min(
+    static_cast<std::size_t>(rows) * max_clusters,
+    kKMeansScoreWorkspaceBytes / sizeof(float)
+  );
+  impl->lane.reserve(static_cast<std::size_t>(lanes));
+  for (int lane = 0; lane < lanes; ++lane) {
+    auto workspace = std::make_unique<NativeCudaKMeansContext::Impl::Lane>();
+    workspace->centroids.allocate(centroid_items);
+    workspace->assignments.allocate(static_cast<std::size_t>(rows));
+    workspace->centroid_norms.allocate(static_cast<std::size_t>(max_clusters));
+    workspace->scores.allocate(score_items);
+    workspace->changed.allocate(1);
+    impl->lane.push_back(std::move(workspace));
+  }
+  return NativeCudaKMeansContext(std::move(impl));
+}
+
+std::vector<int> native_cuda_kmeans_context_labels(
+  NativeCudaKMeansContext& context,
+  int lane,
+  int clusters,
+  int max_iterations,
+  std::uint64_t seed
+) {
+  if (!context.valid()) throw std::invalid_argument("Native CUDA k-means context is empty.");
+  NativeCudaKMeansContext::Impl& impl = *context.impl_;
+  if (lane < 0 || lane >= static_cast<int>(impl.lane.size()) ||
+      clusters < 1 || clusters > impl.max_clusters) {
+    throw std::invalid_argument("Native CUDA k-means context lane or cluster count is invalid.");
+  }
+  CudaDeviceScope device_scope(impl.device);
+  auto& workspace = *impl.lane[static_cast<std::size_t>(lane)];
+  const int rows = impl.rows;
+  const int dimensions = impl.dimensions;
+  max_iterations = std::max(1, max_iterations);
+  const std::size_t centroid_items = static_cast<std::size_t>(clusters) * dimensions;
+  const int score_batch_rows = kmeans_score_batch_rows(rows, clusters);
+
+  const std::vector<int> initial_indices = faiss_compatible_permutation(rows, seed + 1u);
+  std::vector<float> centroids(centroid_items, 0.0f);
+  for (int cluster = 0; cluster < clusters; ++cluster) {
+    std::copy_n(
+      impl.host_data + static_cast<std::size_t>(initial_indices[static_cast<std::size_t>(cluster)]) * dimensions,
+      dimensions,
+      centroids.data() + static_cast<std::size_t>(cluster) * dimensions
+    );
+  }
+  workspace.centroids.copy_from_host(centroids.data(), centroid_items);
+  cuda_check(
+    cudaMemset(workspace.assignments.get(), 0xff, static_cast<std::size_t>(rows) * sizeof(int)),
+    "reset resident CUDA k-means assignments"
+  );
+
+  std::vector<int> assignments(static_cast<std::size_t>(rows), -1);
+  std::vector<float> cluster_sizes(static_cast<std::size_t>(clusters), 0.0f);
+  auto assign = [&]() {
+    row_norms_kernel<<<blocks_for(static_cast<std::size_t>(clusters)), 256>>>(
+      workspace.centroids.get(), workspace.centroid_norms.get(), clusters, dimensions
+    );
+    cuda_check(cudaGetLastError(), "resident CUDA k-means centroid norms");
+    assign_kmeans_rows(
+      workspace.handle.get(), impl.data.get(), workspace.centroids.get(),
+      impl.data_norms.get(), workspace.centroid_norms.get(), workspace.scores.get(),
+      workspace.assignments.get(), workspace.changed.get(), rows, dimensions,
+      clusters, score_batch_rows
+    );
+    workspace.assignments.copy_to_host(assignments.data(), assignments.size());
+    unsigned int changed = 0;
+    workspace.changed.copy_to_host(&changed, 1);
+    return changed;
+  };
+
+  for (int iteration = 0; iteration < max_iterations; ++iteration) {
+    const unsigned int changed = assign();
+    std::fill(centroids.begin(), centroids.end(), 0.0f);
+    std::fill(cluster_sizes.begin(), cluster_sizes.end(), 0.0f);
+    for (int row = 0; row < rows; ++row) {
+      const int cluster = assignments[static_cast<std::size_t>(row)];
+      cluster_sizes[static_cast<std::size_t>(cluster)] += 1.0f;
+      float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * dimensions;
+      const float* point = impl.host_data + static_cast<std::size_t>(row) * dimensions;
+      for (int dimension = 0; dimension < dimensions; ++dimension) {
+        centroid[dimension] += point[dimension];
+      }
+    }
+    for (int cluster = 0; cluster < clusters; ++cluster) {
+      const float size = cluster_sizes[static_cast<std::size_t>(cluster)];
+      if (size == 0.0f) continue;
+      const float scale = 1.0f / size;
+      float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * dimensions;
+      for (int dimension = 0; dimension < dimensions; ++dimension) centroid[dimension] *= scale;
+    }
+    faiss_compatible_split_empty_clusters(
+      rows, dimensions, clusters, cluster_sizes, centroids
+    );
+    workspace.centroids.copy_from_host(centroids.data(), centroid_items);
+    if (changed == 0) break;
+  }
+  assign();
+  for (int& label : assignments) ++label;
+  return assignments;
 }
 
 NativeCudaKNNVoteGraph native_cuda_build_knn_vote_graph(
@@ -2032,6 +2387,17 @@ std::vector<int> native_cuda_knn_vote_predict(
   const std::vector<int>& labels,
   int fallback_label
 ) {
+  std::vector<int> predictions;
+  native_cuda_knn_vote_predict_into(graph, labels, fallback_label, predictions);
+  return predictions;
+}
+
+void native_cuda_knn_vote_predict_into(
+  const NativeCudaKNNVoteGraph& graph,
+  const std::vector<int>& labels,
+  int fallback_label,
+  std::vector<int>& predictions
+) {
   if (!graph.valid()) {
     throw std::invalid_argument("Resident CUDA KNN vote graph is empty.");
   }
@@ -2053,9 +2419,8 @@ std::vector<int> native_cuda_knn_vote_predict(
     fallback_label
   );
   cuda_check(cudaGetLastError(), "resident CUDA KNN vote kernel");
-  std::vector<int> predictions(static_cast<std::size_t>(impl.samples));
+  predictions.resize(static_cast<std::size_t>(impl.samples));
   impl.predictions.copy_to_host(predictions.data(), predictions.size());
-  return predictions;
 }
 
 }  // namespace kodama::detail

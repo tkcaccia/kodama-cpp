@@ -165,7 +165,7 @@ class CudaGraphExecOwner {
 };
 
 bool cuda_graph_capture_enabled() {
-  const char* env = std::getenv("FASTEMBEDR_CUDA_GRAPH_CAPTURE");
+  const char* env = std::getenv("KODAMA_CUDA_EMBEDDING_GRAPH_CAPTURE");
   if (env == nullptr || env[0] == '\0') return true;
   return !(std::strcmp(env, "0") == 0 ||
            std::strcmp(env, "false") == 0 ||
@@ -2614,11 +2614,11 @@ int normalize_device_init(float* d_values,
 
 } // namespace
 
-extern "C" const char* fastembedr_cuda_embedding_last_error() {
+extern "C" const char* kodama_cuda_embedding_last_error() {
   return embedding_last_error.c_str();
 }
 
-extern "C" bool fastembedr_cuda_available() {
+extern "C" bool kodama_cuda_available() {
   int count = 0;
   cudaError_t code = cudaGetDeviceCount(&count);
   if (code != cudaSuccess) {
@@ -2628,7 +2628,7 @@ extern "C" bool fastembedr_cuda_available() {
   return count > 0;
 }
 
-extern "C" int fastembedr_cuda_finalize_cuvs_knn(
+extern "C" int kodama_cuda_finalize_cuvs_knn(
     const int64_t* input_indices,
     const float* input_distances,
     int* output_indices,
@@ -2699,7 +2699,7 @@ extern "C" int fastembedr_cuda_finalize_cuvs_knn(
   return 0;
 }
 
-extern "C" int fastembedr_cuda_standardize_matrix(const double* values,
+extern "C" int kodama_cuda_standardize_matrix(const double* values,
                                                   int n,
                                                   int p,
                                                   double* out,
@@ -2778,7 +2778,7 @@ extern "C" int fastembedr_cuda_standardize_matrix(const double* values,
   return 0;
 }
 
-extern "C" int fastembedr_cuda_project_embedding(const double* reference_layout,
+extern "C" int kodama_cuda_project_embedding(const double* reference_layout,
                                                  const int* projection_indices,
                                                  const double* projection_distances,
                                                  int n_reference,
@@ -2868,7 +2868,7 @@ extern "C" int fastembedr_cuda_project_embedding(const double* reference_layout,
   return 0;
 }
 
-extern "C" int fastembedr_cuda_interpolate_landmark_layout(const double* landmark_layout,
+extern "C" int kodama_cuda_interpolate_landmark_layout(const double* landmark_layout,
                                                            const int* landmark_indices,
                                                            const int* projection_indices,
                                                            const double* projection_distances,
@@ -2978,7 +2978,7 @@ extern "C" int fastembedr_cuda_interpolate_landmark_layout(const double* landmar
   return 0;
 }
 
-extern "C" int fastembedr_cuda_landmark_project_interpolate_knn_confidence(const double* landmark_data,
+extern "C" int kodama_cuda_landmark_project_interpolate_knn_confidence(const double* landmark_data,
                                                                            const double* query_data,
                                                                            const double* landmark_layout,
                                                                            const int* landmark_indices,
@@ -3138,7 +3138,7 @@ extern "C" int fastembedr_cuda_landmark_project_interpolate_knn_confidence(const
   return 0;
 }
 
-extern "C" int fastembedr_cuda_knn_structure_score(const double* layout,
+extern "C" int kodama_cuda_knn_structure_score(const double* layout,
                                                    const int* indices,
                                                    const int* keep,
                                                    const int* labels,
@@ -3269,7 +3269,7 @@ extern "C" int fastembedr_cuda_knn_structure_score(const double* layout,
   return 0;
 }
 
-extern "C" int fastembedr_cuda_silhouette_score(const double* layout,
+extern "C" int kodama_cuda_silhouette_score(const double* layout,
                                                 const int* labels,
                                                 const int* counts,
                                                 int n,
@@ -3370,7 +3370,7 @@ extern "C" int fastembedr_cuda_silhouette_score(const double* layout,
 }
 
 template <typename DistanceT>
-int fastembedr_cuda_spectral_init_from_knn_impl(const int* indices,
+int kodama_cuda_spectral_init_from_knn_impl(const int* indices,
                                                       const DistanceT* distances,
                                                       int n,
                                                        int k,
@@ -3516,7 +3516,7 @@ int fastembedr_cuda_spectral_init_from_knn_impl(const int* indices,
   return 0;
 }
 
-extern "C" int fastembedr_cuda_spectral_init_from_knn(const int* indices,
+extern "C" int kodama_cuda_spectral_init_from_knn(const int* indices,
                                                       const double* distances,
                                                       int n,
                                                       int k,
@@ -3524,13 +3524,13 @@ extern "C" int fastembedr_cuda_spectral_init_from_knn(const int* indices,
                                                       unsigned int seed,
                                                       int index_offset,
                                                       float* out) {
-  return fastembedr_cuda_spectral_init_from_knn_impl<double>(
+  return kodama_cuda_spectral_init_from_knn_impl<double>(
     indices, distances, n, k, spectral_n_iter, seed, index_offset, out
   );
 }
 
 template <typename DistanceT>
-int fastembedr_cuda_umap_graph_dump_from_knn_impl(const int* indices,
+int kodama_cuda_umap_graph_dump_from_knn_impl(const int* indices,
                                                         const DistanceT* distances,
                                                         int n,
                                                         int k,
@@ -3676,7 +3676,7 @@ int fastembedr_cuda_umap_graph_dump_from_knn_impl(const int* indices,
   return 0;
 }
 
-extern "C" int fastembedr_cuda_umap_graph_dump_from_knn(const int* indices,
+extern "C" int kodama_cuda_umap_graph_dump_from_knn(const int* indices,
                                                         const double* distances,
                                                         int n,
                                                         int k,
@@ -3687,14 +3687,14 @@ extern "C" int fastembedr_cuda_umap_graph_dump_from_knn(const int* indices,
                                                         float* out_epochs_per_sample,
                                                         int* out_width,
                                                         int* out_capacity) {
-  return fastembedr_cuda_umap_graph_dump_from_knn_impl<double>(
+  return kodama_cuda_umap_graph_dump_from_knn_impl<double>(
     indices, distances, n, k, index_offset, out_heads, out_tails, out_weights,
     out_epochs_per_sample, out_width, out_capacity
   );
 }
 
 template <typename DistanceT>
-int fastembedr_cuda_umap_from_device_knn_spectral_impl(const int* d_indices_src,
+int kodama_cuda_umap_from_device_knn_spectral_impl(const int* d_indices_src,
                                                        const DistanceT* d_distances_src,
                                                        int n,
                                                        int k,
@@ -3928,7 +3928,7 @@ int fastembedr_cuda_umap_from_device_knn_spectral_impl(const int* d_indices_src,
 }
 
 template <typename DistanceT>
-int fastembedr_cuda_umap_from_knn_spectral_impl(const int* indices,
+int kodama_cuda_umap_from_knn_spectral_impl(const int* indices,
                                                 const DistanceT* distances,
                                                 int n,
                                                 int k,
@@ -3975,7 +3975,7 @@ int fastembedr_cuda_umap_from_knn_spectral_impl(const int* indices,
     cleanup();
     return 1;
   }
-  const int status = fastembedr_cuda_umap_from_device_knn_spectral_impl<DistanceT>(
+  const int status = kodama_cuda_umap_from_device_knn_spectral_impl<DistanceT>(
     d_indices, d_distances, n, k, n_epochs, negative_sample_rate, learning_rate,
     a, b, repulsion_strength, spectral_n_iter, seed, index_offset, optimizer_mode,
     binary_graph, out
@@ -3984,7 +3984,7 @@ int fastembedr_cuda_umap_from_knn_spectral_impl(const int* indices,
   return status;
 }
 
-extern "C" int fastembedr_cuda_umap_from_knn_spectral(const int* indices,
+extern "C" int kodama_cuda_umap_from_knn_spectral(const int* indices,
                                                        const double* distances,
                                                        int n,
                                                        int k,
@@ -3999,14 +3999,14 @@ extern "C" int fastembedr_cuda_umap_from_knn_spectral(const int* indices,
                                                        int index_offset,
                                                        int optimizer_mode,
                                                        float* out) {
-  return fastembedr_cuda_umap_from_knn_spectral_impl<double>(
+  return kodama_cuda_umap_from_knn_spectral_impl<double>(
     indices, distances, n, k, n_epochs, negative_sample_rate, learning_rate,
     a, b, repulsion_strength, spectral_n_iter, seed, index_offset,
     optimizer_mode, false, out
   );
 }
 
-extern "C" int fastembedr_cuda_umap_from_knn_spectral_float(const int* indices,
+extern "C" int kodama_cuda_umap_from_knn_spectral_float(const int* indices,
                                                              const float* distances,
                                                              int n,
                                                              int k,
@@ -4021,14 +4021,14 @@ extern "C" int fastembedr_cuda_umap_from_knn_spectral_float(const int* indices,
                                                              int index_offset,
                                                              int optimizer_mode,
                                                              float* out) {
-  return fastembedr_cuda_umap_from_knn_spectral_impl<float>(
+  return kodama_cuda_umap_from_knn_spectral_impl<float>(
     indices, distances, n, k, n_epochs, negative_sample_rate, learning_rate,
     a, b, repulsion_strength, spectral_n_iter, seed, index_offset,
     optimizer_mode, false, out
   );
 }
 
-extern "C" int fastembedr_cuda_umap_from_device_knn_spectral_float(const int* device_indices,
+extern "C" int kodama_cuda_umap_from_device_knn_spectral_float(const int* device_indices,
                                                                     const float* device_distances,
                                                                     int n,
                                                                     int k,
@@ -4044,14 +4044,14 @@ extern "C" int fastembedr_cuda_umap_from_device_knn_spectral_float(const int* de
                                                                     int optimizer_mode,
                                                                     int binary_graph,
                                                                     float* out) {
-  return fastembedr_cuda_umap_from_device_knn_spectral_impl<float>(
+  return kodama_cuda_umap_from_device_knn_spectral_impl<float>(
     device_indices, device_distances, n, k, n_epochs, negative_sample_rate,
     learning_rate, a, b, repulsion_strength, spectral_n_iter, seed,
     index_offset, optimizer_mode, binary_graph != 0, out
   );
 }
 
-extern "C" int fastembedr_cuda_umap_optimize_coo(const int* heads,
+extern "C" int kodama_cuda_umap_optimize_coo(const int* heads,
                                                   const int* tails,
                                                   const float* weights,
                                                   const float* epochs_per_sample,
@@ -4179,7 +4179,7 @@ extern "C" int fastembedr_cuda_umap_optimize_coo(const int* heads,
 }
 
 template <typename DistanceT>
-int fastembedr_cuda_opentsne_fft_from_knn_impl(const int* indices,
+int kodama_cuda_opentsne_fft_from_knn_impl(const int* indices,
                                                        const DistanceT* distances,
                                                        const float* init,
                                                        int has_init,
@@ -4220,7 +4220,7 @@ int fastembedr_cuda_opentsne_fft_from_knn_impl(const int* indices,
   int grid_size = 512;
   if (n < 20000) grid_size = 256;
   if (n >= 100000) grid_size = 1024;
-  const char* grid_env = std::getenv("FASTEMBEDR_TSNE_FFT_GRID");
+  const char* grid_env = std::getenv("KODAMA_TSNE_FFT_GRID");
   if (grid_env != nullptr && grid_env[0] != '\0') {
     const int requested = std::atoi(grid_env);
     if (requested == 128 || requested == 256 || requested == 512 || requested == 1024) {
@@ -4686,7 +4686,7 @@ int fastembedr_cuda_opentsne_fft_from_knn_impl(const int* indices,
   return 0;
 }
 
-extern "C" int fastembedr_cuda_opentsne_fft_from_knn(const int* indices,
+extern "C" int kodama_cuda_opentsne_fft_from_knn(const int* indices,
                                                        const double* distances,
                                                        const float* init,
                                                        int has_init,
@@ -4707,7 +4707,7 @@ extern "C" int fastembedr_cuda_opentsne_fft_from_knn(const int* indices,
                                                        unsigned int seed,
                                                        int index_offset,
                                                        float* out) {
-  return fastembedr_cuda_opentsne_fft_from_knn_impl<double>(
+  return kodama_cuda_opentsne_fft_from_knn_impl<double>(
     indices, distances, init, has_init, n, k, n_components, perplexity,
     early_exaggeration_iter, n_iter, early_exaggeration, exaggeration,
     learning_rate, learning_rate_auto, initial_momentum, final_momentum,
@@ -4715,7 +4715,7 @@ extern "C" int fastembedr_cuda_opentsne_fft_from_knn(const int* indices,
   );
 }
 
-extern "C" int fastembedr_cuda_opentsne_fft_from_knn_float(const int* indices,
+extern "C" int kodama_cuda_opentsne_fft_from_knn_float(const int* indices,
                                                             const float* distances,
                                                             const float* init,
                                                             int has_init,
@@ -4736,7 +4736,7 @@ extern "C" int fastembedr_cuda_opentsne_fft_from_knn_float(const int* indices,
                                                             unsigned int seed,
                                                             int index_offset,
                                                             float* out) {
-  return fastembedr_cuda_opentsne_fft_from_knn_impl<float>(
+  return kodama_cuda_opentsne_fft_from_knn_impl<float>(
     indices, distances, init, has_init, n, k, n_components, perplexity,
     early_exaggeration_iter, n_iter, early_exaggeration, exaggeration,
     learning_rate, learning_rate_auto, initial_momentum, final_momentum,
@@ -4744,7 +4744,7 @@ extern "C" int fastembedr_cuda_opentsne_fft_from_knn_float(const int* indices,
   );
 }
 
-extern "C" int fastembedr_cuda_opentsne_fft_from_device_knn_float(const int* indices,
+extern "C" int kodama_cuda_opentsne_fft_from_device_knn_float(const int* indices,
                                                                   const float* distances,
                                                                   const float* init,
                                                                   int has_init,
@@ -4765,7 +4765,7 @@ extern "C" int fastembedr_cuda_opentsne_fft_from_device_knn_float(const int* ind
                                                                   unsigned int seed,
                                                                   int index_offset,
                                                                   float* out) {
-  return fastembedr_cuda_opentsne_fft_from_knn_impl<float>(
+  return kodama_cuda_opentsne_fft_from_knn_impl<float>(
     indices, distances, init, has_init, n, k, n_components, perplexity,
     early_exaggeration_iter, n_iter, early_exaggeration, exaggeration,
     learning_rate, learning_rate_auto, initial_momentum, final_momentum,
@@ -4774,7 +4774,7 @@ extern "C" int fastembedr_cuda_opentsne_fft_from_device_knn_float(const int* ind
 }
 
 template <typename DistanceT>
-int fastembedr_cuda_exact_tsne_from_knn_impl(const int* indices,
+int kodama_cuda_exact_tsne_from_knn_impl(const int* indices,
                                                    const DistanceT* distances,
                                                    const float* init,
                                                    int n,
@@ -4990,7 +4990,7 @@ int fastembedr_cuda_exact_tsne_from_knn_impl(const int* indices,
   return 0;
 }
 
-extern "C" int fastembedr_cuda_exact_tsne_from_knn(const int* indices,
+extern "C" int kodama_cuda_exact_tsne_from_knn(const int* indices,
                                                    const double* distances,
                                                    const float* init,
                                                    int n,
@@ -5006,14 +5006,14 @@ extern "C" int fastembedr_cuda_exact_tsne_from_knn(const int* indices,
                                                    unsigned int seed,
                                                    int index_offset,
                                                    float* out) {
-  return fastembedr_cuda_exact_tsne_from_knn_impl<double>(
+  return kodama_cuda_exact_tsne_from_knn_impl<double>(
     indices, distances, init, n, k, n_epochs, perplexity, learning_rate,
     stop_lying_iter, mom_switch_iter, momentum, final_momentum,
     exaggeration_factor, seed, index_offset, out
   );
 }
 
-extern "C" int fastembedr_cuda_embed(const int* neighbors,
+extern "C" int kodama_cuda_embed(const int* neighbors,
                                       const float* weights,
                                       const float* init,
                                       int n,
@@ -5122,7 +5122,7 @@ extern "C" int fastembedr_cuda_embed(const int* neighbors,
 }
 
 template <typename DistanceT>
-int fastembedr_cuda_embed_from_knn_impl(const int* indices,
+int kodama_cuda_embed_from_knn_impl(const int* indices,
                                                const DistanceT* distances,
                                                const float* init,
                                                int n,
@@ -5267,7 +5267,7 @@ int fastembedr_cuda_embed_from_knn_impl(const int* indices,
   return 0;
 }
 
-extern "C" int fastembedr_cuda_embed_from_knn(const int* indices,
+extern "C" int kodama_cuda_embed_from_knn(const int* indices,
                                                const double* distances,
                                                const float* init,
                                                int n,
@@ -5281,7 +5281,7 @@ extern "C" int fastembedr_cuda_embed_from_knn(const int* indices,
                                                unsigned int seed,
                                                int index_offset,
                                                float* out) {
-  return fastembedr_cuda_embed_from_knn_impl<double>(
+  return kodama_cuda_embed_from_knn_impl<double>(
     indices, distances, init, n, k, objective, n_epochs,
     negative_sample_rate, learning_rate, a, b, seed, index_offset, out
   );

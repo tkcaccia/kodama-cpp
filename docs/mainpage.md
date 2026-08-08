@@ -30,5 +30,5 @@ diagnostics.
 - `KODAMAMatrixFromGraph`: alternative input when only a KNN graph is available.
 - `BuildResidentIVFIndex` and `SearchResidentIVFIndex`: explicit CUDA/Metal
   ownership for repeated searches without rebuilding the IVF index.
-- `KODAMAKNNGraph`, `PCA`, `KODAMAUMAP_CPU/CUDA`, and
-  `KODAMAOpenTSNE_CPU/CUDA`: graph and visualization primitives.
+- `KODAMAKNNGraph`, `PCA`, `KODAMAUMAP_CPU/CUDA/METAL`, and
+  `KODAMAOpenTSNE_CPU/CUDA/METAL`: graph and visualization primitives.

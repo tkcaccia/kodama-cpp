@@ -218,6 +218,10 @@ MetalPipelines& pipelines() {
   std::call_once(once, [&]() {
     try {
       value.device = MTLCreateSystemDefaultDevice();
+      if (value.device == nil) {
+        NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
+        if (devices.count != 0) value.device = devices.firstObject;
+      }
       if (value.device == nil) throw std::runtime_error("No Apple Metal device is available.");
       value.queue = [value.device newCommandQueue];
       MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
@@ -364,7 +368,7 @@ ScalingResult preprocessing_scaling_metal(
   id<MTLBuffer> d_center = buffer(state, centers.size() * sizeof(float), centers.data());
   id<MTLBuffer> d_scale = buffer(state, scales.size() * sizeof(float), scales.data());
   id<MTLCommandBuffer> command = [state.queue commandBuffer];
-  const std::uint32_t tr = train_rows, te = test_rows, cols = variables;
+  const std::uint32_t tr = train_rows, cols = variables;
   if (options.method != ScalingMethod::None) {
     const std::uint32_t method = static_cast<std::uint32_t>(options.method);
     encode(command, state.statistics, {d_train, d_center, d_scale}, {tr, cols, method}, variables);

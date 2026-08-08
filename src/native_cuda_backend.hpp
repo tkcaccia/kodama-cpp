@@ -58,12 +58,33 @@ class NativeCudaIVFIndex {
     const std::vector<int>&,
     NativeCudaIVFStats*
   );
+  friend NativeKNNResult native_cuda_ivf_index_filtered_search(
+    const NativeCudaIVFIndex&,
+    const std::vector<float>&,
+    int,
+    int,
+    int,
+    double,
+    const std::vector<int>&,
+    const std::vector<int>&,
+    NativeCudaIVFStats*
+  );
   friend NativeKNNResult native_cuda_ivf_index_self_search(
     const NativeCudaIVFIndex&,
     int,
     int,
     double,
     const std::vector<int>&,
+    NativeCudaIVFStats*
+  );
+  friend void native_cuda_ivf_index_self_search_device(
+    const NativeCudaIVFIndex&,
+    int,
+    int,
+    double,
+    const std::vector<int>&,
+    int*,
+    float*,
     NativeCudaIVFStats*
   );
 };
@@ -100,6 +121,42 @@ class NativeCudaKNNVoteGraph {
     const NativeCudaKNNVoteGraph&,
     const std::vector<int>&,
     int
+  );
+  friend void native_cuda_knn_vote_predict_into(
+    const NativeCudaKNNVoteGraph&,
+    const std::vector<int>&,
+    int,
+    std::vector<int>&
+  );
+};
+
+class NativeCudaKMeansContext {
+ public:
+  NativeCudaKMeansContext();
+  ~NativeCudaKMeansContext();
+  NativeCudaKMeansContext(NativeCudaKMeansContext&&) noexcept;
+  NativeCudaKMeansContext& operator=(NativeCudaKMeansContext&&) noexcept;
+
+  NativeCudaKMeansContext(const NativeCudaKMeansContext&) = delete;
+  NativeCudaKMeansContext& operator=(const NativeCudaKMeansContext&) = delete;
+
+  bool valid() const noexcept;
+  int rows() const noexcept;
+  int dimensions() const noexcept;
+  int lanes() const noexcept;
+  std::uint64_t input_uploads() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  explicit NativeCudaKMeansContext(std::unique_ptr<Impl> impl);
+
+  friend NativeCudaKMeansContext native_cuda_build_kmeans_context(
+    const std::vector<float>&, int, int, int, int, int
+  );
+  friend std::vector<int> native_cuda_kmeans_context_labels(
+    NativeCudaKMeansContext&, int, int, int, std::uint64_t
   );
 };
 
@@ -153,12 +210,40 @@ NativeKNNResult native_cuda_ivf_index_search(
   NativeCudaIVFStats* stats = nullptr
 );
 
+// Queries a resident full-data index while retaining only rows selected by
+// allowed_local_ids. Non-negative entries are returned as landmark-local IDs;
+// negative entries are excluded from both the exact pilot and IVF candidates.
+NativeKNNResult native_cuda_ivf_index_filtered_search(
+  const NativeCudaIVFIndex& index,
+  const std::vector<float>& query,
+  int query_rows,
+  int k,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  const std::vector<int>& allowed_local_ids,
+  NativeCudaIVFStats* stats = nullptr
+);
+
 NativeKNNResult native_cuda_ivf_index_self_search(
   const NativeCudaIVFIndex& index,
   int k,
   int requested_nprobe,
   double target_recall,
   const std::vector<int>& query_train_indices = {},
+  NativeCudaIVFStats* stats = nullptr
+);
+
+// Executes self-search into caller-owned device buffers. Distances use the
+// native internal representation (squared L2 or negative inner product).
+void native_cuda_ivf_index_self_search_device(
+  const NativeCudaIVFIndex& index,
+  int k,
+  int requested_nprobe,
+  double target_recall,
+  const std::vector<int>& query_train_indices,
+  int* device_output_ids,
+  float* device_output_distances,
   NativeCudaIVFStats* stats = nullptr
 );
 
@@ -170,6 +255,23 @@ std::vector<int> native_cuda_kmeans_labels(
   int max_iterations,
   std::uint64_t seed,
   int device
+);
+
+NativeCudaKMeansContext native_cuda_build_kmeans_context(
+  const std::vector<float>& data,
+  int rows,
+  int dimensions,
+  int lanes,
+  int max_clusters,
+  int device
+);
+
+std::vector<int> native_cuda_kmeans_context_labels(
+  NativeCudaKMeansContext& context,
+  int lane,
+  int clusters,
+  int max_iterations,
+  std::uint64_t seed
 );
 
 NativeCudaKNNVoteGraph native_cuda_build_knn_vote_graph(
@@ -184,6 +286,13 @@ std::vector<int> native_cuda_knn_vote_predict(
   const NativeCudaKNNVoteGraph& graph,
   const std::vector<int>& labels,
   int fallback_label
+);
+
+void native_cuda_knn_vote_predict_into(
+  const NativeCudaKNNVoteGraph& graph,
+  const std::vector<int>& labels,
+  int fallback_label,
+  std::vector<int>& predictions
 );
 
 }  // namespace kodama::detail

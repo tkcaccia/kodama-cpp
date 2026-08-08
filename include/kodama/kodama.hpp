@@ -13,6 +13,10 @@
 
 namespace kodama {
 
+namespace detail {
+struct KODAMAGraphHandleAccess;
+}
+
 enum class Backend {
   Auto,
   CPU,
@@ -27,6 +31,7 @@ enum class DistanceMetric {
 };
 
 enum class KNNIndexType {
+  PrecomputedGraph,
   NativeHNSW,
   CudaExact,
   CudaIVFFlat,
@@ -63,6 +68,12 @@ enum class UMAPGraphMode {
 enum class MatrixValueType {
   Float64,
   Float32
+};
+
+enum class GraphIndexBase {
+  Auto,
+  Zero,
+  One
 };
 
 enum class NormalizationMethod {
@@ -144,6 +155,8 @@ struct PLSOptions {
   Backend backend = Backend::CPU;
   int gpu_device = 0;
   int n_threads = 1;
+  // Nonzero values scope reusable fold workspaces to one immutable data epoch.
+  std::uint64_t data_epoch = 0;
 };
 
 struct CorePLSLDAOptions {
@@ -155,6 +168,7 @@ struct CorePLSLDAOptions {
   Backend backend = Backend::CPU;
   int gpu_device = 0;
   int n_threads = 1;
+  std::uint64_t data_epoch = 0;
 
   CorePLSLDAOptions() = default;
 
@@ -167,6 +181,7 @@ struct CorePLSLDAOptions {
     backend = options.backend;
     gpu_device = options.gpu_device;
     n_threads = options.n_threads;
+    data_epoch = options.data_epoch;
     return *this;
   }
 
@@ -180,6 +195,7 @@ struct CorePLSLDAOptions {
     out.backend = backend;
     out.gpu_device = gpu_device;
     out.n_threads = n_threads;
+    out.data_epoch = data_epoch;
     return out;
   }
 };
@@ -288,6 +304,7 @@ struct NeighborGraph {
   std::vector<int> indices;
   std::vector<float> distances;
   int neighbors = 0;
+  GraphIndexBase index_base = GraphIndexBase::Auto;
 };
 
 struct ResidentIVFSearchStats {
@@ -401,17 +418,56 @@ struct KODAMAGraphOptions {
   int ivf_nlist = 0;
   int ivf_nprobe = 0;
   int gpu_device = 0;
+  bool materialize_graph = false;
+};
+
+struct KODAMAGraphResult;
+
+class KODAMAGraphHandle {
+ public:
+  struct Impl;
+
+  KODAMAGraphHandle();
+  ~KODAMAGraphHandle();
+  KODAMAGraphHandle(const KODAMAGraphHandle&) noexcept;
+  KODAMAGraphHandle& operator=(const KODAMAGraphHandle&) noexcept;
+  KODAMAGraphHandle(KODAMAGraphHandle&&) noexcept;
+  KODAMAGraphHandle& operator=(KODAMAGraphHandle&&) noexcept;
+
+  bool valid() const noexcept;
+  Backend backend() const noexcept;
+  int samples() const noexcept;
+  int neighbors() const noexcept;
+  bool host_materialized() const noexcept;
+
+ private:
+  explicit KODAMAGraphHandle(std::shared_ptr<Impl> impl);
+  std::shared_ptr<Impl> impl_;
+
+  friend struct detail::KODAMAGraphHandleAccess;
+  friend NeighborGraph KODAMAGraphMaterialize(const KODAMAGraphResult& graph);
 };
 
 struct KODAMAGraphResult {
+  std::shared_ptr<KODAMAGraphHandle> handle;
   NeighborGraph knn;
+  NeighborGraph spatial_knn;
+  std::vector<float> spatial_jitter;
   VisualizationInitResult visual_init;
   int samples = 0;
   int dimensions = 0;
+  int neighbors = 0;
+  int spatial_dimensions = 0;
   int graph_builds = 0;
+  int spatial_graph_builds = 0;
   Backend backend = Backend::CPU;
+  KNNIndexType index_type = KNNIndexType::NativeHNSW;
+  int ivf_nlist = 0;
+  int ivf_nprobe = 0;
+  double ivf_pilot_recall = 0.0;
   double input_copy_seconds = 0.0;
   double graph_seconds = 0.0;
+  double spatial_graph_seconds = 0.0;
   double visual_init_seconds = 0.0;
   double runtime_seconds = 0.0;
   std::uint64_t graph_storage_bytes = 0;
@@ -436,6 +492,7 @@ struct KODAMAMatrixOptions {
   bool progress = false;
   bool apply_kodama_dissimilarity = true;
   bool compute_visual_init = true;
+  bool materialize_graph = false;
   GraphFeatureMode graph_feature_mode = GraphFeatureMode::LaplacianSelfTuning;
   int graph_feature_components = 0;
   int graph_feature_steps = 3;
@@ -458,15 +515,29 @@ struct KODAMAMatrixResult {
   int runs = 0;
   int samples = 0;
   int cycles = 0;
+  int res_constrain_rows = 0;
   int effective_landmarks = 0;
   int graph_builds = 0;
+  int spatial_graph_builds = 0;
   int n_threads = 1;
   Backend backend = Backend::CPU;
+  Backend graph_backend = Backend::CPU;
+  Backend optimization_backend = Backend::CPU;
+  Backend dissimilarity_backend = Backend::CPU;
+  KNNIndexType graph_index_type = KNNIndexType::NativeHNSW;
+  int graph_ivf_nlist = 0;
+  int graph_ivf_nprobe = 0;
+  double graph_ivf_pilot_recall = 0.0;
   bool has_visual_init = false;
   bool knn_is_kodama_corrected = false;
   bool gpu_auto_workers = false;
   bool gpu_scheduler_enabled = false;
   int gpu_scheduler_lanes = 0;
+  std::uint64_t kmeans_input_uploads = 0;
+  std::uint64_t projection_sparse_uploads = 0;
+  std::uint64_t projection_full_downloads = 0;
+  std::uint64_t result_row_uploads = 0;
+  std::uint64_t result_matrix_downloads = 0;
   int gpu_sm_count = 0;
   double gpu_free_memory_mb = 0.0;
   double gpu_total_memory_mb = 0.0;
@@ -533,6 +604,9 @@ struct EmbeddingResult {
   Backend backend = Backend::CPU;
   std::string initialization;
   Backend initialization_backend = Backend::Auto;
+  std::string optimizer;
+  std::size_t graph_edges = 0;
+  float graph_max_weight = 0.0f;
   double runtime_seconds = 0.0;
 };
 
@@ -796,6 +870,24 @@ CoreResult CoreKNNGraph_CPU(
   const CoreOptions& options = CoreOptions()
 );
 
+CoreResult CoreKNNGraph_CUDA(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& initial_clbest,
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const CoreOptions& options = CoreOptions()
+);
+
+CoreResult CoreKNNGraph_METAL(
+  const NeighborGraph& graph,
+  int samples,
+  const std::vector<int>& initial_clbest,
+  const std::vector<int>& constrain = std::vector<int>(),
+  const std::vector<int>& fixed = std::vector<int>(),
+  const CoreOptions& options = CoreOptions()
+);
+
 CoreResult Core(
   MatrixView x,
   const std::vector<int>& clbest,
@@ -841,8 +933,20 @@ KODAMAGraphResult KODAMAGraph_CPU(
   const KODAMAGraphOptions& options = KODAMAGraphOptions()
 );
 
+KODAMAGraphResult KODAMAGraph_CPU(
+  MatrixView x,
+  MatrixView spatial,
+  const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
 KODAMAGraphResult KODAMAGraph_CUDA(
   MatrixView x,
+  const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
+KODAMAGraphResult KODAMAGraph_CUDA(
+  MatrixView x,
+  MatrixView spatial,
   const KODAMAGraphOptions& options = KODAMAGraphOptions()
 );
 
@@ -851,8 +955,23 @@ KODAMAGraphResult KODAMAGraph_METAL(
   const KODAMAGraphOptions& options = KODAMAGraphOptions()
 );
 
+KODAMAGraphResult KODAMAGraph_METAL(
+  MatrixView x,
+  MatrixView spatial,
+  const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
 KODAMAGraphResult KODAMAGraph(
   MatrixView x,
+  const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
+/** Materialize a handle-backed graph as one-based host arrays on demand. */
+NeighborGraph KODAMAGraphMaterialize(const KODAMAGraphResult& graph);
+
+KODAMAGraphResult KODAMAGraph(
+  MatrixView x,
+  MatrixView spatial,
   const KODAMAGraphOptions& options = KODAMAGraphOptions()
 );
 
@@ -985,6 +1104,17 @@ EmbeddingResult KODAMAUMAP_CPU(
   const UMAPOptions& options = UMAPOptions()
 );
 
+EmbeddingResult KODAMAUMAP_METAL(
+  const NeighborGraph& graph,
+  const UMAPOptions& options = UMAPOptions()
+);
+
+EmbeddingResult KODAMAUMAP_METAL(
+  const NeighborGraph& graph,
+  MatrixView raw_data,
+  const UMAPOptions& options = UMAPOptions()
+);
+
 EmbeddingResult KODAMAUMAP_CPU(
   const NeighborGraph& graph,
   MatrixView raw_data,
@@ -1008,6 +1138,17 @@ EmbeddingResult KODAMAOpenTSNE_CPU(
 );
 
 EmbeddingResult KODAMAOpenTSNE_CPU(
+  const NeighborGraph& graph,
+  MatrixView raw_data,
+  const OpenTSNEOptions& options = OpenTSNEOptions()
+);
+
+EmbeddingResult KODAMAOpenTSNE_METAL(
+  const NeighborGraph& graph,
+  const OpenTSNEOptions& options = OpenTSNEOptions()
+);
+
+EmbeddingResult KODAMAOpenTSNE_METAL(
   const NeighborGraph& graph,
   MatrixView raw_data,
   const OpenTSNEOptions& options = OpenTSNEOptions()

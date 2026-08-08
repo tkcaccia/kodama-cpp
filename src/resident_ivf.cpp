@@ -43,6 +43,9 @@ namespace {
 
 Backend resolve_resident_backend(Backend backend, int gpu_device) {
   if (backend != Backend::Auto) return backend;
+#if !defined(KODAMA_ENABLE_CUDA)
+  (void)gpu_device;
+#endif
 #if defined(KODAMA_ENABLE_CUDA)
   if (detail::native_cuda_backend_available(gpu_device)) return Backend::CUDA;
 #endif
@@ -58,6 +61,7 @@ NeighborGraph public_graph(
 ) {
   NeighborGraph graph;
   graph.neighbors = native.neighbors;
+  graph.index_base = GraphIndexBase::One;
   graph.indices = native.indices;
   graph.distances.resize(native.distances.size());
   for (std::size_t i = 0; i < graph.indices.size(); ++i) {
@@ -67,6 +71,7 @@ NeighborGraph public_graph(
   return graph;
 }
 
+#if defined(KODAMA_ENABLE_CUDA) || defined(KODAMA_ENABLE_METAL)
 void set_stats(
   ResidentIVFSearchStats* output,
   Backend backend,
@@ -82,6 +87,7 @@ void set_stats(
   output->pilot_recall = pilot_recall;
   output->search_seconds = seconds;
 }
+#endif
 
 }  // namespace
 
@@ -111,7 +117,7 @@ ResidentIVFIndex BuildResidentIVFIndex(
   MatrixView train,
   const KNNOptions& options
 ) {
-  if (train.rows < 1 || train.cols < 1) {
+  if (train.data == nullptr || train.rows < 1 || train.cols < 1) {
     throw std::invalid_argument("BuildResidentIVFIndex requires a non-empty matrix.");
   }
   const Backend backend = resolve_resident_backend(options.backend, options.gpu_device);
@@ -173,10 +179,12 @@ NeighborGraph SearchResidentIVFIndex(
   int k,
   ResidentIVFSearchStats* stats
 ) {
+  (void)stats;
   if (!index.valid()) throw std::invalid_argument("Resident IVF index is empty.");
-  if (query.rows < 1 || query.cols < 1) {
+  if (query.data == nullptr || query.rows < 1 || query.cols < 1) {
     throw std::invalid_argument("Resident IVF search requires a non-empty query matrix.");
   }
+  if (k < 1) throw std::invalid_argument("Resident IVF search requires k >= 1.");
   const ResidentIVFIndex::Impl& impl = *index.impl_;
   if (query.cols != static_cast<std::size_t>(impl.dimensions)) {
     throw std::invalid_argument("Resident IVF query dimensions do not match the index.");
@@ -242,7 +250,9 @@ NeighborGraph SearchResidentIVFIndexSelf(
   bool exclude_self,
   ResidentIVFSearchStats* stats
 ) {
+  (void)stats;
   if (!index.valid()) throw std::invalid_argument("Resident IVF index is empty.");
+  if (k < 1) throw std::invalid_argument("Resident IVF self-search requires k >= 1.");
   const ResidentIVFIndex::Impl& impl = *index.impl_;
   std::vector<int> exclusions;
   if (exclude_self) {

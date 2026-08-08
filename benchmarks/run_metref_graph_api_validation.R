@@ -90,12 +90,12 @@ run_one <- function(classifier, input_mode) {
   if (input_mode == "raw") {
     call$data <- x
   } else if (input_mode == "prepared") {
-    call$data <- prepared
+    call$graph <- prepared
   } else if (input_mode == "prepared_plus_raw") {
-    call$data <- prepared
-    call$raw.data <- x
+    call$data <- x
+    call$graph <- prepared
   } else if (input_mode == "bare") {
-    call$data <- bare
+    call$graph <- bare
   } else {
     stop("Unknown input mode.")
   }

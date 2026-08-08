@@ -290,6 +290,7 @@ NormalizationResult Normalization_CUDA(
   return detail::preprocessing_normalization_cuda(copy_float32(train), static_cast<int>(train.rows),
     copy_float32(test), static_cast<int>(test.rows), static_cast<int>(train.cols), options);
 #else
+  (void)options;
   throw std::runtime_error("The CUDA backend is not available in this build.");
 #endif
 }
@@ -306,6 +307,7 @@ NormalizationResult Normalization_METAL(
   return detail::preprocessing_normalization_metal(copy_float32(train), static_cast<int>(train.rows),
     copy_float32(test), static_cast<int>(test.rows), static_cast<int>(train.cols), options);
 #else
+  (void)options;
   throw std::runtime_error("The Metal backend is not available in this build.");
 #endif
 }
@@ -357,6 +359,7 @@ ScalingResult Scaling_CUDA(
   return detail::preprocessing_scaling_cuda(copy_float32(train), static_cast<int>(train.rows),
     copy_float32(test), static_cast<int>(test.rows), static_cast<int>(train.cols), options);
 #else
+  (void)options;
   throw std::runtime_error("The CUDA backend is not available in this build.");
 #endif
 }
@@ -373,6 +376,7 @@ ScalingResult Scaling_METAL(
   return detail::preprocessing_scaling_metal(copy_float32(train), static_cast<int>(train.rows),
     copy_float32(test), static_cast<int>(test.rows), static_cast<int>(train.cols), options);
 #else
+  (void)options;
   throw std::runtime_error("The Metal backend is not available in this build.");
 #endif
 }

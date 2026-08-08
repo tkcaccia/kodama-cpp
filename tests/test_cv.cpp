@@ -6,14 +6,21 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <stdexcept>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "kodama/kodama.hpp"
+#include "../src/native_knn.hpp"
 #include "../src/spatial_grid_knn.hpp"
+#if defined(KODAMA_ENABLE_CUDA)
+#include "../src/kodama_matrix_cuda.hpp"
+#include "../src/native_cuda_backend.hpp"
+#endif
 
 namespace {
 
@@ -76,6 +83,606 @@ void require_close(
     if (std::isnan(left[i]) && std::isnan(right[i])) continue;
     if (std::abs(left[i] - right[i]) > tolerance) throw std::runtime_error(message);
   }
+}
+
+template <typename Exception, typename Callable>
+void require_throws(Callable&& callable, const char* message) {
+  bool threw = false;
+  try {
+    callable();
+  } catch (const Exception&) {
+    threw = true;
+  }
+  require(threw, message);
+}
+
+void test_public_string_contracts() {
+  const auto require_name = [](const char* actual, const char* expected) {
+    require(std::string(actual) == expected, "Public enum string contract changed.");
+  };
+
+  require_name(kodama::to_string(kodama::Backend::Auto), "auto");
+  require_name(kodama::to_string(kodama::Backend::CPU), "cpu");
+  require_name(kodama::to_string(kodama::Backend::CUDA), "cuda");
+  require_name(kodama::to_string(kodama::Backend::Metal), "metal");
+  require_name(kodama::to_string(static_cast<kodama::Backend>(-1)), "unknown");
+
+  require_name(kodama::to_string(kodama::DistanceMetric::Cosine), "cosine");
+  require_name(kodama::to_string(kodama::DistanceMetric::InnerProduct), "inner_product");
+  require_name(kodama::to_string(kodama::DistanceMetric::Euclidean), "euclidean");
+  require_name(kodama::to_string(static_cast<kodama::DistanceMetric>(-1)), "unknown");
+
+  require_name(kodama::to_string(kodama::KNNIndexType::PrecomputedGraph), "precomputed_graph");
+  require_name(kodama::to_string(kodama::KNNIndexType::NativeHNSW), "native_hnsw");
+  require_name(kodama::to_string(kodama::KNNIndexType::CudaExact), "cuda_exact");
+  require_name(kodama::to_string(kodama::KNNIndexType::CudaIVFFlat), "cuda_ivf_flat");
+  require_name(kodama::to_string(kodama::KNNIndexType::MetalExact), "metal_exact");
+  require_name(kodama::to_string(kodama::KNNIndexType::MetalIVFFlat), "metal_ivf_flat");
+  require_name(kodama::to_string(static_cast<kodama::KNNIndexType>(-1)), "unknown");
+
+  require_name(kodama::to_string(kodama::PLSMode::PLS_DA), "pls_da");
+  require_name(kodama::to_string(kodama::PLSMode::PLS_LDA), "pls_lda");
+  require_name(kodama::to_string(static_cast<kodama::PLSMode>(-1)), "unknown");
+
+  require_name(kodama::to_string(kodama::CoreClassifier::PLS_LDA), "pls_lda");
+  require_name(kodama::to_string(kodama::CoreClassifier::KNN), "knn");
+  require_name(kodama::to_string(static_cast<kodama::CoreClassifier>(-1)), "unknown");
+
+  require_name(kodama::to_string(kodama::GraphWeightType::SNN), "snn");
+  require_name(kodama::to_string(kodama::GraphWeightType::Distance), "distance");
+  require_name(kodama::to_string(kodama::GraphWeightType::Adaptive), "adaptive");
+  require_name(kodama::to_string(kodama::GraphWeightType::Binary), "binary");
+  require_name(kodama::to_string(static_cast<kodama::GraphWeightType>(-1)), "unknown");
+
+  require_name(
+    kodama::to_string(kodama::GraphFeatureMode::LaplacianSelfTuning),
+    "laplacian_self_tuning"
+  );
+  require_name(kodama::to_string(static_cast<kodama::GraphFeatureMode>(-1)), "unknown");
+}
+
+void test_public_error_contracts() {
+  const std::vector<float> values = {
+    0.0f, 0.0f,
+    1.0f, 0.0f,
+    0.0f, 1.0f,
+    1.0f, 1.0f
+  };
+  const kodama::MatrixView view{values.data(), 4, 2};
+  const kodama::MatrixView two_rows{values.data(), 2, 2};
+  const std::vector<int> labels = {1, 1, 2, 2};
+
+  kodama::KODAMAMatrixOptions matrix_options;
+  matrix_options.runs = 1;
+  matrix_options.cycles = 0;
+  matrix_options.landmarks = 3;
+  matrix_options.graph_neighbors = 2;
+  matrix_options.compute_visual_init = false;
+  matrix_options.materialize_graph = false;
+
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(
+      view, std::vector<int>{1}, {}, {}, matrix_options
+    );
+  }, "KODAMAMatrix accepted mismatched starting labels.");
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(two_rows, {}, {}, {}, matrix_options);
+  }, "KODAMAMatrix accepted fewer than three rows.");
+
+  kodama::KODAMAMatrixOptions invalid_runs = matrix_options;
+  invalid_runs.runs = 0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(view, {}, {}, {}, invalid_runs);
+  }, "KODAMAMatrix accepted zero M runs.");
+
+  kodama::KODAMAMatrixOptions invalid_cycles = matrix_options;
+  invalid_cycles.cycles = -1;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(view, {}, {}, {}, invalid_cycles);
+  }, "KODAMAMatrix accepted a negative Tcycle count.");
+
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(view, {}, std::vector<int>{1}, {}, matrix_options);
+  }, "KODAMAMatrix accepted mismatched constrain metadata.");
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(view, {}, {}, std::vector<int>{1}, matrix_options);
+  }, "KODAMAMatrix accepted mismatched fixed metadata.");
+
+  kodama::KODAMAMatrixOptions invalid_spatial = matrix_options;
+  invalid_spatial.spatial.assign(8, 0.0f);
+  invalid_spatial.spatial_cols = 0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(view, {}, {}, {}, invalid_spatial);
+  }, "KODAMAMatrix accepted spatial data without dimensions.");
+  invalid_spatial.spatial_cols = 2;
+  invalid_spatial.spatial.resize(7);
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(view, {}, {}, {}, invalid_spatial);
+  }, "KODAMAMatrix accepted mismatched spatial storage.");
+  invalid_spatial.spatial.resize(8);
+  invalid_spatial.spatial_resolution = 0.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix_CPU(view, {}, {}, {}, invalid_spatial);
+  }, "KODAMAMatrix accepted a non-positive spatial resolution.");
+
+  const kodama::ResidentIVFIndex empty_index;
+  require(!empty_index.valid(), "A default resident IVF index must be empty.");
+  require(empty_index.backend() == kodama::Backend::CPU &&
+          empty_index.metric() == kodama::DistanceMetric::Euclidean,
+          "Default resident IVF backend or metric metadata is inconsistent.");
+  require(empty_index.rows() == 0 && empty_index.dimensions() == 0 &&
+          empty_index.nlist() == 0 && empty_index.build_seconds() == 0.0,
+          "Default resident IVF metadata is inconsistent.");
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::SearchResidentIVFIndex(empty_index, view, 2);
+  }, "Resident IVF search accepted an empty index.");
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::SearchResidentIVFIndexSelf(empty_index, 2);
+  }, "Resident IVF self-search accepted an empty index.");
+  kodama::KNNOptions cpu_ivf;
+  cpu_ivf.backend = kodama::Backend::CPU;
+  const kodama::MatrixView null_ivf_view{static_cast<const float*>(nullptr), 4, 2};
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::BuildResidentIVFIndex(null_ivf_view, cpu_ivf);
+  }, "Resident IVF construction accepted a null matrix pointer.");
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::BuildResidentIVFIndex(view, cpu_ivf);
+  }, "Resident IVF construction accepted the CPU backend.");
+#if !defined(KODAMA_ENABLE_CUDA)
+  kodama::KNNOptions unavailable_cuda_ivf = cpu_ivf;
+  unavailable_cuda_ivf.backend = kodama::Backend::CUDA;
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::BuildResidentIVFIndex(view, unavailable_cuda_ivf);
+  }, "Resident IVF construction silently accepted unavailable CUDA.");
+#endif
+#if !defined(KODAMA_ENABLE_METAL)
+  kodama::KNNOptions unavailable_metal_ivf = cpu_ivf;
+  unavailable_metal_ivf.backend = kodama::Backend::Metal;
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::BuildResidentIVFIndex(view, unavailable_metal_ivf);
+  }, "Resident IVF construction silently accepted unavailable Metal.");
+#endif
+
+  kodama::NeighborGraph graph;
+  graph.neighbors = 2;
+  graph.index_base = kodama::GraphIndexBase::One;
+  graph.indices = {
+    2, 3,
+    1, 4,
+    1, 4,
+    2, 3
+  };
+  graph.distances = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+
+  kodama::KODAMAGraphOptions dispatched_graph_options;
+  dispatched_graph_options.neighbors = 2;
+  dispatched_graph_options.n_threads = 2;
+  dispatched_graph_options.metric = kodama::DistanceMetric::Cosine;
+  dispatched_graph_options.backend = kodama::Backend::CPU;
+  dispatched_graph_options.materialize_graph = true;
+  const kodama::KODAMAGraphResult dispatched_graph =
+    kodama::KODAMAGraph(view, dispatched_graph_options);
+  require(dispatched_graph.samples == 4 && dispatched_graph.dimensions == 2 &&
+          dispatched_graph.backend == kodama::Backend::CPU &&
+          dispatched_graph.knn.indices.size() == 8,
+          "Generic KODAMAGraph did not dispatch to the CPU cosine path.");
+
+  kodama::KODAMAMatrixOptions dispatched_matrix_options = matrix_options;
+  dispatched_matrix_options.backend = kodama::Backend::CPU;
+  const std::vector<int> orchestration_constrain = {10, 10, 20, 20};
+  const kodama::KODAMAMatrixResult dispatched_matrix = kodama::KODAMAMatrix(
+    view, labels, orchestration_constrain, {}, dispatched_matrix_options
+  );
+  require(dispatched_matrix.backend == kodama::Backend::CPU &&
+          dispatched_matrix.samples == 4 && dispatched_matrix.runs == 1,
+          "Generic KODAMAMatrix did not dispatch to CPU.");
+
+  const kodama::KODAMAMatrixResult dispatched_graph_data =
+    kodama::KODAMAMatrixFromGraphData(
+      view, graph, labels, orchestration_constrain, {}, dispatched_matrix_options
+    );
+  require(dispatched_graph_data.backend == kodama::Backend::CPU &&
+          dispatched_graph_data.samples == 4 &&
+          dispatched_graph_data.graph_builds == 0,
+          "Generic graph-and-data KODAMAMatrix did not dispatch to CPU.");
+  const kodama::KODAMAMatrixResult dispatched_graph_only =
+    kodama::KODAMAMatrixFromGraph(
+      graph, 4, labels, orchestration_constrain, {}, dispatched_matrix_options
+    );
+  require(dispatched_graph_only.backend == kodama::Backend::CPU &&
+          dispatched_graph_only.samples == 4 &&
+          dispatched_graph_only.graph_builds == 0,
+          "Generic graph-only KODAMAMatrix did not dispatch to CPU.");
+
+  kodama::KODAMAGraphResult graph_result;
+  graph_result.samples = 4;
+  graph_result.dimensions = 2;
+  graph_result.backend = kodama::Backend::CPU;
+  graph_result.knn = graph;
+  const kodama::KODAMAMatrixResult graph_data_without_init = kodama::KODAMAMatrix(
+    view, graph_result, labels, orchestration_constrain, {}, dispatched_matrix_options
+  );
+  require(!graph_data_without_init.has_visual_init,
+          "Graph-and-data KODAMAMatrix ignored compute_visual_init=false.");
+  const kodama::KODAMAMatrixResult graph_only_without_init = kodama::KODAMAMatrix(
+    graph_result, labels, orchestration_constrain, {}, dispatched_matrix_options
+  );
+  require(!graph_only_without_init.has_visual_init,
+          "Graph-only KODAMAMatrix invented an unavailable raw-data initialization.");
+
+  kodama::KODAMAGraphResult mismatched_graph = graph_result;
+  mismatched_graph.samples = 3;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix(
+      view, mismatched_graph, labels, orchestration_constrain, {}, dispatched_matrix_options
+    );
+  }, "Graph-and-data KODAMAMatrix accepted a mismatched sample count.");
+  mismatched_graph = graph_result;
+  mismatched_graph.dimensions = 1;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix(
+      view, mismatched_graph, labels, orchestration_constrain, {}, dispatched_matrix_options
+    );
+  }, "Graph-and-data KODAMAMatrix accepted a mismatched feature count.");
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAMatrix(
+      kodama::KODAMAGraphResult{}, labels, orchestration_constrain, {}, dispatched_matrix_options
+    );
+  }, "Graph-only KODAMAMatrix accepted an empty prepared graph.");
+
+  require_throws<std::invalid_argument>([&] {
+    kodama::NeighborGraph empty;
+    kodama::KODAMADissimilarityInPlace(empty, labels, 1, 4);
+  }, "KODAMA dissimilarity accepted an empty graph.");
+  require_throws<std::invalid_argument>([&] {
+    kodama::NeighborGraph inconsistent = graph;
+    inconsistent.distances.pop_back();
+    kodama::KODAMADissimilarityInPlace(inconsistent, labels, 1, 4);
+  }, "KODAMA dissimilarity accepted inconsistent graph arrays.");
+  require_throws<std::invalid_argument>([&] {
+    kodama::KODAMADissimilarityInPlace(graph, std::vector<int>{1}, 1, 4);
+  }, "KODAMA dissimilarity accepted a mismatched label matrix.");
+
+  kodama::NeighborGraph malformed = graph;
+  malformed.neighbors = 0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(malformed);
+  }, "UMAP accepted a graph with zero neighbors.");
+  malformed = graph;
+  malformed.distances.pop_back();
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(malformed);
+  }, "openTSNE accepted inconsistent graph arrays.");
+
+  kodama::UMAPOptions umap;
+  umap.n_epochs = -1;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(graph, umap);
+  }, "UMAP accepted negative epochs.");
+  umap = kodama::UMAPOptions();
+  umap.min_dist = std::numeric_limits<double>::quiet_NaN();
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(graph, umap);
+  }, "UMAP accepted non-finite min_dist.");
+  umap = kodama::UMAPOptions();
+  umap.negative_sample_rate = -1;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(graph, umap);
+  }, "UMAP accepted a negative sampling rate.");
+  umap = kodama::UMAPOptions();
+  umap.learning_rate = 0.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(graph, umap);
+  }, "UMAP accepted a zero learning rate.");
+  umap = kodama::UMAPOptions();
+  umap.repulsion_strength = 0.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(graph, umap);
+  }, "UMAP accepted zero repulsion.");
+  umap = kodama::UMAPOptions();
+  umap.spectral_n_iter = 0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(graph, umap);
+  }, "UMAP accepted zero spectral iterations.");
+  umap = kodama::UMAPOptions();
+  umap.n_threads = 0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(graph, umap);
+  }, "UMAP accepted zero threads.");
+  umap = kodama::UMAPOptions();
+  umap.n_components = 3;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAUMAP_CPU(graph, umap);
+  }, "CPU UMAP accepted an unsupported component count.");
+
+  kodama::OpenTSNEOptions tsne;
+  tsne.perplexity = 1.0;
+  tsne.n_neighbors = 2;
+  tsne.early_exaggeration_iter = 1;
+  tsne.n_iter = 1;
+  tsne.perplexity = 0.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "openTSNE accepted zero perplexity.");
+  tsne.perplexity = 100.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "openTSNE accepted perplexity larger than the graph.");
+  tsne.perplexity = 1.0;
+  tsne.theta = -0.1;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "openTSNE accepted theta outside [0, 1].");
+  tsne.theta = 0.5;
+  tsne.early_exaggeration_iter = 0;
+  tsne.n_iter = 0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "openTSNE accepted zero total iterations.");
+  tsne.early_exaggeration_iter = 1;
+  tsne.n_iter = 1;
+  tsne.early_exaggeration = 0.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "openTSNE accepted zero early exaggeration.");
+  tsne.early_exaggeration = 12.0;
+  tsne.learning_rate_auto = false;
+  tsne.learning_rate = 0.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "openTSNE accepted a non-automatic zero learning rate.");
+  tsne.learning_rate_auto = true;
+  tsne.initial_momentum = -1.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "openTSNE accepted negative momentum.");
+  tsne.initial_momentum = 0.8;
+  tsne.min_gain = 0.0;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "openTSNE accepted zero min_gain.");
+  tsne.min_gain = 0.01;
+  tsne.n_components = 4;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::KODAMAOpenTSNE_CPU(graph, tsne);
+  }, "CPU openTSNE accepted an unsupported component count.");
+
+  kodama::CoreOptions zero_cycle_core;
+  zero_cycle_core.classifier = kodama::CoreClassifier::KNN;
+  zero_cycle_core.cycles = 0;
+  zero_cycle_core.knn.cv.folds = 2;
+  zero_cycle_core.knn.k = 1;
+  const kodama::CoreResult zero_cycle = kodama::CoreKNNGraph_CPU(
+    graph, 4, labels, {}, {}, zero_cycle_core
+  );
+  require(zero_cycle.clbest == labels && zero_cycle.cycles_completed == 0 &&
+          zero_cycle.vect_acc.empty() && zero_cycle.vect_score.empty(),
+          "Zero-cycle Core changed labels or reported a completed transition.");
+
+  kodama::CoreOptions negative_cycle_core = zero_cycle_core;
+  negative_cycle_core.cycles = -1;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::CoreKNNGraph_CPU(
+      graph, 4, labels, {}, {}, negative_cycle_core
+    );
+  }, "Core accepted a negative cycle count.");
+
+  kodama::CoreOptions fixed_core = zero_cycle_core;
+  fixed_core.cycles = 5;
+  fixed_core.seed = 19;
+  fixed_core.evolutionary_search = true;
+  fixed_core.guarded_diversity = true;
+  fixed_core.auto_class_coarsening = true;
+  fixed_core.many_to_one_absorption = true;
+  fixed_core.adaptive_proposal_size = false;
+  const std::vector<int> all_fixed(4, 1);
+  const kodama::CoreResult fixed_result = kodama::CoreKNNGraph_CPU(
+    graph, 4, labels, {}, all_fixed, fixed_core
+  );
+  require(fixed_result.clbest == labels && fixed_result.cycles_completed >= 1,
+          "All-fixed Core modified an immutable label.");
+  require(fixed_result.vect_acc.size() == 5 && fixed_result.vect_score.size() == 5,
+          "All-fixed Core did not retain its complete trace allocation.");
+
+  kodama::CoreOptions grouped_core = fixed_core;
+  grouped_core.seed = 23;
+  grouped_core.adaptive_proposal_size = true;
+  const std::vector<int> grouped_labels = {1, 1, 2, 2};
+  const std::vector<int> grouped_constrain = {10, 10, 20, 20};
+  const kodama::CoreResult grouped_result = kodama::CoreKNNGraph_CPU(
+    graph, 4, grouped_labels, grouped_constrain, {}, grouped_core
+  );
+  require(grouped_result.clbest[0] == grouped_result.clbest[1] &&
+          grouped_result.clbest[2] == grouped_result.clbest[3],
+          "Core split an atomic constrained group.");
+  require(std::isfinite(grouped_result.accbest) &&
+          std::isfinite(grouped_result.scorebest),
+          "Core state-machine scores are not finite.");
+
+  const kodama::CoreResult grouped_repeat = kodama::CoreKNNGraph_CPU(
+    graph, 4, grouped_labels, grouped_constrain, {}, grouped_core
+  );
+  require(grouped_repeat.clbest == grouped_result.clbest &&
+          grouped_repeat.cvpredbest == grouped_result.cvpredbest &&
+          grouped_repeat.vect_acc == grouped_result.vect_acc &&
+          grouped_repeat.vect_score == grouped_result.vect_score &&
+          grouped_repeat.cycles_completed == grouped_result.cycles_completed,
+          "Core stochastic evolution is not reproducible for a fixed seed.");
+  for (int cycle = 0; cycle < grouped_result.cycles_completed; ++cycle) {
+    require(grouped_result.vect_acc[static_cast<std::size_t>(cycle)] >= 0.0 &&
+            grouped_result.vect_score[static_cast<std::size_t>(cycle)] >= 0.0,
+            "Core completed trace contains a sentinel value.");
+    if (cycle > 0) {
+      require(grouped_result.vect_acc[static_cast<std::size_t>(cycle)] >=
+                grouped_result.vect_acc[static_cast<std::size_t>(cycle - 1)] &&
+              grouped_result.vect_score[static_cast<std::size_t>(cycle)] >=
+                grouped_result.vect_score[static_cast<std::size_t>(cycle - 1)],
+              "Core best-state trace is not monotone.");
+    }
+  }
+
+  kodama::CoreOptions guarded_single_class = fixed_core;
+  guarded_single_class.cycles = 5;
+  guarded_single_class.auto_class_coarsening = false;
+  guarded_single_class.many_to_one_absorption = false;
+  const std::vector<int> single_class(4, 7);
+  const kodama::CoreResult single_class_result = kodama::CoreKNNGraph_CPU(
+    graph, 4, single_class, {}, {}, guarded_single_class
+  );
+  require(single_class_result.success && single_class_result.cycles_completed == 1,
+          "A perfectly predictable guarded single-class state did not stop cleanly.");
+  require(std::isfinite(single_class_result.scorebest) &&
+          std::abs(single_class_result.scorebest) < 1e-12,
+          "Guarded single-class objective is not finite zero.");
+  for (std::size_t cycle = 1; cycle < single_class_result.vect_acc.size(); ++cycle) {
+    require(single_class_result.vect_acc[cycle] == -1.0 &&
+            single_class_result.vect_score[cycle] == -1.0,
+            "Core early-stop trace did not retain trailing sentinels.");
+  }
+
+  const std::vector<int> fragmented_labels = {1, 2, 3, 4};
+  for (const bool absorption : {false, true}) {
+    kodama::CoreOptions merge_guard = zero_cycle_core;
+    merge_guard.cycles = 30;
+    merge_guard.seed = absorption ? 41 : 37;
+    merge_guard.evolutionary_search = true;
+    merge_guard.guarded_diversity = true;
+    merge_guard.auto_class_coarsening = !absorption;
+    merge_guard.many_to_one_absorption = absorption;
+    const kodama::CoreResult merged = kodama::CoreKNNGraph_CPU(
+      graph, 4, fragmented_labels, {}, {}, merge_guard
+    );
+    require(std::set<int>(merged.clbest.begin(), merged.clbest.end()).size() >= 2,
+            "Core merge evolution collapsed to one active class.");
+    require(std::isfinite(merged.accbest) && std::isfinite(merged.scorebest),
+            "Core merge evolution produced a non-finite objective.");
+  }
+
+  kodama::CoreOptions shaken = fixed_core;
+  shaken.shake = true;
+  shaken.cycles = 2;
+  const kodama::CoreResult shaken_result = kodama::CoreKNNGraph_CPU(
+    graph, 4, labels, {}, all_fixed, shaken
+  );
+  require(std::isfinite(shaken_result.accbest) &&
+          std::isfinite(shaken_result.scorebest) &&
+          shaken_result.vect_acc.front() >= 0.0,
+          "Shake initialization did not replace its sentinel best state.");
+
+  kodama::PLSOptions predict_options;
+  predict_options.max_components = 2;
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::PLSLDAPredict_CPU(view, std::vector<int>{1}, view, predict_options);
+  }, "PLS-LDA prediction accepted mismatched training labels.");
+  const kodama::MatrixView mismatched_test{values.data(), 2, 1};
+  require_throws<std::invalid_argument>([&] {
+    (void)kodama::PLSLDAPredict_CPU(view, labels, mismatched_test, predict_options);
+  }, "PLS-LDA prediction accepted mismatched train/test columns.");
+  const std::vector<int> one_class_labels(4, 9);
+  require(kodama::PLSLDAPredict_CPU(
+            view, one_class_labels, view, predict_options
+          ) == one_class_labels,
+          "Single-class PLS-LDA prediction did not return the only class.");
+
+#if !defined(KODAMA_ENABLE_CUDA)
+  kodama::KNNOptions cuda_knn;
+  cuda_knn.backend = kodama::Backend::CUDA;
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KNNCV_CUDA(view, labels, {}, cuda_knn);
+  }, "KNNCV_CUDA did not reject a non-CUDA build.");
+  kodama::KODAMAGraphOptions cuda_graph;
+  cuda_graph.backend = kodama::Backend::CUDA;
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAGraph_CUDA(view, cuda_graph);
+  }, "KODAMAGraph_CUDA did not reject a non-CUDA build.");
+  kodama::KODAMAMatrixOptions cuda_matrix = matrix_options;
+  cuda_matrix.backend = kodama::Backend::CUDA;
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrix_CUDA(view, labels, {}, {}, cuda_matrix);
+  }, "KODAMAMatrix_CUDA did not reject a non-CUDA build.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAGraph(view, cuda_graph);
+  }, "Generic KODAMAGraph did not reject unavailable CUDA.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrix(view, labels, {}, {}, cuda_matrix);
+  }, "Generic KODAMAMatrix did not reject unavailable CUDA.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrixFromGraphData_CUDA(
+      view, graph, labels, {}, {}, cuda_matrix
+    );
+  }, "KODAMAMatrixFromGraphData_CUDA did not reject a non-CUDA build.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrixFromGraphData(
+      view, graph, labels, {}, {}, cuda_matrix
+    );
+  }, "Generic graph-and-data KODAMAMatrix did not reject unavailable CUDA.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrixFromGraph_CUDA(
+      graph, 4, labels, {}, {}, cuda_matrix
+    );
+  }, "KODAMAMatrixFromGraph_CUDA did not reject a non-CUDA build.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrixFromGraph(
+      graph, 4, labels, {}, {}, cuda_matrix
+    );
+  }, "Generic graph-only KODAMAMatrix did not reject unavailable CUDA.");
+  require_throws<std::runtime_error>([&] {
+    kodama::NeighborGraph candidate = graph;
+    kodama::KODAMADissimilarityInPlace(
+      candidate, labels, 1, 4, kodama::Backend::CUDA
+    );
+  }, "KODAMA dissimilarity did not reject unavailable CUDA.");
+#endif
+
+#if !defined(KODAMA_ENABLE_METAL)
+  kodama::KNNOptions metal_knn;
+  metal_knn.backend = kodama::Backend::Metal;
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KNNCV_METAL(view, labels, {}, metal_knn);
+  }, "KNNCV_METAL did not reject a non-Metal build.");
+  kodama::KODAMAGraphOptions metal_graph;
+  metal_graph.backend = kodama::Backend::Metal;
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAGraph_METAL(view, metal_graph);
+  }, "KODAMAGraph_METAL did not reject a non-Metal build.");
+  kodama::KODAMAMatrixOptions metal_matrix = matrix_options;
+  metal_matrix.backend = kodama::Backend::Metal;
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrix_METAL(view, labels, {}, {}, metal_matrix);
+  }, "KODAMAMatrix_METAL did not reject a non-Metal build.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAGraph(view, metal_graph);
+  }, "Generic KODAMAGraph did not reject unavailable Metal.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrix(view, labels, {}, {}, metal_matrix);
+  }, "Generic KODAMAMatrix did not reject unavailable Metal.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrixFromGraphData_METAL(
+      view, graph, labels, {}, {}, metal_matrix
+    );
+  }, "KODAMAMatrixFromGraphData_METAL did not reject a non-Metal build.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrixFromGraphData(
+      view, graph, labels, {}, {}, metal_matrix
+    );
+  }, "Generic graph-and-data KODAMAMatrix did not reject unavailable Metal.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrixFromGraph_METAL(
+      graph, 4, labels, {}, {}, metal_matrix
+    );
+  }, "KODAMAMatrixFromGraph_METAL did not reject a non-Metal build.");
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAMatrixFromGraph(
+      graph, 4, labels, {}, {}, metal_matrix
+    );
+  }, "Generic graph-only KODAMAMatrix did not reject unavailable Metal.");
+  require_throws<std::runtime_error>([&] {
+    kodama::NeighborGraph candidate = graph;
+    kodama::KODAMADissimilarityInPlace(
+      candidate, labels, 1, 4, kodama::Backend::Metal
+    );
+  }, "KODAMA dissimilarity did not reject unavailable Metal.");
+#endif
 }
 
 void test_preprocessing() {
@@ -362,6 +969,128 @@ void check_pls_result(
   require(result.parameters.selected_components == expected_components, "PLSCV parameters did not report requested component count.");
 }
 
+void check_graph_cluster_contracts() {
+  kodama::NeighborGraph graph;
+  graph.neighbors = 2;
+  graph.index_base = kodama::GraphIndexBase::One;
+  graph.indices = {
+    2, 3, 1, 3, 1, 2,
+    5, 6, 4, 6, 4, 5
+  };
+  graph.distances = {
+    0.10f, 0.20f, 0.10f, 0.15f, 0.20f, 0.15f,
+    0.11f, 0.21f, 0.11f, 0.16f, 0.21f, 0.16f
+  };
+
+  kodama::GraphClusterOptions options;
+  options.backend = kodama::Backend::CPU;
+  options.n_iterations = 8;
+  options.random_walk_steps = 2;
+  options.n_threads = 2;
+  for (const kodama::GraphWeightType weight_type : {
+         kodama::GraphWeightType::SNN,
+         kodama::GraphWeightType::Distance,
+         kodama::GraphWeightType::Adaptive,
+         kodama::GraphWeightType::Binary
+       }) {
+    options.weight_type = weight_type;
+    const kodama::GraphClusterResult result =
+      kodama::KODAMAGraphCluster_CPU(graph, 6, options);
+    require(result.membership.size() == 6, "Graph clustering membership size mismatch.");
+    require(result.n_vertices == 6, "Graph clustering vertex count mismatch.");
+    require(result.n_edges > 0, "Graph clustering discarded every valid edge.");
+    require(result.n_communities == 2, "Graph clustering did not preserve disconnected triangles.");
+    require(result.backend == kodama::Backend::CPU, "Graph clustering backend metadata mismatch.");
+    require(std::isfinite(result.modularity), "Graph clustering modularity is not finite.");
+  }
+
+  kodama::NeighborGraph zero_based = graph;
+  zero_based.index_base = kodama::GraphIndexBase::Auto;
+  for (int& index : zero_based.indices) --index;
+  options.weight_type = kodama::GraphWeightType::Distance;
+  options.mutual = true;
+  const kodama::GraphClusterResult zero_result =
+    kodama::KODAMAGraphCluster(zero_based, 6, options);
+  require(zero_result.n_communities == 2, "Auto zero-based graph detection failed.");
+
+  options.mutual = false;
+  options.weight_type = kodama::GraphWeightType::Binary;
+  options.prune = 1.0;
+  const kodama::GraphClusterResult pruned =
+    kodama::KODAMAGraphCluster_CPU(graph, 6, options);
+  require(pruned.n_communities == 6, "Graph pruning did not isolate all vertices.");
+  require(pruned.n_edges == 0, "Graph pruning retained an edge above its threshold.");
+
+  const std::vector<float> embedding_values = {
+    0.0f, 0.0f, 0.1f, 0.0f, 0.0f, 0.1f,
+    5.0f, 5.0f, 5.1f, 5.0f, 5.0f, 5.1f
+  };
+  const kodama::MatrixView embedding{embedding_values.data(), 6, 2};
+  options.prune = 0.0;
+  options.target_clusters = 2;
+  const kodama::GraphClusterResult embedded =
+    kodama::KODAMAEmbeddingGraphCluster(embedding, graph, options);
+  require(embedded.target_exact && embedded.n_communities == 2,
+          "Embedding graph clustering did not satisfy the exact target.");
+
+  options.target_clusters = 0;
+  options.k = 2;
+  const kodama::GraphClusterResult built =
+    kodama::KODAMAEmbeddingCluster(embedding, options);
+  require(built.membership.size() == 6 && built.n_vertices == 6,
+          "Embedding clustering did not build and cluster its graph.");
+
+  bool rejected = false;
+  try {
+    kodama::NeighborGraph malformed = graph;
+    malformed.indices.pop_back();
+    (void)kodama::KODAMAGraphCluster_CPU(malformed, 6, options);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  require(rejected, "Malformed graph dimensions were accepted.");
+
+  rejected = false;
+  try {
+    options.target_clusters = 7;
+    (void)kodama::KODAMAGraphCluster_CPU(graph, 6, options);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  require(rejected, "An impossible target cluster count was accepted.");
+
+  rejected = false;
+  try {
+    options.target_clusters = 0;
+    options.backend = kodama::Backend::Metal;
+    (void)kodama::KODAMAGraphCluster(graph, 6, options);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  require(rejected, "CPU-only clustering silently accepted an accelerator backend.");
+
+  kodama::ResidentIVFIndex empty_index;
+  require(!empty_index.valid() && empty_index.rows() == 0 && empty_index.dimensions() == 0,
+          "Default resident IVF index metadata is invalid.");
+  rejected = false;
+  try {
+    (void)kodama::SearchResidentIVFIndex(empty_index, embedding, 2);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  require(rejected, "Search accepted an empty resident IVF index.");
+
+  rejected = false;
+  try {
+    kodama::KNNOptions resident_options;
+    resident_options.backend = kodama::Backend::CPU;
+    (void)kodama::BuildResidentIVFIndex(embedding, resident_options);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  require(rejected, "Resident IVF construction silently accepted the CPU backend.");
+}
+
 void check_spatial_grid_graph() {
   const int n = 10000;
   const int p = 2;
@@ -439,6 +1168,43 @@ void check_spatial_grid_graph() {
   for (std::size_t i = 0; i < graph.distances.size(); ++i) {
     require(std::abs(cuda_graph.distances[i] - graph.distances[i]) < 1e-5f, "CUDA spatial grid graph distances differ from CPU.");
   }
+
+  kodama::GraphClusterOptions wide_options = options;
+  wide_options.k = 100;
+  const kodama::NeighborGraph wide_cpu = kodama::KODAMAKNNGraph_CPU(view, wide_options);
+  wide_options.backend = kodama::Backend::CUDA;
+  const kodama::NeighborGraph wide_cuda = kodama::KODAMAKNNGraph_CUDA(view, wide_options);
+  require(wide_cuda.indices == wide_cpu.indices,
+          "CUDA 2D spatial grid k=100 indices differ from CPU.");
+  require(wide_cuda.distances.size() == wide_cpu.distances.size(),
+          "CUDA 2D spatial grid k=100 distance size mismatch.");
+  for (std::size_t i = 0; i < wide_cpu.distances.size(); ++i) {
+    require(std::abs(wide_cuda.distances[i] - wide_cpu.distances[i]) < 1e-5f,
+            "CUDA 2D spatial grid k=100 distances differ from CPU.");
+  }
+
+  constexpr int n3 = 10000;
+  std::vector<float> x3(static_cast<std::size_t>(n3) * 3);
+  for (int row = 0; row < n3; ++row) {
+    x3[static_cast<std::size_t>(row) * 3] = static_cast<float>(row % 22);
+    x3[static_cast<std::size_t>(row) * 3 + 1] =
+      static_cast<float>((row / 22) % 22);
+    x3[static_cast<std::size_t>(row) * 3 + 2] = static_cast<float>(row / 484);
+  }
+  const kodama::MatrixView view3{x3.data(), n3, 3};
+  wide_options.backend = kodama::Backend::CPU;
+  const kodama::NeighborGraph wide_cpu3 = kodama::KODAMAKNNGraph_CPU(view3, wide_options);
+  wide_options.backend = kodama::Backend::CUDA;
+  const kodama::NeighborGraph wide_cuda3 = kodama::KODAMAKNNGraph_CUDA(view3, wide_options);
+  require(wide_cuda3.indices == wide_cpu3.indices,
+          "CUDA 3D spatial grid k=100 indices differ from CPU.");
+  require(wide_cuda3.distances.size() == wide_cpu3.distances.size(),
+          "CUDA 3D spatial grid k=100 distance size mismatch.");
+  for (std::size_t i = 0; i < wide_cpu3.distances.size(); ++i) {
+    require(std::abs(wide_cuda3.distances[i] - wide_cpu3.distances[i]) < 1e-5f,
+            "CUDA 3D spatial grid k=100 distances differ from CPU.");
+  }
+
   bool rejected_cuda_clustering = false;
   try {
     (void)kodama::KODAMAGraphCluster(cluster_graph, 6, cuda_options);
@@ -651,8 +1417,11 @@ void check_pca_cpu() {
 }  // namespace
 
 int main() {
+  test_public_string_contracts();
+  test_public_error_contracts();
   test_preprocessing();
   check_parallel_hnsw_graph();
+  check_graph_cluster_contracts();
   check_spatial_grid_graph();
   check_spatial_grid_query_nearest();
   check_pca_cpu();
@@ -747,6 +1516,70 @@ int main() {
   check_pls_result(flres, d.y, d.constrain, 4);
   require(flres.global_accuracy > 0.60, "Float32 PLS-LDA accuracy unexpectedly low.");
 
+  kodama::PLSOptions parallel_pls = pls;
+  parallel_pls.n_threads = 4;
+  kodama::PLSCVResult parallel_flres = kodama::PLSLDACV_CPU(
+    fview, d.y, d.constrain, parallel_pls
+  );
+  require(
+    parallel_flres.predicted_labels == flres.predicted_labels,
+    "Streamed CPU PLS-LDA predictions depend on fold worker count."
+  );
+  require(
+    parallel_flres.selected_components == flres.selected_components,
+    "Streamed CPU PLS-LDA component count depends on fold worker count."
+  );
+
+  // A large supervised cross-product can leave the randomized SIMPLS power
+  // vector finite while its float32 squared norm overflows. The norm reduction
+  // must not truncate an otherwise valid fit to the majority fallback.
+  constexpr int robust_n = 1200;
+  constexpr int robust_p = 8;
+  std::vector<float> robust_x(
+    static_cast<std::size_t>(robust_n * robust_p), 0.0f
+  );
+  std::vector<int> robust_y(static_cast<std::size_t>(robust_n), 0);
+  for (int row = 0; row < robust_n; ++row) {
+    const int cls = row % 3;
+    robust_y[static_cast<std::size_t>(row)] = cls + 1;
+    for (int column = 0; column < robust_p; ++column) {
+      const float class_signal =
+        cls == 0 ? (column == 0 ? 10000.0f : -2500.0f) :
+        cls == 1 ? (column == 1 ? 10000.0f : -2500.0f) :
+                   (column < 2 ? -10000.0f : 2500.0f);
+      const float variation =
+        700.0f * std::sin(
+          0.017f * static_cast<float>((row + 1) * (column + 1))
+        ) +
+        350.0f * std::cos(
+          0.011f * static_cast<float>((row + 3) * (column + 2))
+        );
+      robust_x[static_cast<std::size_t>(row * robust_p + column)] =
+        class_signal + variation;
+    }
+  }
+  kodama::PLSOptions robust_pls = pls;
+  robust_pls.cv.folds = 5;
+  robust_pls.cv.seed = 9;
+  robust_pls.max_components = 2;
+  robust_pls.fixed_components = 2;
+  robust_pls.center = true;
+  robust_pls.scale = false;
+  const kodama::PLSCVResult robust_lres = kodama::PLSLDACV_CPU(
+    kodama::MatrixView{robust_x.data(), robust_n, robust_p},
+    robust_y,
+    {},
+    robust_pls
+  );
+  require(
+    robust_lres.selected_components == 2,
+    "CPU SIMPLS lost a valid component after a large finite power refresh."
+  );
+  require(
+    robust_lres.global_accuracy > 0.99,
+    "CPU robust SIMPLS norm regression accuracy unexpectedly low."
+  );
+
   kodama::PLSCVResult fdispatch_lres = kodama::PLSLDACV(fview, d.y, d.constrain, pls);
   check_pls_result(fdispatch_lres, d.y, d.constrain, 4);
   require(fdispatch_lres.global_accuracy > 0.60, "Float32 generic PLS-LDA accuracy unexpectedly low.");
@@ -791,6 +1624,14 @@ int main() {
   require(
     degenerate_lres.selected_components == 1,
     "Degenerate PLS-LDA should report the majority fallback as one component."
+  );
+  require(
+    std::all_of(
+      degenerate_lres.predicted_labels.begin(),
+      degenerate_lres.predicted_labels.end(),
+      [](int label) { return label == 10; }
+    ),
+    "Degenerate PLS-LDA did not use the training-fold majority class."
   );
 
   std::vector<int> noisy = make_noisy_labels(d.y);
@@ -871,6 +1712,35 @@ int main() {
   require(fcore_cpp_kres.cycles_completed >= 1, "Float32 Core dispatcher KNN did not run any cycles.");
   require(fcore_cpp_kres.accbest >= initial_knn_acc, "Float32 Core dispatcher KNN decreased best CV accuracy.");
 
+  kodama::NeighborGraph empty_graph;
+  empty_graph.neighbors = 1;
+  empty_graph.indices.assign(3, -1);
+  empty_graph.distances.assign(3, std::numeric_limits<float>::infinity());
+  kodama::CoreOptions graph_fallback_options;
+  graph_fallback_options.cycles = 0;
+  graph_fallback_options.knn.k = 1;
+  graph_fallback_options.knn.cv.folds = 3;
+  graph_fallback_options.knn.cv.stratified = false;
+  graph_fallback_options.knn.cv.seed = 7;
+  const std::vector<int> graph_fallback_labels{1, 2, 2};
+  const kodama::CoreResult graph_fallback = kodama::CoreKNNGraph_CPU(
+    empty_graph,
+    3,
+    graph_fallback_labels,
+    std::vector<int>(),
+    std::vector<int>(),
+    graph_fallback_options
+  );
+  require(
+    graph_fallback.cvpredbest == std::vector<int>({2, 1, 1}),
+    "Graph KNN fallback used validation labels instead of the training-fold majority."
+  );
+  require(graph_fallback.runtime_seconds > 0.0, "Graph KNN inclusive runtime was not recorded.");
+  require(
+    std::string(kodama::to_string(kodama::KNNIndexType::PrecomputedGraph)) == "precomputed_graph",
+    "Precomputed graph index provenance is missing."
+  );
+
   kodama::CoreOptions coarsened_knn = core_knn;
   coarsened_knn.auto_class_coarsening = true;
   kodama::CoreResult coarsened_kres = kodama::CoreKNN_CPU(view, noisy, d.constrain, fixed, coarsened_knn);
@@ -888,6 +1758,7 @@ int main() {
   km_options.metric = kodama::DistanceMetric::Euclidean;
   km_options.classifier = kodama::CoreClassifier::KNN;
   km_options.compute_visual_init = true;
+  km_options.materialize_graph = true;
   km_options.knn.k = 10;
   km_options.knn.n_threads = 1;
   kodama::KODAMAGraphOptions prepared_graph_options;
@@ -896,17 +1767,74 @@ int main() {
   prepared_graph_options.seed = km_options.seed;
   prepared_graph_options.metric = km_options.metric;
   prepared_graph_options.backend = kodama::Backend::CPU;
+  prepared_graph_options.materialize_graph = true;
   const kodama::KODAMAGraphResult prepared_graph =
     kodama::KODAMAGraph_CPU(fview, prepared_graph_options);
   require(prepared_graph.samples == d.n, "KODAMAGraph sample count mismatch.");
   require(prepared_graph.dimensions == d.p, "KODAMAGraph dimension count mismatch.");
   require(prepared_graph.graph_builds == 1, "KODAMAGraph should build exactly one graph.");
+  require(
+    prepared_graph.index_type == kodama::KNNIndexType::NativeHNSW,
+    "CPU KODAMAGraph should report native HNSW."
+  );
   require(prepared_graph.knn.neighbors == 45, "KODAMAGraph neighbor count mismatch.");
   require(prepared_graph.knn.indices.front() >= 1, "KODAMAGraph indices should be one-based.");
   require(
     prepared_graph.visual_init.umap.size() == static_cast<std::size_t>(d.n * 2) &&
       prepared_graph.visual_init.opentsne.size() == static_cast<std::size_t>(d.n * 2),
     "KODAMAGraph did not retain both PCA initializations."
+  );
+  kodama::KODAMAGraphOptions lazy_graph_options = prepared_graph_options;
+  lazy_graph_options.materialize_graph = false;
+  const kodama::KODAMAGraphResult lazy_graph =
+    kodama::KODAMAGraph_CPU(fview, lazy_graph_options);
+  require(lazy_graph.handle && lazy_graph.handle->valid() && lazy_graph.knn.indices.empty(),
+          "Handle-backed KODAMAGraph unexpectedly materialized host arrays.");
+  require(lazy_graph.neighbors == prepared_graph.knn.neighbors,
+          "Handle-backed KODAMAGraph lost neighbor metadata.");
+  const kodama::NeighborGraph lazy_materialized =
+    kodama::KODAMAGraphMaterialize(lazy_graph);
+  const kodama::NeighborGraph lazy_materialized_again =
+    kodama::KODAMAGraphMaterialize(lazy_graph);
+  require(lazy_materialized.indices == lazy_materialized_again.indices &&
+          lazy_materialized.distances == lazy_materialized_again.distances &&
+          lazy_materialized.neighbors == prepared_graph.knn.neighbors,
+          "Explicit graph materialization is not stable.");
+  std::vector<float> spatial(static_cast<std::size_t>(d.n) * 2u, 0.0f);
+  for (int i = 0; i < d.n; ++i) {
+    spatial[static_cast<std::size_t>(i) * 2u] = d.x[static_cast<std::size_t>(i) * d.p];
+    spatial[static_cast<std::size_t>(i) * 2u + 1u] =
+      d.x[static_cast<std::size_t>(i) * d.p + 1u];
+  }
+  const kodama::MatrixView spatial_view{
+    spatial.data(), static_cast<std::size_t>(d.n), 2u
+  };
+  const kodama::KODAMAGraphResult spatial_prepared_graph =
+    kodama::KODAMAGraph_CPU(fview, spatial_view, prepared_graph_options);
+  require(
+    spatial_prepared_graph.spatial_graph_builds == 1 &&
+      spatial_prepared_graph.spatial_dimensions == 2 &&
+      spatial_prepared_graph.spatial_jitter.size() == 2u &&
+      spatial_prepared_graph.spatial_knn.neighbors == 45,
+    "KODAMAGraph did not retain reusable spatial graph state."
+  );
+  kodama::KODAMAMatrixOptions spatial_prepared_options = km_options;
+  spatial_prepared_options.spatial = spatial;
+  spatial_prepared_options.spatial_cols = 2;
+  spatial_prepared_options.spatial_resolution = 0.4;
+  const kodama::KODAMAMatrixResult spatial_prepared_result = kodama::KODAMAMatrix(
+    fview,
+    spatial_prepared_graph,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    spatial_prepared_options
+  );
+  require(
+    spatial_prepared_result.graph_builds == 0 &&
+      spatial_prepared_result.spatial_graph_builds == 0 &&
+      spatial_prepared_result.spatial_precompute_seconds < 0.01,
+    "KODAMAMatrix rebuilt prepared spatial graph state."
   );
   kodama::KODAMAMatrixResult km_res = kodama::KODAMAMatrix_CPU(fview, std::vector<int>(), std::vector<int>(), fixed, km_options);
   const kodama::KODAMAMatrixResult km_prepared_data_res = kodama::KODAMAMatrix(
@@ -922,6 +1850,11 @@ int main() {
   require(
     km_prepared_data_res.res.size() == km_res.res.size(),
     "Prepared-graph-plus-data KODAMA returned an invalid label matrix."
+  );
+  require(
+    std::all_of(km_prepared_data_res.acc.begin(), km_prepared_data_res.acc.end(),
+                [](double value) { return std::isfinite(value); }),
+    "Prepared-graph-plus-data KNN KODAMA returned non-finite accuracy."
   );
   const kodama::KODAMAMatrixResult km_prepared_only_res = kodama::KODAMAMatrix(
     prepared_graph,
@@ -942,7 +1875,8 @@ int main() {
   require(km_res.acc.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix acc size mismatch.");
   require(km_res.v.size() == static_cast<std::size_t>(km_options.runs * km_options.cycles), "KODAMAMatrix trace size mismatch.");
   require(km_res.res.size() == static_cast<std::size_t>(km_options.runs * d.n), "KODAMAMatrix result label size mismatch.");
-  require(km_res.res_constrain.size() == static_cast<std::size_t>(km_options.runs * d.n), "KODAMAMatrix constrain size mismatch.");
+  require(km_res.res_constrain_rows == 1, "Nonspatial KODAMAMatrix should retain one shared constraint row.");
+  require(km_res.res_constrain.size() == static_cast<std::size_t>(d.n), "KODAMAMatrix constrain size mismatch.");
   require(km_res.graph_builds == 1, "KODAMAMatrix should build the global graph exactly once for all M runs.");
   require(km_res.has_visual_init, "KODAMAMatrix did not retain the requested visualization initialization.");
   require(km_res.visual_init.umap.size() == static_cast<std::size_t>(d.n * 2), "KODAMAMatrix UMAP initialization size mismatch.");
@@ -958,6 +1892,13 @@ int main() {
   require(km_res.knn.indices.size() == static_cast<std::size_t>(d.n * km_res.knn.neighbors), "KODAMAMatrix neighbor index size mismatch.");
   require(km_res.knn.distances.size() == km_res.knn.indices.size(), "KODAMAMatrix neighbor distance size mismatch.");
   require(km_res.knn.indices.front() >= 1, "KODAMAMatrix neighbor indices should be one-based for R compatibility.");
+  require(
+    std::all_of(km_res.knn.indices.begin(), km_res.knn.indices.end(), [&](const int index) {
+      return index >= 1 && index <= d.n;
+    }),
+    "KODAMAMatrix returned a neighbor index outside the public one-based range."
+  );
+  require(km_res.knn.index_base == kodama::GraphIndexBase::One, "KODAMAMatrix graph index-base metadata is incorrect.");
   require(km_res.knn_is_kodama_corrected, "KODAMAMatrix did not mark its corrected graph.");
   require(
     km_res.graph_storage_bytes >=
@@ -965,6 +1906,26 @@ int main() {
       km_res.knn.distances.size() * sizeof(float),
     "KODAMAMatrix graph storage accounting mismatch."
   );
+
+  kodama::KODAMAMatrixOptions km_labels_only_options = km_options;
+  km_labels_only_options.materialize_graph = false;
+  km_labels_only_options.compute_visual_init = false;
+  const kodama::KODAMAMatrixResult km_labels_only = kodama::KODAMAMatrix_CPU(
+    fview,
+    std::vector<int>(),
+    std::vector<int>(),
+    fixed,
+    km_labels_only_options
+  );
+  require(km_labels_only.knn.indices.empty() && km_labels_only.knn.distances.empty(),
+          "Labels-only KODAMAMatrix unexpectedly materialized graph matrices.");
+  require(km_labels_only.graph_storage_bytes == 0,
+          "Labels-only KODAMAMatrix reported host graph storage.");
+  require(!km_labels_only.knn_is_kodama_corrected &&
+          km_labels_only.dissimilarity_seconds == 0.0,
+          "Labels-only KODAMAMatrix performed an unobservable graph correction.");
+  require(km_labels_only.res == km_res.res,
+          "Disabling graph materialization changed optimized labels.");
 
   kodama::KODAMAMatrixOptions km_base_options = km_options;
   km_base_options.apply_kodama_dissimilarity = false;
@@ -1059,7 +2020,69 @@ int main() {
   require(umap_res.components == 2, "CPU UMAP component count mismatch.");
   require(umap_res.embedding.size() == static_cast<std::size_t>(d.n * 2), "CPU UMAP embedding size mismatch.");
   require(umap_res.initialization == "graph_spectral", "CPU UMAP graph fallback was not reported.");
+  require(umap_res.optimizer == "csr_epoch_schedule", "CPU UMAP optimizer metadata mismatch.");
+  require(umap_res.graph_edges > 0 && umap_res.graph_max_weight > 0.0f,
+          "CPU UMAP graph diagnostics are missing.");
   for (float value : umap_res.embedding) require(std::isfinite(value), "CPU UMAP produced a non-finite value.");
+
+  // The public binary-graph route is inherited from fastEmbedR and remains a
+  // distinct contract from the default fuzzy graph. Duplicate and self edges
+  // must be compacted before optimization.
+  constexpr int binary_samples = 6;
+  kodama::NeighborGraph binary_graph;
+  binary_graph.neighbors = 4;
+  binary_graph.index_base = kodama::GraphIndexBase::Zero;
+  binary_graph.indices.resize(24);
+  binary_graph.distances.resize(24, 1.0f);
+  for (int row = 0; row < binary_samples; ++row) {
+    const std::size_t offset = static_cast<std::size_t>(row) * 4u;
+    binary_graph.indices[offset] = (row + 1) % binary_samples;
+    binary_graph.indices[offset + 1u] = (row + 1) % binary_samples;
+    binary_graph.indices[offset + 2u] =
+      (row + binary_samples - 1) % binary_samples;
+    binary_graph.indices[offset + 3u] = row;
+  }
+  kodama::UMAPOptions binary_umap_options;
+  binary_umap_options.graph_mode = kodama::UMAPGraphMode::Binary;
+  binary_umap_options.n_neighbors = 4;
+  binary_umap_options.n_epochs = 4;
+  binary_umap_options.n_threads = 2;
+  binary_umap_options.min_dist = 0.3;
+  binary_umap_options.seed = 314;
+  binary_umap_options.init_source = "test_explicit";
+  binary_umap_options.init_backend = kodama::Backend::CPU;
+  binary_umap_options.init.resize(12);
+  for (int row = 0; row < binary_samples; ++row) {
+    binary_umap_options.init[static_cast<std::size_t>(row) * 2u] =
+      static_cast<float>(row) * 0.01f;
+    binary_umap_options.init[static_cast<std::size_t>(row) * 2u + 1u] =
+      static_cast<float>(row % 2) * 0.01f;
+  }
+  const kodama::EmbeddingResult binary_umap =
+    kodama::KODAMAUMAP_CPU(binary_graph, binary_umap_options);
+  const kodama::EmbeddingResult binary_umap_replay =
+    kodama::KODAMAUMAP_CPU(binary_graph, binary_umap_options);
+  require(binary_umap.graph_edges == 12 && binary_umap.graph_max_weight == 1.0f,
+          "Binary UMAP did not compact the cyclic graph to the expected edges.");
+  require(binary_umap.initialization == "test_explicit" &&
+          binary_umap.initialization_backend == kodama::Backend::CPU,
+          "Binary UMAP explicit initialization metadata mismatch.");
+  require(binary_umap.embedding == binary_umap_replay.embedding,
+          "Binary UMAP fixed-seed replay changed coordinates.");
+  for (float value : binary_umap.embedding) {
+    require(std::isfinite(value), "Binary UMAP produced a non-finite value.");
+  }
+  kodama::NeighborGraph self_only_graph;
+  self_only_graph.neighbors = 1;
+  self_only_graph.index_base = kodama::GraphIndexBase::Zero;
+  self_only_graph.indices = {0, 1, 2};
+  self_only_graph.distances = {0.0f, 0.0f, 0.0f};
+  kodama::UMAPOptions self_only_options = binary_umap_options;
+  self_only_options.n_neighbors = 1;
+  self_only_options.init.clear();
+  require_throws<std::runtime_error>([&] {
+    (void)kodama::KODAMAUMAP_CPU(self_only_graph, self_only_options);
+  }, "Binary UMAP accepted a graph containing only self edges.");
 
   kodama::VisualizationInitOptions visual_init_options;
   visual_init_options.n_components = 2;
@@ -1111,6 +2134,9 @@ int main() {
   require(tsne_res.components == 2, "CPU openTSNE component count mismatch.");
   require(tsne_res.embedding.size() == static_cast<std::size_t>(d.n * 2), "CPU openTSNE embedding size mismatch.");
   require(tsne_res.initialization == "random", "CPU openTSNE graph fallback was not reported.");
+  require(tsne_res.optimizer == "opentsne_fitsne_fft_grid_sparse_knn_float32" &&
+          tsne_res.graph_edges == 0 && tsne_res.graph_max_weight == 0.0f,
+          "CPU openTSNE optimizer diagnostics mismatch.");
   for (float value : tsne_res.embedding) require(std::isfinite(value), "CPU openTSNE produced a non-finite value.");
   const kodama::EmbeddingResult raw_tsne_res =
     kodama::KODAMAOpenTSNE_CPU(km_res.knn, fview, tsne_options);
@@ -1191,7 +2217,201 @@ int main() {
   require(graph_laplacian_features.size() == static_cast<std::size_t>(d.n * 4), "Self-tuning graph feature size mismatch.");
   for (float value : graph_laplacian_features) require(std::isfinite(value), "Self-tuning graph features contain non-finite values.");
 
+  {
+    constexpr int rows = 4096;
+    constexpr int dimensions = 5;
+    constexpr int landmarks = 24;
+    constexpr int k = 6;
+    std::vector<float> data(static_cast<std::size_t>(rows * dimensions));
+    for (int row = 0; row < rows; ++row) {
+      for (int column = 0; column < dimensions; ++column) {
+        data[static_cast<std::size_t>(row * dimensions + column)] =
+          std::sin(0.019f * static_cast<float>((row + 1) * (column + 2))) +
+          0.0005f * static_cast<float>(row);
+      }
+    }
+    std::vector<int> selected(static_cast<std::size_t>(landmarks));
+    std::vector<int> allowed(static_cast<std::size_t>(rows), -1);
+    std::vector<float> query(static_cast<std::size_t>(landmarks * dimensions));
+    for (int local = 0; local < landmarks; ++local) {
+      const int global = (local * rows) / landmarks;
+      selected[static_cast<std::size_t>(local)] = global;
+      allowed[static_cast<std::size_t>(global)] = local;
+      std::copy_n(data.data() + static_cast<std::size_t>(global * dimensions),
+                  dimensions,
+                  query.data() + static_cast<std::size_t>(local * dimensions));
+    }
+    kodama::detail::NativeHNSWIndex index = kodama::detail::native_build_hnsw_index(
+      data, rows, dimensions, kodama::DistanceMetric::Euclidean,
+      kodama::detail::NativeHNSWParameters{24, 200, 150}, 4
+    );
+    const kodama::detail::NativeKNNResult filtered =
+      kodama::detail::native_hnsw_index_filtered_search(
+        index, query, landmarks, k, 4, selected, allowed
+      );
+    require(filtered.neighbors == k &&
+            std::none_of(filtered.indices.begin(), filtered.indices.end(),
+                         [](int id) { return id < 0; }),
+            "CPU sparse-landmark HNSW query returned an incomplete graph.");
+  }
+
 #if defined(KODAMA_ENABLE_CUDA)
+  {
+    constexpr int context_rows = 257;
+    constexpr int context_dimensions = 7;
+    constexpr int context_clusters = 11;
+    std::vector<float> context_data(
+      static_cast<std::size_t>(context_rows * context_dimensions), 0.0f
+    );
+    for (int row = 0; row < context_rows; ++row) {
+      for (int column = 0; column < context_dimensions; ++column) {
+        context_data[static_cast<std::size_t>(row * context_dimensions + column)] =
+          std::sin(0.031f * static_cast<float>((row + 3) * (column + 1)));
+      }
+    }
+    auto context = kodama::detail::native_cuda_build_kmeans_context(
+      context_data, context_rows, context_dimensions, 2, context_clusters, 0
+    );
+    for (int lane = 0; lane < 2; ++lane) {
+      const std::uint64_t seed = 721u + static_cast<std::uint64_t>(lane);
+      const std::vector<int> expected = kodama::detail::native_cuda_kmeans_labels(
+        context_data, context_rows, context_dimensions, context_clusters, 5, seed, 0
+      );
+      const std::vector<int> observed = kodama::detail::native_cuda_kmeans_context_labels(
+        context, lane, context_clusters, 5, seed
+      );
+      require(observed == expected,
+              "Resident CUDA k-means changed assignments relative to the one-shot path.");
+    }
+    require(context.input_uploads() == 1,
+            "Resident CUDA k-means uploaded its invariant input more than once.");
+  }
+
+  {
+    constexpr int sparse_rows = 8192;
+    constexpr int sparse_dimensions = 6;
+    constexpr int sparse_landmarks = 32;
+    constexpr int sparse_k = 8;
+    std::vector<float> sparse_data(
+      static_cast<std::size_t>(sparse_rows * sparse_dimensions), 0.0f
+    );
+    for (int row = 0; row < sparse_rows; ++row) {
+      for (int column = 0; column < sparse_dimensions; ++column) {
+        sparse_data[static_cast<std::size_t>(row * sparse_dimensions + column)] =
+          std::sin(0.013f * static_cast<float>((row + 1) * (column + 2))) +
+          0.0007f * static_cast<float>(row);
+      }
+    }
+    std::vector<int> selected(static_cast<std::size_t>(sparse_landmarks));
+    std::vector<float> query(
+      static_cast<std::size_t>(sparse_landmarks * sparse_dimensions), 0.0f
+    );
+    for (int local = 0; local < sparse_landmarks; ++local) {
+      const int global = (local * sparse_rows) / sparse_landmarks;
+      selected[static_cast<std::size_t>(local)] = global;
+      std::copy_n(
+        sparse_data.data() + static_cast<std::size_t>(global * sparse_dimensions),
+        sparse_dimensions,
+        query.data() + static_cast<std::size_t>(local * sparse_dimensions)
+      );
+    }
+    kodama::detail::NativeCudaIVFStats sparse_stats;
+    kodama::detail::CudaResidentKODAMAGraph resident =
+      kodama::detail::make_cuda_resident_kodama_graph_ivf(
+        sparse_data, sparse_rows, sparse_dimensions, 16,
+        kodama::DistanceMetric::Euclidean, 64, 0, 0, 1, &sparse_stats
+      );
+    const kodama::NeighborGraph filtered =
+      kodama::detail::cuda_resident_landmark_knn_graph(
+        resident, query, selected, sparse_k, 0, 0.99
+      );
+    require(filtered.neighbors == sparse_k,
+            "CUDA sparse-landmark graph has the wrong width.");
+    require(std::none_of(filtered.indices.begin(), filtered.indices.end(),
+                         [](int id) { return id < 0; }),
+            "CUDA sparse-landmark IVF query returned an incomplete graph.");
+    std::vector<int> local_self(static_cast<std::size_t>(sparse_landmarks));
+    std::iota(local_self.begin(), local_self.end(), 0);
+    const kodama::detail::NativeKNNResult exact =
+      kodama::detail::native_cuda_exact_knn_search(
+        query, sparse_landmarks, query, sparse_landmarks, sparse_dimensions,
+        sparse_k, kodama::DistanceMetric::Euclidean, 0, local_self
+      );
+    std::size_t hits = 0;
+    for (int row = 0; row < sparse_landmarks; ++row) {
+      for (int rank = 0; rank < sparse_k; ++rank) {
+        const int candidate = filtered.indices[
+          static_cast<std::size_t>(row * sparse_k + rank)
+        ];
+        const auto begin = exact.indices.begin() + row * sparse_k;
+        if (std::find(begin, begin + sparse_k, candidate) != begin + sparse_k) ++hits;
+      }
+    }
+    require(static_cast<double>(hits) /
+              static_cast<double>(sparse_landmarks * sparse_k) >= 0.99,
+            "CUDA sparse-landmark IVF recall fell below 0.99.");
+
+    std::vector<int> constrained_labels(static_cast<std::size_t>(sparse_rows));
+    std::vector<int> constrained_groups(static_cast<std::size_t>(sparse_rows));
+    for (int row = 0; row < sparse_rows; ++row) {
+      constrained_labels[static_cast<std::size_t>(row)] = row % 5 + 1;
+      constrained_groups[static_cast<std::size_t>(row)] = row / 7;
+    }
+    std::vector<int> expected = constrained_labels;
+    for (int begin = 0; begin < sparse_rows; begin += 7) {
+      const int end = std::min(sparse_rows, begin + 7);
+      int counts[6] = {0, 0, 0, 0, 0, 0};
+      for (int row = begin; row < end; ++row) ++counts[constrained_labels[row]];
+      int best = 1;
+      for (int label = 2; label <= 5; ++label) {
+        if (counts[label] > counts[best]) best = label;
+      }
+      for (int row = begin; row < end; ++row) expected[row] = best;
+    }
+    kodama::detail::cuda_resident_prepare_results(resident, 1);
+    kodama::detail::cuda_resident_store_result_row(resident, constrained_labels, 0, 0);
+    kodama::detail::cuda_resident_constrain_result_row(
+      resident, constrained_groups, 5, 0, 0);
+    require(kodama::detail::cuda_resident_download_results(resident, 1) == expected,
+            "CUDA resident constrained majority differs from the CPU rule.");
+  }
+
+  kodama::NeighborGraph corrected_cpu = prepared_graph.knn;
+  kodama::NeighborGraph corrected_cuda = prepared_graph.knn;
+  kodama::KODAMADissimilarityInPlace(
+    corrected_cpu,
+    km_base_res.res,
+    km_base_res.runs,
+    km_base_res.samples,
+    kodama::Backend::CPU,
+    km_base_options.n_threads
+  );
+  kodama::KODAMADissimilarityInPlace(
+    corrected_cuda,
+    km_base_res.res,
+    km_base_res.runs,
+    km_base_res.samples,
+    kodama::Backend::CUDA,
+    1
+  );
+  require(corrected_cpu.indices == corrected_cuda.indices,
+          "CUDA KODAMA correction changed graph topology.");
+  require(corrected_cpu.distances.size() == corrected_cuda.distances.size(),
+          "CUDA KODAMA correction changed graph size.");
+  float correction_max_difference = 0.0f;
+  for (std::size_t i = 0; i < corrected_cpu.distances.size(); ++i) {
+    correction_max_difference = std::max(
+      correction_max_difference,
+      std::abs(corrected_cpu.distances[i] - corrected_cuda.distances[i])
+    );
+  }
+  if (!(correction_max_difference < 2e-5f)) {
+    throw std::runtime_error(
+      "CUDA KODAMA correction disagrees with CPU; max absolute difference=" +
+      std::to_string(correction_max_difference)
+    );
+  }
+
   kodama::PCAOptions cuda_pca_options;
   cuda_pca_options.n_components = 4;
   cuda_pca_options.oversample = 2;
@@ -1235,6 +2455,9 @@ int main() {
   require(cuda_umap.initialization == "raw_pca" &&
           cuda_umap.initialization_backend == kodama::Backend::CUDA,
           "CUDA raw-data UMAP initialization metadata mismatch.");
+  require(cuda_umap.optimizer == "cuda_atomic_coo_epoch_schedule" &&
+          cuda_umap.graph_edges > 0 && cuda_umap.graph_max_weight > 0.0f,
+          "CUDA UMAP optimizer diagnostics mismatch.");
   for (const float value : cuda_umap.embedding) {
     require(std::isfinite(value), "CUDA UMAP produced a non-finite value.");
   }
@@ -1247,6 +2470,9 @@ int main() {
   require(cuda_tsne.initialization == "raw_pca" &&
           cuda_tsne.initialization_backend == kodama::Backend::CUDA,
           "CUDA raw-data openTSNE initialization metadata mismatch.");
+  require(cuda_tsne.optimizer == "cuda_opentsne_fft_grid_sparse_knn_float32" &&
+          cuda_tsne.graph_edges == 0 && cuda_tsne.graph_max_weight == 0.0f,
+          "CUDA openTSNE optimizer diagnostics mismatch.");
   for (const float value : cuda_tsne.embedding) {
     require(std::isfinite(value), "CUDA openTSNE produced a non-finite value.");
   }
@@ -1269,6 +2495,40 @@ int main() {
   require(float_cuda_lres.parameters.backend == kodama::Backend::CUDA, "Float32 CUDA PLS-LDA did not report CUDA backend.");
   check_pls_result(float_cuda_lres, d.y, d.constrain, 4);
   require(float_cuda_lres.global_accuracy > 0.60, "Float32 CUDA PLS-LDA accuracy unexpectedly low.");
+
+  std::vector<float> predict_train_x;
+  std::vector<float> predict_test_x;
+  std::vector<int> predict_train_labels;
+  predict_train_x.reserve(static_cast<std::size_t>(120 * d.p));
+  predict_test_x.reserve(static_cast<std::size_t>(30 * d.p));
+  predict_train_labels.reserve(120);
+  for (int cls = 0; cls < 3; ++cls) {
+    for (int within = 0; within < 50; ++within) {
+      const int row = cls * 50 + within;
+      std::vector<float>& destination = within < 40 ? predict_train_x : predict_test_x;
+      destination.insert(
+        destination.end(),
+        xf.begin() + static_cast<std::ptrdiff_t>(row * d.p),
+        xf.begin() + static_cast<std::ptrdiff_t>((row + 1) * d.p)
+      );
+      if (within < 40) predict_train_labels.push_back(d.y[static_cast<std::size_t>(row)]);
+    }
+  }
+  const kodama::MatrixView predict_train_view{
+    predict_train_x.data(), 120, static_cast<std::size_t>(d.p)
+  };
+  const kodama::MatrixView predict_test_view{
+    predict_test_x.data(), 30, static_cast<std::size_t>(d.p)
+  };
+  kodama::PLSOptions predict_cpu_options = cuda_pls;
+  predict_cpu_options.backend = kodama::Backend::CPU;
+  const std::vector<int> predict_cpu = kodama::PLSLDAPredict_CPU(
+    predict_train_view, predict_train_labels, predict_test_view, predict_cpu_options
+  );
+  const std::vector<int> predict_cuda = kodama::PLSLDAPredict_CUDA(
+    predict_train_view, predict_train_labels, predict_test_view, cuda_pls
+  );
+  require(predict_cuda == predict_cpu, "Direct CUDA PLS-LDA prediction disagrees with CPU.");
   kodama::CoreOptions cuda_core_pls = core_pls;
   cuda_core_pls.pls.backend = kodama::Backend::CUDA;
   kodama::CoreResult cuda_core_lres = kodama::CorePLSLDA_CUDA(fview, noisy, d.constrain, fixed, cuda_core_pls);
@@ -1284,6 +2544,13 @@ int main() {
   require(cuda_core_kres.clbest.size() == noisy.size(), "Float32 CUDA Core KNN clbest size mismatch.");
   require(cuda_core_kres.cycles_completed >= 1, "Float32 CUDA Core KNN did not run any cycles.");
   require(cuda_core_kres.accbest >= initial_knn_acc, "Float32 CUDA Core KNN decreased best CV accuracy.");
+  const kodama::CoreResult cuda_graph_core_kres = kodama::CoreKNNGraph_CUDA(
+    km_base_res.knn, d.n, noisy, d.constrain, fixed, cuda_core_knn
+  );
+  require(cuda_graph_core_kres.clbest.size() == noisy.size(),
+          "Direct CUDA graph-input KNN core size mismatch.");
+  require(cuda_graph_core_kres.cycles_completed >= 1,
+          "Direct CUDA graph-input KNN core did not run any cycles.");
 
   kodama::KNNOptions resident_cuda_options = knn;
   resident_cuda_options.backend = kodama::Backend::CUDA;
@@ -1299,6 +2566,23 @@ int main() {
   require(resident_cuda.rows() == d.n && resident_cuda.dimensions() == d.p,
           "Resident CUDA IVF index dimensions are incorrect.");
   require(resident_cuda.nlist() == 8, "Resident CUDA IVF nlist mismatch.");
+  std::vector<float> nlist_regression_data(400 * 4);
+  for (int row = 0; row < 400; ++row) {
+    for (int column = 0; column < 4; ++column) {
+      nlist_regression_data[static_cast<std::size_t>(row * 4 + column)] =
+        static_cast<float>((row * 17 + column * 29) % 101) / 101.0f;
+    }
+  }
+  kodama::KNNOptions nlist_regression_options = resident_cuda_options;
+  nlist_regression_options.ivf_nlist = 300;
+  nlist_regression_options.ivf_nprobe = 32;
+  kodama::ResidentIVFIndex nlist_regression_index =
+    kodama::BuildResidentIVFIndex(
+      kodama::MatrixView{nlist_regression_data.data(), 400, 4},
+      nlist_regression_options
+    );
+  require(nlist_regression_index.nlist() == 300,
+          "CUDA IVF nlist was incorrectly capped by the nprobe limit.");
   kodama::ResidentIVFSearchStats resident_cuda_stats;
   const kodama::NeighborGraph resident_cuda_first =
     kodama::SearchResidentIVFIndexSelf(
@@ -1341,6 +2625,31 @@ int main() {
     }
   }
 
+  kodama::KODAMAGraphOptions direct_cuda_graph_options;
+  direct_cuda_graph_options.neighbors = 3;
+  direct_cuda_graph_options.backend = kodama::Backend::CUDA;
+  direct_cuda_graph_options.materialize_graph = true;
+  direct_cuda_graph_options.metric = kodama::DistanceMetric::Euclidean;
+  direct_cuda_graph_options.index_type = kodama::KNNIndexType::CudaIVFFlat;
+  direct_cuda_graph_options.ivf_nlist = 8;
+  direct_cuda_graph_options.ivf_nprobe = 8;
+  const kodama::KODAMAGraphResult direct_cuda_graph = kodama::KODAMAGraph_CUDA(
+    fview, direct_cuda_graph_options
+  );
+  require(direct_cuda_graph.knn.neighbors == 3,
+          "Direct CUDA KODAMAGraph neighbor count mismatch.");
+  require(direct_cuda_graph.index_type == kodama::KNNIndexType::CudaIVFFlat,
+          "Direct CUDA KODAMAGraph did not retain IVF provenance.");
+
+  kodama::KODAMAGraphOptions lazy_cuda_graph_options = direct_cuda_graph_options;
+  lazy_cuda_graph_options.materialize_graph = false;
+  const kodama::KODAMAGraphResult lazy_cuda_graph = kodama::KODAMAGraph_CUDA(
+    fview, lazy_cuda_graph_options
+  );
+  require(lazy_cuda_graph.handle && lazy_cuda_graph.handle->valid() &&
+          lazy_cuda_graph.knn.indices.empty(),
+          "Lazy CUDA KODAMAGraph materialized host arrays.");
+
   kodama::KODAMAMatrixOptions cuda_km_options = km_options;
   cuda_km_options.backend = kodama::Backend::CUDA;
   cuda_km_options.runs = 1;
@@ -1348,6 +2657,18 @@ int main() {
   cuda_km_options.n_threads = 1;
   cuda_km_options.knn.backend = kodama::Backend::CUDA;
   cuda_km_options.knn.index_type = kodama::KNNIndexType::CudaExact;
+  kodama::KODAMAMatrixOptions lazy_cuda_matrix_options = cuda_km_options;
+  lazy_cuda_matrix_options.materialize_graph = false;
+  const kodama::KODAMAMatrixResult lazy_cuda_first = kodama::KODAMAMatrix(
+    fview, lazy_cuda_graph, {}, {}, fixed, lazy_cuda_matrix_options
+  );
+  const kodama::KODAMAMatrixResult lazy_cuda_second = kodama::KODAMAMatrix(
+    fview, lazy_cuda_graph, {}, {}, fixed, lazy_cuda_matrix_options
+  );
+  require(lazy_cuda_first.graph_builds == 0 && lazy_cuda_second.graph_builds == 0 &&
+          lazy_cuda_first.knn.indices.empty() && lazy_cuda_second.knn.indices.empty() &&
+          lazy_cuda_first.res == lazy_cuda_second.res,
+          "Reusable CUDA KODAMAGraph handle failed.");
   kodama::KODAMAMatrixResult cuda_km_res = kodama::KODAMAMatrix_CUDA(
     fview,
     std::vector<int>(),
@@ -1362,6 +2683,40 @@ int main() {
   require(cuda_km_res.effective_landmarks == cuda_km_options.landmarks, "CUDA KODAMAMatrix effective landmark count mismatch.");
   require(cuda_km_res.landmark_occupied_strata == std::vector<int>{cuda_km_options.splitting}, "CUDA nonspatial landmark stratum count mismatch.");
   require(cuda_km_res.landmark_represented_strata == std::vector<int>{cuda_km_options.splitting}, "CUDA nonspatial landmark coverage mismatch.");
+  require(cuda_km_res.kmeans_input_uploads == 1,
+          "CUDA KODAMAMatrix did not reuse one resident coarse-k-means input.");
+  require(cuda_km_res.projection_sparse_uploads == 1 &&
+          cuda_km_res.projection_full_downloads == 0 &&
+          cuda_km_res.result_row_uploads == 0 &&
+          cuda_km_res.result_matrix_downloads == 1,
+          "CUDA KODAMAMatrix did not retain projected labels through dissimilarity.");
+
+  const kodama::KODAMAMatrixResult cuda_graph_data_matrix =
+    kodama::KODAMAMatrixFromGraphData_CUDA(
+      fview,
+      km_base_res.knn,
+      std::vector<int>(),
+      std::vector<int>(),
+      fixed,
+      cuda_km_options
+    );
+  require(cuda_graph_data_matrix.backend == kodama::Backend::CUDA,
+          "Direct CUDA graph-and-data KODAMAMatrix backend mismatch.");
+  require(cuda_graph_data_matrix.res.size() == static_cast<std::size_t>(d.n),
+          "Direct CUDA graph-and-data KODAMAMatrix result size mismatch.");
+  const kodama::KODAMAMatrixResult cuda_graph_matrix =
+    kodama::KODAMAMatrixFromGraph_CUDA(
+      km_base_res.knn,
+      d.n,
+      std::vector<int>(),
+      std::vector<int>(),
+      fixed,
+      cuda_km_options
+    );
+  require(cuda_graph_matrix.backend == kodama::Backend::CUDA,
+          "Direct CUDA graph-input KODAMAMatrix backend mismatch.");
+  require(cuda_graph_matrix.res.size() == static_cast<std::size_t>(d.n),
+          "Direct CUDA graph-input KODAMAMatrix result size mismatch.");
 
   const kodama::KODAMAMatrixResult cuda_km_repeat =
     kodama::KODAMAMatrix_CUDA(
@@ -1383,6 +2738,51 @@ int main() {
     cuda_km_res.knn.distances == cuda_km_repeat.knn.distances,
     "Resident CUDA KODAMA KNN graph distances are not repeatable."
   );
+
+  kodama::KODAMAMatrixOptions cuda_cosine_ivf_options = cuda_km_options;
+  cuda_cosine_ivf_options.metric = kodama::DistanceMetric::Cosine;
+  cuda_cosine_ivf_options.knn.metric = kodama::DistanceMetric::Cosine;
+  cuda_cosine_ivf_options.knn.index_type = kodama::KNNIndexType::CudaIVFFlat;
+  cuda_cosine_ivf_options.knn.ivf_nlist = 8;
+  cuda_cosine_ivf_options.knn.ivf_nprobe = 8;
+  cuda_cosine_ivf_options.apply_kodama_dissimilarity = false;
+  const kodama::KODAMAMatrixResult cuda_cosine_ivf =
+    kodama::KODAMAMatrix_CUDA(
+      fview,
+      std::vector<int>(),
+      std::vector<int>(),
+      fixed,
+      cuda_cosine_ivf_options
+    );
+  require(cuda_cosine_ivf.graph_index_type == kodama::KNNIndexType::CudaIVFFlat,
+          "CUDA KODAMAMatrix did not select resident IVF-Flat explicitly.");
+  for (int row = 0; row < d.n; ++row) {
+    float row_norm = 0.0f;
+    for (int dimension = 0; dimension < d.p; ++dimension) {
+      const float value = xf[static_cast<std::size_t>(row * d.p + dimension)];
+      row_norm += value * value;
+    }
+    row_norm = std::sqrt(row_norm);
+    for (int rank = 0; rank < cuda_cosine_ivf.knn.neighbors; ++rank) {
+      const std::size_t offset = static_cast<std::size_t>(
+        row * cuda_cosine_ivf.knn.neighbors + rank
+      );
+      const int neighbor = cuda_cosine_ivf.knn.indices[offset] - 1;
+      float neighbor_norm = 0.0f;
+      float dot = 0.0f;
+      for (int dimension = 0; dimension < d.p; ++dimension) {
+        const float left = xf[static_cast<std::size_t>(row * d.p + dimension)];
+        const float right = xf[static_cast<std::size_t>(neighbor * d.p + dimension)];
+        dot += left * right;
+        neighbor_norm += right * right;
+      }
+      neighbor_norm = std::sqrt(neighbor_norm);
+      const float expected = row_norm > 0.0f && neighbor_norm > 0.0f ?
+        1.0f - dot / (row_norm * neighbor_norm) : 1.0f;
+      require(std::fabs(cuda_cosine_ivf.knn.distances[offset] - expected) < 1.0e-4f,
+              "Resident CUDA IVF graph did not preserve cosine distances.");
+    }
+  }
 
   kodama::KODAMAMatrixOptions cuda_pls_matrix_options = cuda_km_options;
   cuda_pls_matrix_options.classifier = kodama::CoreClassifier::PLS_LDA;

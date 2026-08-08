@@ -9,13 +9,8 @@
 #include <stdexcept>
 #include <unordered_map>
 
-#if defined(__linux__)
-#include <cstdio>
-#include <cstring>
-#endif
-
-#if defined(__APPLE__)
-#include <mach/mach.h>
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/resource.h>
 #endif
 
 namespace kodama {
@@ -41,6 +36,7 @@ const char* to_string(DistanceMetric metric) {
 
 const char* to_string(KNNIndexType index_type) {
   switch (index_type) {
+    case KNNIndexType::PrecomputedGraph: return "precomputed_graph";
     case KNNIndexType::NativeHNSW: return "native_hnsw";
     case KNNIndexType::CudaExact: return "cuda_exact";
     case KNNIndexType::CudaIVFFlat: return "cuda_ivf_flat";
@@ -259,27 +255,16 @@ ConfusionMatrix make_confusion(const std::vector<int>& truth, const std::vector<
 }
 
 double peak_memory_mb() {
-#if defined(__linux__)
-  FILE* f = std::fopen("/proc/self/status", "r");
-  if (!f) return 0.0;
-  char line[256];
-  double out = 0.0;
-  while (std::fgets(line, sizeof(line), f)) {
-    if (std::strncmp(line, "VmHWM:", 6) == 0) {
-      long kb = 0;
-      if (std::sscanf(line + 6, "%ld", &kb) == 1) out = static_cast<double>(kb) / 1024.0;
-      break;
-    }
-  }
-  std::fclose(f);
-  return out;
-#elif defined(__APPLE__)
-  mach_task_basic_info info;
-  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) {
-    return 0.0;
-  }
-  return static_cast<double>(info.resident_size) / (1024.0 * 1024.0);
+#if defined(__linux__) || defined(__APPLE__)
+  rusage usage{};
+  if (getrusage(RUSAGE_SELF, &usage) != 0) return 0.0;
+#if defined(__APPLE__)
+  // Darwin reports ru_maxrss in bytes.
+  return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+#else
+  // Linux reports ru_maxrss in KiB.
+  return static_cast<double>(usage.ru_maxrss) / 1024.0;
+#endif
 #else
   return 0.0;
 #endif

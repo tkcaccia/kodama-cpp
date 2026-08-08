@@ -134,6 +134,7 @@ struct FloatSimplsWorkspace {
     if (handle != nullptr) cublasDestroy(handle);
     if (solver_handle != nullptr) cusolverDnDestroy(solver_handle);
     if (rng_handle != nullptr) curandDestroyGenerator(rng_handle);
+    if (input_ready_event != nullptr) cudaEventDestroy(input_ready_event);
     if (stream_handle != nullptr) cudaStreamDestroy(stream_handle);
   }
 
@@ -142,6 +143,24 @@ struct FloatSimplsWorkspace {
       check_cuda(cudaStreamCreateWithFlags(&stream_handle, cudaStreamNonBlocking), "cudaStreamCreateWithFlags(float SIMPLS)");
     }
     return stream_handle;
+  }
+
+  void wait_for(cudaStream_t producer) {
+    if (producer == nullptr || producer == stream()) return;
+    if (input_ready_event == nullptr) {
+      check_cuda(
+        cudaEventCreateWithFlags(&input_ready_event, cudaEventDisableTiming),
+        "cudaEventCreateWithFlags(float SIMPLS input)"
+      );
+    }
+    check_cuda(
+      cudaEventRecord(input_ready_event, producer),
+      "cudaEventRecord(float SIMPLS input)"
+    );
+    check_cuda(
+      cudaStreamWaitEvent(stream(), input_ready_event, 0),
+      "cudaStreamWaitEvent(float SIMPLS input)"
+    );
   }
 
   cublasHandle_t blas() {
@@ -185,6 +204,7 @@ struct FloatSimplsWorkspace {
   cusolverDnHandle_t solver_handle = nullptr;
   curandGenerator_t rng_handle = nullptr;
   cudaStream_t stream_handle = nullptr;
+  cudaEvent_t input_ready_event = nullptr;
   FloatDeviceArray dX;
   FloatDeviceArray dBlasWorkspace;
   FloatDeviceArray dY;
@@ -969,6 +989,7 @@ extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels_device(
   const float* class_counts_device,
   int m,
   int max_components,
+  cudaStream_t producer_stream,
   const float** rr_colmajor_device
 ) {
   using namespace kodama_fastpls_cuda;
@@ -979,6 +1000,7 @@ extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels_device(
     return false;
   }
   const int max_ncomp = std::min(max_components, std::min(p, std::max(1, n - 1)));
+  g_float_workspace.wait_for(producer_stream);
   return simpls_fit_cuda_float_fast_crossprod(
     x_colmajor_device,
     n,

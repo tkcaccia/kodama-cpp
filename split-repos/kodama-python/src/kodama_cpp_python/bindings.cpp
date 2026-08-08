@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,23 @@
 namespace py = pybind11;
 
 namespace {
+
+constexpr const char* kGraphCapsuleName = "kodama.KODAMAGraphResult";
+
+py::capsule graph_capsule(kodama::KODAMAGraphResult&& result) {
+  auto* owned = new kodama::KODAMAGraphResult(std::move(result));
+  return py::capsule(owned, kGraphCapsuleName, [](PyObject* capsule) {
+    delete static_cast<kodama::KODAMAGraphResult*>(
+      PyCapsule_GetPointer(capsule, kGraphCapsuleName));
+  });
+}
+
+kodama::KODAMAGraphResult& graph_from_capsule(const py::capsule& capsule) {
+  auto* graph = static_cast<kodama::KODAMAGraphResult*>(
+    PyCapsule_GetPointer(capsule.ptr(), kGraphCapsuleName));
+  if (graph == nullptr) throw std::invalid_argument("Invalid KODAMA graph capsule.");
+  return *graph;
+}
 
 kodama::DistanceMetric parse_metric(const std::string& metric) {
   if (metric == "euclidean" || metric == "l2") return kodama::DistanceMetric::Euclidean;
@@ -130,23 +148,31 @@ py::array_t<float> matrix_to_float_array(
 
 py::array_t<int> matrix_to_int_array(const std::vector<int>& values, int rows, int cols) {
   py::array_t<int> out({rows, cols});
-  auto view = out.mutable_unchecked<2>();
-  for (int i = 0; i < rows; ++i) {
-    for (int j = 0; j < cols; ++j) {
-      view(i, j) = values[static_cast<std::size_t>(i) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(j)];
-    }
+  if (!values.empty()) std::memcpy(out.mutable_data(), values.data(), values.size() * sizeof(int));
+  return out;
+}
+
+py::array_t<int> constraint_matrix_to_int_array(
+  const kodama::KODAMAMatrixResult& result
+) {
+  if (result.res_constrain_rows == result.runs) {
+    return matrix_to_int_array(result.res_constrain, result.runs, result.samples);
+  }
+  py::array_t<int> out({result.runs, result.samples});
+  int* destination = out.mutable_data();
+  for (int run = 0; run < result.runs; ++run) {
+    std::memcpy(
+      destination + static_cast<std::size_t>(run) * result.samples,
+      result.res_constrain.data(),
+      static_cast<std::size_t>(result.samples) * sizeof(int)
+    );
   }
   return out;
 }
 
 py::array_t<double> matrix_to_double_array(const std::vector<double>& values, int rows, int cols) {
   py::array_t<double> out({rows, cols});
-  auto view = out.mutable_unchecked<2>();
-  for (int i = 0; i < rows; ++i) {
-    for (int j = 0; j < cols; ++j) {
-      view(i, j) = values[static_cast<std::size_t>(i) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(j)];
-    }
-  }
+  if (!values.empty()) std::memcpy(out.mutable_data(), values.data(), values.size() * sizeof(double));
   return out;
 }
 
@@ -160,6 +186,7 @@ kodama::NeighborGraph graph_from_arrays(
     throw std::invalid_argument("indices and distances must have the same dimensions.");
   }
   kodama::NeighborGraph graph;
+  graph.index_base = kodama::GraphIndexBase::One;
   graph.neighbors = static_cast<int>(idx.shape(1));
   graph.indices.assign(static_cast<std::size_t>(idx.shape(0)) * static_cast<std::size_t>(idx.shape(1)), 0);
   graph.distances.assign(static_cast<std::size_t>(dst.shape(0)) * static_cast<std::size_t>(dst.shape(1)), 0.0f);
@@ -291,8 +318,12 @@ py::dict kodama_matrix_to_python(const kodama::KODAMAMatrixResult& result, const
   out["acc"] = vector_to_double_array(result.acc);
   out["v"] = matrix_to_double_array(result.v, result.runs, result.cycles);
   out["res"] = matrix_to_int_array(result.res, result.runs, result.samples);
-  out["res_constrain"] = matrix_to_int_array(result.res_constrain, result.runs, result.samples);
-  out["knn"] = graph_to_python(result.knn, result.samples);
+  out["res_constrain"] = constraint_matrix_to_int_array(result);
+  if (options.materialize_graph) {
+    out["knn"] = graph_to_python(result.knn, result.samples);
+  } else {
+    out["knn"] = py::none();
+  }
   out["knn_is_kodama_corrected"] = result.knn_is_kodama_corrected;
   out["graph_storage_bytes"] = result.graph_storage_bytes;
   if (result.has_visual_init) {
@@ -304,10 +335,27 @@ py::dict kodama_matrix_to_python(const kodama::KODAMAMatrixResult& result, const
     out["visual_init"] = py::none();
   }
   out["graph_builds"] = result.graph_builds;
+  out["graph_index_type"] = kodama::to_string(result.graph_index_type);
+  out["graph_ivf_nlist"] = result.graph_ivf_nlist;
+  out["graph_ivf_nprobe"] = result.graph_ivf_nprobe;
+  out["graph_ivf_pilot_recall"] = result.graph_ivf_pilot_recall;
+  out["n_cores"] = result.n_threads;
+  out["gpu_auto_workers"] = result.gpu_auto_workers;
+  out["gpu_scheduler_enabled"] = result.gpu_scheduler_enabled;
+  out["gpu_scheduler_lanes"] = result.gpu_scheduler_lanes;
+  out["kmeans_input_uploads"] = result.kmeans_input_uploads;
+  out["projection_sparse_uploads"] = result.projection_sparse_uploads;
+  out["projection_full_downloads"] = result.projection_full_downloads;
+  out["result_row_uploads"] = result.result_row_uploads;
+  out["result_matrix_downloads"] = result.result_matrix_downloads;
+  out["gpu_worker_memory_estimate_mb"] = result.gpu_worker_memory_estimate_mb;
   out["runtime_seconds"] = result.runtime_seconds;
   out["analysis_storage"] = "float32";
   out["classifier"] = kodama::to_string(options.classifier);
-  out["backend"] = kodama::to_string(options.backend);
+  out["backend"] = kodama::to_string(result.backend);
+  out["graph_backend"] = kodama::to_string(result.graph_backend);
+  out["optimization_backend"] = kodama::to_string(result.optimization_backend);
+  out["dissimilarity_backend"] = kodama::to_string(result.dissimilarity_backend);
   out["graph_feature_mode"] = kodama::to_string(options.graph_feature_mode);
   out["peak_memory_mb"] = result.peak_memory_mb;
   py::dict timing;
@@ -325,7 +373,7 @@ py::dict kodama_matrix_to_python(const kodama::KODAMAMatrixResult& result, const
   return out;
 }
 
-py::array_t<float> embedding_to_python(const kodama::EmbeddingResult& result) {
+py::dict embedding_to_python(const kodama::EmbeddingResult& result) {
   py::array_t<float> out({result.samples, result.components});
   auto view = out.mutable_unchecked<2>();
   for (int i = 0; i < result.samples; ++i) {
@@ -333,7 +381,18 @@ py::array_t<float> embedding_to_python(const kodama::EmbeddingResult& result) {
       view(i, j) = result.embedding[static_cast<std::size_t>(i) * static_cast<std::size_t>(result.components) + static_cast<std::size_t>(j)];
     }
   }
-  return out;
+  py::dict metadata;
+  metadata["embedding"] = std::move(out);
+  metadata["runtime_seconds"] = result.runtime_seconds;
+  metadata["backend"] = kodama::to_string(result.backend);
+  metadata["initialization"] = result.initialization;
+  metadata["initialization_backend"] = kodama::to_string(
+    result.initialization_backend
+  );
+  metadata["optimizer"] = result.optimizer;
+  metadata["graph_edges"] = result.graph_edges;
+  metadata["graph_max_weight"] = result.graph_max_weight;
+  return metadata;
 }
 
 py::dict pca_to_python(const kodama::PCAResult& result) {
@@ -452,7 +511,8 @@ py::dict matrix(
   int seed,
   bool progress,
   bool apply_kodama_dissimilarity,
-  bool compute_visual_init
+  bool compute_visual_init,
+  bool return_graph
 ) {
   auto x_view = data.unchecked<2>();
   const int n = static_cast<int>(x_view.shape(0));
@@ -476,6 +536,7 @@ py::dict matrix(
   options.progress = progress;
   options.apply_kodama_dissimilarity = apply_kodama_dissimilarity;
   options.compute_visual_init = compute_visual_init;
+  options.materialize_graph = return_graph;
   options.knn.k = knn_k;
   options.knn.hnsw_tune_k = 50;
   options.knn.hnsw_target_recall = 0.99;
@@ -538,7 +599,8 @@ py::dict matrix_graph(
   int graph_feature_steps,
   int seed,
   bool progress,
-  bool apply_kodama_dissimilarity
+  bool apply_kodama_dissimilarity,
+  bool return_graph
 ) {
   auto idx = indices.unchecked<2>();
   auto dst = distances.unchecked<2>();
@@ -562,6 +624,7 @@ py::dict matrix_graph(
   options.classifier = parse_classifier(classifier);
   options.progress = progress;
   options.apply_kodama_dissimilarity = apply_kodama_dissimilarity;
+  options.materialize_graph = return_graph;
   options.compute_visual_init = false;
   options.graph_feature_mode = parse_graph_feature_mode(graph_feature_mode);
   options.graph_feature_components = graph_feature_components;
@@ -603,6 +666,71 @@ py::dict matrix_graph(
     result = kodama::KODAMAMatrixFromGraphData(view, graph, labels, constraints, fixed, options);
   } else {
     result = kodama::KODAMAMatrixFromGraph(graph, static_cast<int>(idx.shape(0)), labels, constraints, fixed, options);
+  }
+  return kodama_matrix_to_python(result, options);
+}
+
+py::dict matrix_graph_handle(
+  py::capsule capsule, py::object data, py::object spatial, py::object W,
+  py::object constrain, py::object fix, int M, int Tcycle, int ncomp,
+  int landmarks, int splitting, int n_threads, int graph_neighbors, int knn_k,
+  double spatial_resolution, bool spatial_graph_mix, int spatial_constraint_mode,
+  const std::string& classifier, const std::string& backend,
+  const std::string& graph_feature_mode, int graph_feature_components,
+  int graph_feature_steps, int seed, bool progress,
+  bool apply_kodama_dissimilarity, bool return_graph
+) {
+  kodama::KODAMAGraphResult& prepared = graph_from_capsule(capsule);
+  kodama::KODAMAMatrixOptions options;
+  options.runs = M;
+  options.cycles = Tcycle;
+  options.components = ncomp;
+  options.landmarks = landmarks;
+  options.splitting = splitting;
+  options.n_threads = n_threads;
+  options.graph_neighbors = graph_neighbors;
+  options.knn.k = knn_k;
+  options.spatial_resolution = spatial_resolution;
+  options.spatial_graph_mix = spatial_graph_mix;
+  options.spatial_constraint_mode = spatial_constraint_mode;
+  options.classifier = parse_classifier(classifier);
+  options.backend = parse_backend(backend);
+  options.graph_feature_mode = parse_graph_feature_mode(graph_feature_mode);
+  options.graph_feature_components = graph_feature_components;
+  options.graph_feature_steps = graph_feature_steps;
+  options.seed = static_cast<std::uint64_t>(seed);
+  options.progress = progress;
+  options.apply_kodama_dissimilarity = apply_kodama_dissimilarity;
+  options.materialize_graph = return_graph;
+  options.compute_visual_init = false;
+  options.knn.n_threads = 1;
+  options.pls.n_threads = 1;
+  if (!spatial.is_none()) {
+    py::array_t<float, py::array::c_style | py::array::forcecast> values(spatial);
+    auto view = values.unchecked<2>();
+    if (view.shape(0) != prepared.samples) {
+      throw std::invalid_argument("spatial rows must match graph rows.");
+    }
+    options.spatial_cols = static_cast<int>(view.shape(1));
+    options.spatial.assign(values.data(), values.data() + values.size());
+  }
+  const std::vector<int> labels = optional_int_vector(W);
+  const std::vector<int> constraints = optional_int_vector(constrain);
+  const std::vector<int> fixed = optional_int_vector(fix);
+  kodama::KODAMAMatrixResult result;
+  if (!data.is_none()) {
+    py::array_t<float, py::array::c_style | py::array::forcecast> values(data);
+    auto view = values.unchecked<2>();
+    if (view.shape(0) != prepared.samples) {
+      throw std::invalid_argument("data rows must match graph rows.");
+    }
+    result = kodama::KODAMAMatrix(
+      kodama::MatrixView{values.data(), static_cast<std::size_t>(view.shape(0)),
+                         static_cast<std::size_t>(view.shape(1))},
+      prepared, labels, constraints, fixed, options);
+  } else {
+    result = kodama::KODAMAMatrix(
+      prepared, labels, constraints, fixed, options);
   }
   return kodama_matrix_to_python(result, options);
 }
@@ -776,7 +904,8 @@ py::dict knn_graph(
   const std::string& backend,
   int n_threads,
   int gpu_device,
-  int seed
+  int seed,
+  const std::string& storage
 ) {
   auto x_view = data.unchecked<2>();
   kodama::KODAMAGraphOptions options;
@@ -786,8 +915,12 @@ py::dict knn_graph(
   options.n_threads = n_threads;
   options.gpu_device = gpu_device;
   options.seed = static_cast<std::uint64_t>(seed);
+  if (storage != "handle" && storage != "matrix") {
+    throw std::invalid_argument("storage must be 'handle' or 'matrix'.");
+  }
+  options.materialize_graph = storage == "matrix";
   const int n = static_cast<int>(x_view.shape(0));
-  const kodama::KODAMAGraphResult result = kodama::KODAMAGraph(
+  kodama::KODAMAGraphResult result = kodama::KODAMAGraph(
     kodama::MatrixView{
       static_cast<const float*>(data.request().ptr),
       static_cast<std::size_t>(x_view.shape(0)),
@@ -795,21 +928,49 @@ py::dict knn_graph(
     },
     options
   );
-  py::dict out = graph_to_python(result.knn, n);
-  out["visual_init"] = visualization_init_to_python(result.visual_init, seed);
-  out["samples"] = result.samples;
-  out["dimensions"] = result.dimensions;
-  out["backend"] = kodama::to_string(result.backend);
+  py::dict out;
+  if (storage == "matrix") {
+    out = graph_to_python(result.knn, n);
+  } else {
+    out["handle"] = graph_capsule(std::move(result));
+    out["storage"] = "handle";
+  }
+  kodama::KODAMAGraphResult* metadata = nullptr;
+  if (storage == "handle") {
+    metadata = &graph_from_capsule(
+      py::reinterpret_borrow<py::capsule>(out["handle"]));
+  } else {
+    metadata = &result;
+  }
+  out["visual_init"] = visualization_init_to_python(metadata->visual_init, seed);
+  out["samples"] = metadata->samples;
+  out["neighbors"] = metadata->neighbors;
+  out["dimensions"] = metadata->dimensions;
+  out["backend"] = kodama::to_string(metadata->backend);
+  out["index_type"] = kodama::to_string(metadata->index_type);
+  out["ivf_nlist"] = metadata->ivf_nlist;
+  out["ivf_nprobe"] = metadata->ivf_nprobe;
+  out["ivf_pilot_recall"] = metadata->ivf_pilot_recall;
   out["metric"] = metric;
-  out["graph_builds"] = result.graph_builds;
-  out["graph_storage_bytes"] = result.graph_storage_bytes;
-  out["runtime_seconds"] = result.runtime_seconds;
+  out["graph_builds"] = metadata->graph_builds;
+  out["graph_storage_bytes"] = metadata->graph_storage_bytes;
+  out["runtime_seconds"] = metadata->runtime_seconds;
   py::dict timing;
-  timing["input_copy_seconds"] = result.input_copy_seconds;
-  timing["graph_seconds"] = result.graph_seconds;
-  timing["visual_init_seconds"] = result.visual_init_seconds;
-  timing["runtime_seconds"] = result.runtime_seconds;
+  timing["input_copy_seconds"] = metadata->input_copy_seconds;
+  timing["graph_seconds"] = metadata->graph_seconds;
+  timing["visual_init_seconds"] = metadata->visual_init_seconds;
+  timing["runtime_seconds"] = metadata->runtime_seconds;
   out["timing"] = timing;
+  return out;
+}
+
+py::dict materialize_graph(py::capsule capsule) {
+  kodama::KODAMAGraphResult& prepared = graph_from_capsule(capsule);
+  py::dict out = graph_to_python(
+    kodama::KODAMAGraphMaterialize(prepared), prepared.samples);
+  out["samples"] = prepared.samples;
+  out["neighbors"] = prepared.neighbors;
+  out["storage"] = "matrix";
   return out;
 }
 
@@ -942,7 +1103,7 @@ py::dict visual_init(
   );
 }
 
-py::array_t<float> umap(
+py::dict umap(
   py::array_t<int, py::array::c_style | py::array::forcecast> indices,
   py::array_t<float, py::array::c_style | py::array::forcecast> distances,
   py::object init,
@@ -983,18 +1144,15 @@ py::array_t<float> umap(
   }
   const kodama::NeighborGraph g = graph_from_arrays(indices, distances);
   const kodama::Backend selected = parse_backend(backend);
-  if (selected == kodama::Backend::Metal) {
-    throw std::invalid_argument(
-      "KODAMA UMAP currently supports CPU and CUDA backends, not Metal."
-    );
-  }
   const kodama::EmbeddingResult result = selected == kodama::Backend::CUDA ?
     kodama::KODAMAUMAP_CUDA(g, options) :
-    kodama::KODAMAUMAP_CPU(g, options);
+    selected == kodama::Backend::Metal ?
+      kodama::KODAMAUMAP_METAL(g, options) :
+      kodama::KODAMAUMAP_CPU(g, options);
   return embedding_to_python(result);
 }
 
-py::array_t<float> opentsne(
+py::dict opentsne(
   py::array_t<int, py::array::c_style | py::array::forcecast> indices,
   py::array_t<float, py::array::c_style | py::array::forcecast> distances,
   py::object init,
@@ -1045,14 +1203,11 @@ py::array_t<float> opentsne(
   }
   const kodama::NeighborGraph g = graph_from_arrays(indices, distances);
   const kodama::Backend selected = parse_backend(backend);
-  if (selected == kodama::Backend::Metal) {
-    throw std::invalid_argument(
-      "KODAMA openTSNE currently supports CPU and CUDA backends, not Metal."
-    );
-  }
   const kodama::EmbeddingResult result = selected == kodama::Backend::CUDA ?
     kodama::KODAMAOpenTSNE_CUDA(g, options) :
-    kodama::KODAMAOpenTSNE_CPU(g, options);
+    selected == kodama::Backend::Metal ?
+      kodama::KODAMAOpenTSNE_METAL(g, options) :
+      kodama::KODAMAOpenTSNE_CPU(g, options);
   return embedding_to_python(result);
 }
 
@@ -1212,7 +1367,8 @@ PYBIND11_MODULE(_core, m) {
     py::arg("seed") = 1234,
     py::arg("progress") = true,
     py::arg("apply_kodama_dissimilarity") = true,
-    py::arg("compute_visual_init") = false
+    py::arg("compute_visual_init") = false,
+    py::arg("return_graph") = false
   );
   m.def(
     "matrix_graph",
@@ -1242,7 +1398,27 @@ PYBIND11_MODULE(_core, m) {
     py::arg("graph_feature_steps") = 3,
     py::arg("seed") = 1234,
     py::arg("progress") = true,
-    py::arg("apply_kodama_dissimilarity") = true
+    py::arg("apply_kodama_dissimilarity") = true,
+    py::arg("return_graph") = false
+  );
+  m.def(
+    "matrix_graph_handle", &matrix_graph_handle,
+    py::arg("handle"), py::arg("data") = py::none(),
+    py::arg("spatial") = py::none(), py::arg("W") = py::none(),
+    py::arg("constrain") = py::none(), py::arg("fix") = py::none(),
+    py::arg("M") = 100, py::arg("Tcycle") = 20, py::arg("ncomp") = 50,
+    py::arg("landmarks") = 10000, py::arg("splitting") = 100,
+    py::arg("n_threads") = 4, py::arg("graph_neighbors") = 100,
+    py::arg("knn_k") = 30, py::arg("spatial_resolution") = 0.3,
+    py::arg("spatial_graph_mix") = false,
+    py::arg("spatial_constraint_mode") = 0,
+    py::arg("classifier") = "knn", py::arg("backend") = "cpu",
+    py::arg("graph_feature_mode") = "laplacian_self_tuning",
+    py::arg("graph_feature_components") = 0,
+    py::arg("graph_feature_steps") = 3, py::arg("seed") = 1234,
+    py::arg("progress") = true,
+    py::arg("apply_kodama_dissimilarity") = true,
+    py::arg("return_graph") = false
   );
   m.def(
     "graph",
@@ -1253,8 +1429,10 @@ PYBIND11_MODULE(_core, m) {
     py::arg("backend") = "cpu",
     py::arg("n_threads") = 4,
     py::arg("gpu_device") = 0,
-    py::arg("seed") = 1234
+    py::arg("seed") = 1234,
+    py::arg("storage") = "handle"
   );
+  m.def("graph_materialize", &materialize_graph, py::arg("handle"));
   m.def(
     "pca",
     &pca,

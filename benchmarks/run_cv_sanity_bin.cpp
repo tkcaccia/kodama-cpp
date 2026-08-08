@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
@@ -74,6 +75,20 @@ std::string csv_escape(const std::string& x) {
   return out;
 }
 
+std::string prediction_hash(const std::vector<int>& labels) {
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (int label : labels) {
+    const std::uint32_t value = static_cast<std::uint32_t>(label);
+    for (int byte = 0; byte < 4; ++byte) {
+      hash ^= static_cast<std::uint8_t>(value >> (8 * byte));
+      hash *= 1099511628211ULL;
+    }
+  }
+  std::ostringstream out;
+  out << std::hex << std::setfill('0') << std::setw(16) << hash;
+  return out.str();
+}
+
 template <class Fn>
 BenchRow run_knn(const std::string& dataset, const std::string& name, const std::string& backend, Fn fn) {
   BenchRow row;
@@ -126,7 +141,8 @@ BenchRow run_pls(const std::string& dataset, const std::string& name, const std:
     os << "mode=" << kodama::to_string(result.parameters.mode)
        << ";max_components=" << result.parameters.max_components
        << ";fixed_components=" << result.parameters.fixed_components
-       << ";selected_components=" << result.parameters.selected_components;
+       << ";selected_components=" << result.parameters.selected_components
+       << ";prediction_hash=" << prediction_hash(result.predicted_labels);
     row.details = os.str();
   } catch (const std::exception& e) {
     row.status = "failed";
@@ -233,9 +249,15 @@ int main(int argc, char** argv) {
   std::vector<int> y = read_int_bin(y_path, n);
   std::vector<int> constrain;
 
+  const char* seed_env = std::getenv("KODAMA_CV_SEED");
+  const int cv_seed = seed_env == nullptr ? 7 : std::stoi(seed_env);
+  const char* folds_env = std::getenv("KODAMA_CV_FOLDS");
+  const int cv_folds = folds_env == nullptr ? 5 : std::stoi(folds_env);
+  if (cv_folds < 2) throw std::invalid_argument("KODAMA_CV_FOLDS must be at least 2.");
+
   kodama::KNNOptions knn;
-  knn.cv.folds = 5;
-  knn.cv.seed = 7;
+  knn.cv.folds = cv_folds;
+  knn.cv.seed = static_cast<std::uint64_t>(cv_seed);
   const char* stratified_env = std::getenv("KODAMA_CV_STRATIFIED");
   const bool stratified =
     stratified_env == nullptr || std::string(stratified_env) != "0";
@@ -247,8 +269,8 @@ int main(int argc, char** argv) {
   knn.n_threads = n_threads;
 
   kodama::PLSOptions pls;
-  pls.cv.folds = 5;
-  pls.cv.seed = 7;
+  pls.cv.folds = cv_folds;
+  pls.cv.seed = static_cast<std::uint64_t>(cv_seed);
   pls.cv.stratified = stratified;
   pls.max_components = pls_max_components;
   pls.fixed_components = pls_max_components;

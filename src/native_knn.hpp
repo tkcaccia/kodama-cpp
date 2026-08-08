@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "kodama/kodama.hpp"
@@ -22,6 +23,39 @@ struct NativeKNNResult {
   std::vector<int> indices;
   // Internal smaller-is-better values: squared L2 or negative inner product.
   std::vector<float> distances;
+};
+
+class NativeHNSWIndex {
+ public:
+  NativeHNSWIndex();
+  ~NativeHNSWIndex();
+  NativeHNSWIndex(NativeHNSWIndex&&) noexcept;
+  NativeHNSWIndex& operator=(NativeHNSWIndex&&) noexcept;
+  NativeHNSWIndex(const NativeHNSWIndex&) = delete;
+  NativeHNSWIndex& operator=(const NativeHNSWIndex&) = delete;
+
+  bool valid() const noexcept;
+  int rows() const noexcept;
+  int dimensions() const noexcept;
+  DistanceMetric metric() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+  explicit NativeHNSWIndex(std::unique_ptr<Impl> impl);
+
+  friend NativeHNSWIndex native_build_hnsw_index(
+    std::vector<float>, int, int, DistanceMetric,
+    const NativeHNSWParameters&, int
+  );
+  friend NativeKNNResult native_hnsw_index_search(
+    const NativeHNSWIndex&, const std::vector<float>&, int, int, int,
+    const std::vector<int>&
+  );
+  friend NativeKNNResult native_hnsw_index_filtered_search(
+    const NativeHNSWIndex&, const std::vector<float>&, int, int, int,
+    const std::vector<int>&, const std::vector<int>&
+  );
 };
 
 std::vector<float> prepare_native_matrix(
@@ -43,6 +77,34 @@ NativeKNNResult native_hnsw_search(
   const NativeHNSWParameters& parameters,
   int n_threads,
   const std::vector<int>& query_train_indices = {}
+);
+
+NativeHNSWIndex native_build_hnsw_index(
+  std::vector<float> train,
+  int train_rows,
+  int dimensions,
+  DistanceMetric metric,
+  const NativeHNSWParameters& parameters,
+  int n_threads
+);
+
+NativeKNNResult native_hnsw_index_search(
+  const NativeHNSWIndex& index,
+  const std::vector<float>& query,
+  int query_rows,
+  int k,
+  int n_threads,
+  const std::vector<int>& query_train_indices = {}
+);
+
+NativeKNNResult native_hnsw_index_filtered_search(
+  const NativeHNSWIndex& index,
+  const std::vector<float>& query,
+  int query_rows,
+  int k,
+  int n_threads,
+  const std::vector<int>& query_train_indices,
+  const std::vector<int>& allowed_local_ids
 );
 
 float native_knn_score(float internal_distance, DistanceMetric metric);

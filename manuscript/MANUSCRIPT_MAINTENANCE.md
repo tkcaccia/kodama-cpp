@@ -16,6 +16,11 @@ Update targets:
   publication files remain reproducible
 
 Do not describe rejected experimental paths as supported features.
+MERFISH and Br8100 are internal regression fixtures only. They must not appear
+in the JMLR manuscript, supplement, cover letter, readiness report, or
+publication figures. Submission-facing visualization evidence must come from
+the non-spatial benchmark archive and compare KODAMA with classic UMAP and
+openTSNE on matched datasets, seeds, parameters, and backends.
 Do not enter a release DOI, tag, commit, benchmark value, author consent,
 funding statement, conflict declaration, editor, or reviewer before it has
 been produced or confirmed.

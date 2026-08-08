@@ -37,6 +37,9 @@ int main() {
       kodama::MatrixView, const kodama::GraphClusterOptions&);
   using PreparedGraphFn = kodama::KODAMAGraphResult (*)(
       kodama::MatrixView, const kodama::KODAMAGraphOptions&);
+  using SpatialPreparedGraphFn = kodama::KODAMAGraphResult (*)(
+      kodama::MatrixView, kodama::MatrixView,
+      const kodama::KODAMAGraphOptions&);
   using ClusterFn = kodama::GraphClusterResult (*)(
       const kodama::NeighborGraph&, int, const kodama::GraphClusterOptions&);
   using UMAPFn = kodama::EmbeddingResult (*)(
@@ -92,11 +95,17 @@ int main() {
   const PreparedGraphFn prepared_graph[] = {
       &kodama::KODAMAGraph, &kodama::KODAMAGraph_CPU,
       &kodama::KODAMAGraph_CUDA, &kodama::KODAMAGraph_METAL};
+  const SpatialPreparedGraphFn spatial_prepared_graph[] = {
+      &kodama::KODAMAGraph, &kodama::KODAMAGraph_CPU,
+      &kodama::KODAMAGraph_CUDA, &kodama::KODAMAGraph_METAL};
   const ClusterFn cluster[] = {
       &kodama::KODAMAGraphCluster, &kodama::KODAMAGraphCluster_CPU};
-  const UMAPFn umap[] = {&kodama::KODAMAUMAP_CPU, &kodama::KODAMAUMAP_CUDA};
+  const UMAPFn umap[] = {
+      &kodama::KODAMAUMAP_CPU, &kodama::KODAMAUMAP_CUDA,
+      &kodama::KODAMAUMAP_METAL};
   const TSNEFn tsne[] = {
-      &kodama::KODAMAOpenTSNE_CPU, &kodama::KODAMAOpenTSNE_CUDA};
+      &kodama::KODAMAOpenTSNE_CPU, &kodama::KODAMAOpenTSNE_CUDA,
+      &kodama::KODAMAOpenTSNE_METAL};
   const PCAFn pca[] = {
       &kodama::PCA, &kodama::PCA_CPU, &kodama::PCA_CUDA, &kodama::PCA_METAL};
   const NormalizationFn normalization[] = {
@@ -119,6 +128,7 @@ int main() {
   return knn[0] && pls[0] && core[0] && matrix[0] &&
                  prepared_data_matrix && prepared_matrix && matrix_graph[0] &&
                  matrix_data_graph[0] && graph[0] && prepared_graph[0] &&
+                 spatial_prepared_graph[0] &&
                  cluster[0] && umap[0] &&
                  tsne[0] && pca[0] && normalization[0] && scaling[0] && visualization_init &&
                  dissimilarity_in_place && resident_ivf_build &&

@@ -7,9 +7,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
+#include <deque>
 #include <exception>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -27,14 +30,6 @@
 #include <cusolverDn.h>
 #include <cuda_runtime.h>
 
-extern "C" void kodama_cuda_lda_label_sums_row(const double*, const int*, int, int, int, double*, cudaStream_t);
-extern "C" void kodama_cuda_lda_means_row(double*, const double*, int, int, cudaStream_t);
-extern "C" void kodama_cuda_lda_pooled_col(double*, const double*, const double*, int, int, int, cudaStream_t);
-extern "C" void kodama_cuda_lda_copy_cov(const double*, double*, int, int, cudaStream_t);
-extern "C" void kodama_cuda_lda_add_ridge(double*, int, double, double*, cudaStream_t);
-extern "C" void kodama_cuda_lda_means_to_rhs(const double*, double*, int, int, int, cudaStream_t);
-extern "C" void kodama_cuda_lda_finalize_linear_row(const double*, const double*, const double*, double*, double*, int, int, int, int, cudaStream_t);
-extern "C" void kodama_cuda_lda_score_argmax_row(const double*, const double*, const double*, int*, int, int, int, cudaStream_t);
 extern "C" void kodama_cuda_lda_label_sums_row_float(const float*, const int*, int, int, int, float*, cudaStream_t);
 extern "C" void kodama_cuda_lda_means_row_float(float*, const float*, int, int, cudaStream_t);
 extern "C" void kodama_cuda_lda_pooled_col_float(float*, const float*, const float*, int, int, int, cudaStream_t);
@@ -49,7 +44,8 @@ extern "C" bool kodama_fastpls_simpls_fit_cuda_float_crossprod(const float*, int
 extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels(const float*, int, int, const int*, const float*, int, int, int, float*, float*);
 extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels_gram(const float*, int, int, const float*, const int*, const float*, int, int, int, float*, float*);
 extern "C" bool kodama_fastpls_simpls_fit_cuda_float_labels_device(
-  const float*, int, int, const float*, const int*, const float*, int, int, const float**
+  const float*, int, int, const float*, const int*, const float*, int, int,
+  cudaStream_t, const float**
 );
 extern "C" void kodama_cuda_transpose_pls_weights_float(
   const float*, float*, int, int, cudaStream_t
@@ -140,54 +136,6 @@ CudaLDAContext& cuda_lda_context(int device) {
   }
   return *context;
 }
-
-class DeviceBuffer {
- public:
-  DeviceBuffer() = default;
-  explicit DeviceBuffer(std::size_t n) { reset(n); }
-
-  ~DeviceBuffer() {
-    if (ptr_ != nullptr) cudaFree(ptr_);
-  }
-
-  DeviceBuffer(const DeviceBuffer&) = delete;
-  DeviceBuffer& operator=(const DeviceBuffer&) = delete;
-  DeviceBuffer(DeviceBuffer&& other) noexcept : ptr_(other.ptr_), size_(other.size_) {
-    other.ptr_ = nullptr;
-    other.size_ = 0;
-  }
-  DeviceBuffer& operator=(DeviceBuffer&& other) noexcept {
-    if (this != &other) {
-      if (ptr_ != nullptr) cudaFree(ptr_);
-      ptr_ = other.ptr_;
-      size_ = other.size_;
-      other.ptr_ = nullptr;
-      other.size_ = 0;
-    }
-    return *this;
-  }
-
-  void reset(std::size_t n) {
-    if (ptr_ != nullptr) {
-      cudaFree(ptr_);
-      ptr_ = nullptr;
-    }
-    size_ = n;
-    if (n > 0) check_cuda(cudaMalloc(&ptr_, n * sizeof(double)), "cudaMalloc");
-  }
-
-  void ensure(std::size_t n) {
-    if (n > size_) reset(n);
-  }
-
-  double* data() { return ptr_; }
-  const double* data() const { return ptr_; }
-  std::size_t size() const { return size_; }
-
- private:
-  double* ptr_ = nullptr;
-  std::size_t size_ = 0;
-};
 
 class DeviceIntBuffer {
  public:
@@ -300,6 +248,8 @@ struct CudaPLSLDAFloatWorkspace {
     DeviceFloatBuffer train_rowmajor;
     DeviceFloatBuffer validation_rowmajor;
     DeviceFloatBuffer train_colmajor;
+    DeviceFloatBuffer train_gram_colmajor;
+    bool train_gram_ready = false;
   };
 
   int device = 0;
@@ -308,6 +258,8 @@ struct CudaPLSLDAFloatWorkspace {
   DeviceFloatBuffer weights;
   DeviceFloatBuffer train_scores;
   DeviceFloatBuffer val_scores;
+  DeviceFloatBuffer class_feature_sums;
+  DeviceFloatBuffer projected_gram;
   DeviceIntBuffer labels;
   DeviceFloatBuffer counts;
   DeviceFloatBuffer means;
@@ -337,19 +289,105 @@ CudaPLSLDAFloatWorkspace& cuda_pls_lda_float_workspace(int device) {
   return *workspace;
 }
 
-#endif
+class PersistentFoldExecutor {
+ public:
+  explicit PersistentFoldExecutor(std::size_t worker_count) {
+    workers_.reserve(worker_count);
+    for (std::size_t i = 0; i < worker_count; ++i) {
+      workers_.push_back(std::make_unique<Worker>());
+      Worker* worker = workers_.back().get();
+      worker->thread = std::thread([worker]() {
+        for (;;) {
+          std::function<void()> task;
+          {
+            std::unique_lock<std::mutex> lock(worker->mutex);
+            worker->ready.wait(lock, [worker]() {
+              return worker->stop || !worker->tasks.empty();
+            });
+            if (worker->stop && worker->tasks.empty()) return;
+            task = std::move(worker->tasks.front());
+            worker->tasks.pop_front();
+          }
+          task();
+        }
+      });
+    }
+  }
 
-struct Dense {
-  int rows = 0;
-  int cols = 0;
-  std::vector<double> data;
+  ~PersistentFoldExecutor() {
+    for (const std::unique_ptr<Worker>& worker : workers_) {
+      {
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        worker->stop = true;
+      }
+      worker->ready.notify_one();
+    }
+    for (const std::unique_ptr<Worker>& worker : workers_) {
+      if (worker->thread.joinable()) worker->thread.join();
+    }
+  }
 
-  Dense() = default;
-  Dense(int r, int c) : rows(r), cols(c), data(static_cast<std::size_t>(r * c), 0.0) {}
+  PersistentFoldExecutor(const PersistentFoldExecutor&) = delete;
+  PersistentFoldExecutor& operator=(const PersistentFoldExecutor&) = delete;
 
-  double& operator()(int i, int j) { return data[static_cast<std::size_t>(i * cols + j)]; }
-  double operator()(int i, int j) const { return data[static_cast<std::size_t>(i * cols + j)]; }
+  void run(const std::vector<std::function<void()>>& tasks) {
+    if (tasks.empty()) return;
+    struct Batch {
+      std::mutex mutex;
+      std::condition_variable finished;
+      std::size_t remaining = 0;
+      std::exception_ptr error;
+    };
+    auto batch = std::make_shared<Batch>();
+    batch->remaining = tasks.size();
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+      Worker& worker = *workers_[i % workers_.size()];
+      std::function<void()> wrapped = [task = tasks[i], batch]() {
+        try {
+          task();
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(batch->mutex);
+          if (!batch->error) batch->error = std::current_exception();
+        }
+        {
+          std::lock_guard<std::mutex> lock(batch->mutex);
+          --batch->remaining;
+        }
+        batch->finished.notify_one();
+      };
+      {
+        std::lock_guard<std::mutex> lock(worker.mutex);
+        worker.tasks.push_back(std::move(wrapped));
+      }
+      worker.ready.notify_one();
+    }
+    std::unique_lock<std::mutex> lock(batch->mutex);
+    batch->finished.wait(lock, [batch]() { return batch->remaining == 0; });
+    if (batch->error) std::rethrow_exception(batch->error);
+  }
+
+  std::size_t size() const { return workers_.size(); }
+
+ private:
+  struct Worker {
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::deque<std::function<void()>> tasks;
+    bool stop = false;
+    std::thread thread;
+  };
+  std::vector<std::unique_ptr<Worker>> workers_;
 };
+
+PersistentFoldExecutor& persistent_fold_executor(std::size_t worker_count) {
+  thread_local std::unique_ptr<PersistentFoldExecutor> executor;
+  if (!executor || executor->size() != worker_count) {
+    executor = std::make_unique<PersistentFoldExecutor>(worker_count);
+  }
+  return *executor;
+}
+
+#endif
 
 struct DenseF {
   int rows = 0;
@@ -362,53 +400,6 @@ struct DenseF {
   float& operator()(int i, int j) { return data[static_cast<std::size_t>(i * cols + j)]; }
   float operator()(int i, int j) const { return data[static_cast<std::size_t>(i * cols + j)]; }
 };
-
-double dot(const std::vector<double>& a, const std::vector<double>& b) {
-  long double out = 0.0;
-  for (std::size_t i = 0; i < a.size(); ++i) out += static_cast<long double>(a[i]) * b[i];
-  return static_cast<double>(out);
-}
-
-double norm2(const std::vector<double>& x) {
-  return std::sqrt(std::max(0.0, dot(x, x)));
-}
-
-std::vector<double> mat_vec(const Dense& a, const std::vector<double>& x) {
-  std::vector<double> out(static_cast<std::size_t>(a.rows), 0.0);
-  for (int i = 0; i < a.rows; ++i) {
-    long double s = 0.0;
-    for (int j = 0; j < a.cols; ++j) s += static_cast<long double>(a(i, j)) * x[static_cast<std::size_t>(j)];
-    out[static_cast<std::size_t>(i)] = static_cast<double>(s);
-  }
-  return out;
-}
-
-std::vector<double> t_mat_vec(const Dense& a, const std::vector<double>& x) {
-  std::vector<double> out(static_cast<std::size_t>(a.cols), 0.0);
-  for (int j = 0; j < a.cols; ++j) {
-    long double s = 0.0;
-    for (int i = 0; i < a.rows; ++i) s += static_cast<long double>(a(i, j)) * x[static_cast<std::size_t>(i)];
-    out[static_cast<std::size_t>(j)] = static_cast<double>(s);
-  }
-  return out;
-}
-
-Dense subset_scale(
-  MatrixView x,
-  const std::vector<int>& rows,
-  const std::vector<double>& mean,
-  const std::vector<double>& scale
-) {
-  Dense out(static_cast<int>(rows.size()), static_cast<int>(x.cols));
-  for (int i = 0; i < out.rows; ++i) {
-    const int src = rows[static_cast<std::size_t>(i)];
-    for (int j = 0; j < out.cols; ++j) {
-      out(i, j) = (x(static_cast<std::size_t>(src), static_cast<std::size_t>(j)) - mean[static_cast<std::size_t>(j)]) /
-                  scale[static_cast<std::size_t>(j)];
-    }
-  }
-  return out;
-}
 
 float matrix_value_float(MatrixView x, std::size_t i, std::size_t j) {
   return x.value_float(i, j);
@@ -526,15 +517,6 @@ std::vector<float> densef_gram_colmajor_cuda(
 }
 #endif
 
-void train_center_scale(
-  MatrixView x,
-  const std::vector<int>& rows,
-  bool center,
-  bool scale_columns,
-  std::vector<double>& mean,
-  std::vector<double>& scale
-);
-
 void train_center_scale_float(
   MatrixView x,
   const std::vector<int>& rows,
@@ -543,16 +525,6 @@ void train_center_scale_float(
   std::vector<float>& mean,
   std::vector<float>& scale
 );
-
-struct PLSFoldData {
-  int fold = 0;
-  std::vector<int> train;
-  std::vector<int> validation;
-  std::vector<double> mean;
-  std::vector<double> scale;
-  Dense x_train;
-  Dense x_val;
-};
 
 struct PLSFoldDataF {
   int fold = 0;
@@ -567,22 +539,6 @@ struct PLSFoldDataF {
   std::vector<float> x_train_gram_colmajor;
 };
 
-struct PLSFoldXCache {
-  bool valid = false;
-  const void* data = nullptr;
-  std::size_t rows = 0;
-  std::size_t cols = 0;
-  MatrixValueType value_type = MatrixValueType::Float64;
-  bool center = true;
-  bool scale_columns = false;
-  int folds = 0;
-  std::uint64_t seed = 0;
-  std::size_t constrain_hash = 0;
-  std::vector<int> fold_assignments;
-  std::vector<int> fold_ids;
-  std::vector<PLSFoldData> folds_data;
-};
-
 struct PLSFoldXCacheF {
   bool valid = false;
   const void* data = nullptr;
@@ -594,6 +550,7 @@ struct PLSFoldXCacheF {
   int folds = 0;
   std::uint64_t seed = 0;
   std::size_t constrain_hash = 0;
+  std::uint64_t data_epoch = 0;
   bool train_colmajor = false;
   bool train_gram = false;
   std::uint64_t generation = 0;
@@ -609,24 +566,6 @@ std::size_t hash_int_vector(const std::vector<int>& values) {
     h *= 1099511628211ull;
   }
   return h;
-}
-
-bool cache_matches(
-  const PLSFoldXCache& cache,
-  MatrixView x,
-  const std::vector<int>& constrain,
-  const PLSOptions& options
-) {
-  return cache.valid &&
-         cache.data == x.data &&
-         cache.rows == x.rows &&
-         cache.cols == x.cols &&
-         cache.value_type == x.value_type &&
-         cache.center == options.center &&
-         cache.scale_columns == options.scale &&
-         cache.folds == options.cv.folds &&
-         cache.seed == options.cv.seed &&
-         cache.constrain_hash == hash_int_vector(constrain);
 }
 
 bool cache_matches_float(
@@ -645,45 +584,9 @@ bool cache_matches_float(
          cache.scale_columns == options.scale &&
          cache.folds == options.cv.folds &&
          cache.seed == options.cv.seed &&
+         cache.data_epoch == options.data_epoch &&
          cache.constrain_hash == hash_int_vector(constrain) &&
          (!require_train_colmajor || cache.train_colmajor);
-}
-
-const PLSFoldXCache& get_pls_fold_x_cache(
-  MatrixView x,
-  const std::vector<int>& labels,
-  const std::vector<int>& constrain,
-  const PLSOptions& options
-) {
-  thread_local PLSFoldXCache cache;
-  if (cache_matches(cache, x, constrain, options)) return cache;
-
-  cache = PLSFoldXCache{};
-  cache.valid = true;
-  cache.data = x.data;
-  cache.rows = x.rows;
-  cache.cols = x.cols;
-  cache.value_type = x.value_type;
-  cache.center = options.center;
-  cache.scale_columns = options.scale;
-  cache.folds = options.cv.folds;
-  cache.seed = options.cv.seed;
-  cache.constrain_hash = hash_int_vector(constrain);
-  cache.fold_assignments = detail::make_folds(labels, constrain, options.cv);
-  cache.fold_ids = detail::sorted_unique_folds(cache.fold_assignments);
-  cache.folds_data.reserve(cache.fold_ids.size());
-
-  for (int fold : cache.fold_ids) {
-    PLSFoldData fold_data;
-    fold_data.fold = fold;
-    fold_data.validation = detail::indices_where_fold(cache.fold_assignments, fold, true);
-    fold_data.train = detail::indices_where_fold(cache.fold_assignments, fold, false);
-    train_center_scale(x, fold_data.train, options.center, options.scale, fold_data.mean, fold_data.scale);
-    fold_data.x_train = subset_scale(x, fold_data.train, fold_data.mean, fold_data.scale);
-    fold_data.x_val = subset_scale(x, fold_data.validation, fold_data.mean, fold_data.scale);
-    cache.folds_data.push_back(std::move(fold_data));
-  }
-  return cache;
 }
 
 const PLSFoldXCacheF& get_pls_fold_x_cache_float(
@@ -728,6 +631,7 @@ const PLSFoldXCacheF& get_pls_fold_x_cache_float(
   cache.folds = options.cv.folds;
   cache.seed = options.cv.seed;
   cache.constrain_hash = hash_int_vector(constrain);
+  cache.data_epoch = options.data_epoch;
   cache.train_colmajor = cache_train_colmajor;
   cache.train_gram = false;
   cache.generation = ++generation_counter;
@@ -761,36 +665,6 @@ const PLSFoldXCacheF& get_pls_fold_x_cache_float(
   return cache;
 }
 
-void train_center_scale(
-  MatrixView x,
-  const std::vector<int>& rows,
-  bool center,
-  bool scale_columns,
-  std::vector<double>& mean,
-  std::vector<double>& scale
-) {
-  mean.assign(x.cols, 0.0);
-  scale.assign(x.cols, 1.0);
-  if (center) {
-    for (int row : rows) {
-      for (std::size_t j = 0; j < x.cols; ++j) mean[j] += x(static_cast<std::size_t>(row), j);
-    }
-    for (double& v : mean) v /= static_cast<double>(rows.size());
-  }
-  if (scale_columns) {
-    for (int row : rows) {
-      for (std::size_t j = 0; j < x.cols; ++j) {
-        const double d = x(static_cast<std::size_t>(row), j) - mean[j];
-        scale[j] += d * d;
-      }
-    }
-    for (std::size_t j = 0; j < x.cols; ++j) {
-      const double s = std::sqrt(scale[j] / std::max(1.0, static_cast<double>(rows.size() - 1)));
-      scale[j] = s > 0.0 && std::isfinite(s) ? s : 1.0;
-    }
-  }
-}
-
 void train_center_scale_float(
   MatrixView x,
   const std::vector<int>& rows,
@@ -820,94 +694,6 @@ void train_center_scale_float(
       scale[j] = s > 0.0f && std::isfinite(s) ? s : 1.0f;
     }
   }
-}
-
-Dense one_hot_centered(const std::vector<int>& labels, const std::vector<int>& rows, const std::vector<int>& classes, std::vector<double>& y_mean) {
-  Dense y(static_cast<int>(rows.size()), static_cast<int>(classes.size()));
-  std::map<int, int> class_pos;
-  for (int i = 0; i < static_cast<int>(classes.size()); ++i) class_pos[classes[static_cast<std::size_t>(i)]] = i;
-  y_mean.assign(classes.size(), 0.0);
-  std::vector<int> encoded(static_cast<std::size_t>(y.rows), 0);
-  for (int i = 0; i < y.rows; ++i) {
-    const int cls = labels[static_cast<std::size_t>(rows[static_cast<std::size_t>(i)])];
-    const int j = class_pos[cls];
-    encoded[static_cast<std::size_t>(i)] = j;
-    y_mean[static_cast<std::size_t>(j)] += 1.0;
-  }
-  for (double& v : y_mean) v /= static_cast<double>(rows.size());
-  for (int i = 0; i < y.rows; ++i) {
-    double* row = y.data.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(y.cols);
-    for (int j = 0; j < y.cols; ++j) row[j] = -y_mean[static_cast<std::size_t>(j)];
-    row[encoded[static_cast<std::size_t>(i)]] += 1.0;
-  }
-  return y;
-}
-
-std::vector<double> one_hot_centered_colmajor(
-  const std::vector<int>& labels,
-  const std::vector<int>& rows,
-  const std::vector<int>& classes,
-  std::vector<double>& y_mean
-) {
-  std::map<int, int> class_pos;
-  for (int i = 0; i < static_cast<int>(classes.size()); ++i) class_pos[classes[static_cast<std::size_t>(i)]] = i;
-
-  const int n = static_cast<int>(rows.size());
-  const int m = static_cast<int>(classes.size());
-  y_mean.assign(classes.size(), 0.0);
-  std::vector<int> encoded(static_cast<std::size_t>(n), 0);
-  for (int i = 0; i < n; ++i) {
-    const int cls = labels[static_cast<std::size_t>(rows[static_cast<std::size_t>(i)])];
-    const int j = class_pos[cls];
-    encoded[static_cast<std::size_t>(i)] = j;
-    y_mean[static_cast<std::size_t>(j)] += 1.0;
-  }
-  for (double& v : y_mean) v /= static_cast<double>(rows.size());
-
-  std::vector<double> y_colmajor(static_cast<std::size_t>(n) * static_cast<std::size_t>(m), 0.0);
-  for (int j = 0; j < m; ++j) {
-    double* col = y_colmajor.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(n);
-    std::fill(col, col + n, -y_mean[static_cast<std::size_t>(j)]);
-  }
-  for (int i = 0; i < n; ++i) {
-    const int j = encoded[static_cast<std::size_t>(i)];
-    y_colmajor[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(n)] += 1.0;
-  }
-  return y_colmajor;
-}
-
-std::vector<float> one_hot_centered_colmajor_float(
-  const std::vector<int>& labels,
-  const std::vector<int>& rows,
-  const std::vector<int>& classes,
-  std::vector<float>& y_mean
-) {
-  std::map<int, int> class_pos;
-  for (int i = 0; i < static_cast<int>(classes.size()); ++i) class_pos[classes[static_cast<std::size_t>(i)]] = i;
-
-  const int n = static_cast<int>(rows.size());
-  const int m = static_cast<int>(classes.size());
-  y_mean.assign(classes.size(), 0.0f);
-  std::vector<int> encoded(static_cast<std::size_t>(n), 0);
-  for (int i = 0; i < n; ++i) {
-    const int cls = labels[static_cast<std::size_t>(rows[static_cast<std::size_t>(i)])];
-    const int j = class_pos[cls];
-    encoded[static_cast<std::size_t>(i)] = j;
-    y_mean[static_cast<std::size_t>(j)] += 1.0f;
-  }
-  const float inv_n = n > 0 ? 1.0f / static_cast<float>(n) : 0.0f;
-  for (float& v : y_mean) v *= inv_n;
-
-  std::vector<float> y_colmajor(static_cast<std::size_t>(n) * static_cast<std::size_t>(m), 0.0f);
-  for (int j = 0; j < m; ++j) {
-    float* col = y_colmajor.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(n);
-    std::fill(col, col + n, -y_mean[static_cast<std::size_t>(j)]);
-  }
-  for (int i = 0; i < n; ++i) {
-    const int j = encoded[static_cast<std::size_t>(i)];
-    y_colmajor[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(n)] += 1.0f;
-  }
-  return y_colmajor;
 }
 
 std::vector<float> centered_label_crossprod_colmajor_float(
@@ -958,108 +744,6 @@ DenseF centered_label_crossprod_float(
   return out;
 }
 
-Dense crossprod(const Dense& x, const Dense& y) {
-  Dense out(x.cols, y.cols);
-  std::vector<long double> accum(static_cast<std::size_t>(x.cols) * static_cast<std::size_t>(y.cols), 0.0L);
-  for (int r = 0; r < x.rows; ++r) {
-    const double* x_row = x.data.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(x.cols);
-    const double* y_row = y.data.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(y.cols);
-    for (int i = 0; i < x.cols; ++i) {
-      const long double xv = x_row[i];
-      for (int j = 0; j < y.cols; ++j) {
-        accum[static_cast<std::size_t>(i) * static_cast<std::size_t>(y.cols) + static_cast<std::size_t>(j)] +=
-          xv * y_row[j];
-      }
-    }
-  }
-  for (int i = 0; i < x.cols; ++i) {
-    for (int j = 0; j < y.cols; ++j) {
-      out(i, j) = static_cast<double>(
-        accum[static_cast<std::size_t>(i) * static_cast<std::size_t>(y.cols) + static_cast<std::size_t>(j)]
-      );
-    }
-  }
-  return out;
-}
-
-#if defined(KODAMA_ENABLE_CUDA)
-Dense crossprod_cuda(const Dense& x, const Dense& y, int gpu_device) {
-  if (x.rows != y.rows) throw std::invalid_argument("crossprod_cuda row mismatch.");
-  if (x.rows == 0 || x.cols == 0 || y.cols == 0) return Dense(x.cols, y.cols);
-
-  CudaBlasContext ctx(gpu_device);
-  DeviceBuffer dx(x.data.size());
-  DeviceBuffer dy(y.data.size());
-  DeviceBuffer ds(static_cast<std::size_t>(x.cols) * static_cast<std::size_t>(y.cols));
-
-  check_cuda(cudaMemcpy(dx.data(), x.data.data(), x.data.size() * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy X to device");
-  check_cuda(cudaMemcpy(dy.data(), y.data.data(), y.data.size() * sizeof(double), cudaMemcpyHostToDevice), "cudaMemcpy Y to device");
-
-  const double alpha = 1.0;
-  const double beta = 0.0;
-  // Dense is row-major. The row-major n x p X buffer is column-major p x n (X').
-  // The row-major n x c Y buffer is column-major c x n (Y'). Compute X'Y as
-  // (p x n) * (c x n)' into a column-major p x c buffer.
-  check_cublas(
-    cublasDgemm(
-      ctx.handle(),
-      CUBLAS_OP_N,
-      CUBLAS_OP_T,
-      x.cols,
-      y.cols,
-      x.rows,
-      &alpha,
-      dx.data(),
-      x.cols,
-      dy.data(),
-      y.cols,
-      &beta,
-      ds.data(),
-      x.cols
-    ),
-    "cublasDgemm X'Y"
-  );
-
-  std::vector<double> col_major(static_cast<std::size_t>(x.cols) * static_cast<std::size_t>(y.cols));
-  check_cuda(cudaMemcpy(col_major.data(), ds.data(), col_major.size() * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy X'Y to host");
-  Dense out(x.cols, y.cols);
-  for (int j = 0; j < y.cols; ++j) {
-    for (int i = 0; i < x.cols; ++i) {
-      out(i, j) = col_major[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(x.cols)];
-    }
-  }
-  return out;
-}
-#endif
-
-std::vector<double> dominant_left_singular_vector(const Dense& s) {
-  std::vector<double> u(static_cast<std::size_t>(s.cols), 1.0 / std::sqrt(std::max(1, s.cols)));
-  std::vector<double> v(static_cast<std::size_t>(s.rows), 0.0);
-  for (int iter = 0; iter < 80; ++iter) {
-    v = mat_vec(s, u);
-    double nv = norm2(v);
-    if (nv <= 1e-12) break;
-    for (double& x : v) x /= nv;
-    u = t_mat_vec(s, v);
-    double nu = norm2(u);
-    if (nu <= 1e-12) break;
-    for (double& x : u) x /= nu;
-  }
-  if (norm2(v) <= 1e-12) {
-    v.assign(static_cast<std::size_t>(s.rows), 0.0);
-    if (!v.empty()) v[0] = 1.0;
-  }
-  return v;
-}
-
-Dense first_columns(const Dense& x, int ncomp) {
-  Dense out(x.rows, ncomp);
-  for (int i = 0; i < x.rows; ++i) {
-    for (int j = 0; j < ncomp; ++j) out(i, j) = x(i, j);
-  }
-  return out;
-}
-
 std::vector<int> components_to_evaluate(const PLSOptions& options, int available_components) {
   if (available_components < 1) return {};
   const int requested = options.fixed_components > 0 ? options.fixed_components : options.max_components;
@@ -1074,47 +758,7 @@ int pls_component_limit(int requested, int rows, int cols) {
   }));
 }
 
-Dense solve_linear(Dense a, Dense b) {
-  const int n = a.rows;
-  const int m = b.cols;
-  for (int i = 0; i < n; ++i) a(i, i) += 1e-9;
-  for (int col = 0; col < n; ++col) {
-    int pivot = col;
-    double best = std::abs(a(col, col));
-    for (int r = col + 1; r < n; ++r) {
-      const double val = std::abs(a(r, col));
-      if (val > best) {
-        best = val;
-        pivot = r;
-      }
-    }
-    if (best < 1e-14) continue;
-    if (pivot != col) {
-      for (int j = 0; j < n; ++j) std::swap(a(col, j), a(pivot, j));
-      for (int j = 0; j < m; ++j) std::swap(b(col, j), b(pivot, j));
-    }
-    const double div = a(col, col);
-    for (int j = col; j < n; ++j) a(col, j) /= div;
-    for (int j = 0; j < m; ++j) b(col, j) /= div;
-    for (int r = 0; r < n; ++r) {
-      if (r == col) continue;
-      const double f = a(r, col);
-      if (f == 0.0) continue;
-      for (int j = col; j < n; ++j) a(r, j) -= f * a(col, j);
-      for (int j = 0; j < m; ++j) b(r, j) -= f * b(col, j);
-    }
-  }
-  return b;
-}
-
 DenseF solve_linear_float(DenseF a, DenseF b);
-
-struct PLSFit {
-  Dense weights;
-  Dense loadings;
-  Dense y_weights;
-  Dense train_scores;
-};
 
 struct PLSFitF {
   DenseF weights;
@@ -1136,6 +780,16 @@ float dot_float(const std::vector<float>& a, const std::vector<float>& b) {
 
 float norm2_float(const std::vector<float>& x) {
   return std::sqrt(std::max(0.0f, dot_float(x, x)));
+}
+
+float power_norm2_float(const std::vector<float>& x) {
+  double sum = 0.0;
+  for (float value : x) sum += static_cast<double>(value) * static_cast<double>(value);
+  if (!std::isfinite(sum) || sum < 0.0) return std::numeric_limits<float>::infinity();
+  if (sum <= static_cast<double>(std::numeric_limits<float>::max())) {
+    return std::sqrt(static_cast<float>(sum));
+  }
+  return static_cast<float>(std::sqrt(sum));
 }
 
 std::vector<float> mat_vec_float(const DenseF& a, const std::vector<float>& x) {
@@ -1194,7 +848,7 @@ PLSFitF fit_pls_components_from_crossprod_float(
     // fastPLS uses a one-vector incremental randomized refresh with two
     // power iterations before each SIMPLS deflation step.
     power_refresh(s, weight);
-    float refresh_norm = norm2_float(weight);
+    float refresh_norm = power_norm2_float(weight);
     if (
       previous_weight.empty() &&
       (!std::isfinite(refresh_norm) || refresh_norm <= 1.0e-10f)
@@ -1219,7 +873,7 @@ PLSFitF fit_pls_components_from_crossprod_float(
           weight[static_cast<std::size_t>(feature)] = s(feature, strongest_response);
         }
         power_refresh(s, weight);
-        refresh_norm = norm2_float(weight);
+        refresh_norm = power_norm2_float(weight);
       }
     }
     if (!std::isfinite(refresh_norm) || refresh_norm <= 1.0e-10f) break;
@@ -1337,146 +991,17 @@ PLSFitF fit_pls_components_labels_metal_float(
   return PLSFitF{std::move(weights), std::move(y_weights)};
 }
 
-PLSFit fit_pls_components_from_crossprod(const Dense& x, const Dense& y, Dense s, int max_components) {
-  const int max_rank = std::min({max_components, x.cols, std::max(1, x.rows - 1)});
-  Dense w(x.cols, max_rank);
-  Dense pmat(x.cols, max_rank);
-  Dense qmat(y.cols, max_rank);
-  Dense tmat(x.rows, max_rank);
-  for (int a = 0; a < max_rank; ++a) {
-    Dense gram(s.rows, s.rows);
-    for (int i = 0; i < s.rows; ++i) {
-      for (int j = 0; j < s.rows; ++j) {
-        long double val = 0.0;
-        for (int c = 0; c < s.cols; ++c) val += static_cast<long double>(s(i, c)) * s(j, c);
-        gram(i, j) = static_cast<double>(val);
-      }
-    }
-    std::vector<double> wa = dominant_left_singular_vector(s);
-    for (int prev = 0; prev < a; ++prev) {
-      double proj = 0.0;
-      for (int j = 0; j < x.cols; ++j) proj += wa[static_cast<std::size_t>(j)] * w(j, prev);
-      for (int j = 0; j < x.cols; ++j) wa[static_cast<std::size_t>(j)] -= proj * w(j, prev);
-    }
-    double nwa = norm2(wa);
-    if (nwa <= 1e-12) {
-      std::fill(wa.begin(), wa.end(), 0.0);
-      wa[static_cast<std::size_t>(a % x.cols)] = 1.0;
-    } else {
-      for (double& v : wa) v /= nwa;
-    }
-    for (int iter = 0; iter < 120; ++iter) {
-      std::vector<double> next(static_cast<std::size_t>(x.cols), 0.0);
-      for (int i = 0; i < x.cols; ++i) {
-        long double val = 0.0;
-        for (int j = 0; j < x.cols; ++j) val += static_cast<long double>(gram(i, j)) * wa[static_cast<std::size_t>(j)];
-        next[static_cast<std::size_t>(i)] = static_cast<double>(val);
-      }
-      for (int prev = 0; prev < a; ++prev) {
-        double proj = 0.0;
-        for (int j = 0; j < x.cols; ++j) proj += next[static_cast<std::size_t>(j)] * w(j, prev);
-        for (int j = 0; j < x.cols; ++j) next[static_cast<std::size_t>(j)] -= proj * w(j, prev);
-      }
-      double nn = norm2(next);
-      if (nn <= 1e-12) break;
-      for (double& v : next) v /= nn;
-      wa.swap(next);
-    }
-    std::vector<double> right = t_mat_vec(s, wa);
-    const double sigma = std::max(1e-12, norm2(right));
-    for (double& v : right) v /= sigma;
-
-    std::vector<double> t(static_cast<std::size_t>(x.rows), 0.0);
-    for (int i = 0; i < x.rows; ++i) {
-      long double val = 0.0;
-      for (int j = 0; j < x.cols; ++j) val += static_cast<long double>(x(i, j)) * wa[static_cast<std::size_t>(j)];
-      t[static_cast<std::size_t>(i)] = static_cast<double>(val);
-    }
-    long double tnorm2 = 0.0;
-    for (double tv : t) tnorm2 += static_cast<long double>(tv) * tv;
-    const double inv_tnorm2 = tnorm2 > 1e-20 ? 1.0 / static_cast<double>(tnorm2) : 0.0;
-    std::vector<double> vvec(static_cast<std::size_t>(x.cols), 0.0);
-    if (inv_tnorm2 > 0.0) {
-      for (int j = 0; j < x.cols; ++j) {
-        long double val = 0.0;
-        for (int i = 0; i < x.rows; ++i) val += static_cast<long double>(x(i, j)) * t[static_cast<std::size_t>(i)];
-        vvec[static_cast<std::size_t>(j)] = static_cast<double>(val) * inv_tnorm2;
-      }
-    } else {
-      vvec = wa;
-    }
-    for (int prev = 0; prev < a; ++prev) {
-      double proj = 0.0;
-      for (int j = 0; j < x.cols; ++j) proj += vvec[static_cast<std::size_t>(j)] * pmat(j, prev);
-      for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= proj * pmat(j, prev);
-    }
-    double nv = norm2(vvec);
-    if (nv <= 1e-12) {
-      vvec = wa;
-      for (int prev = 0; prev < a; ++prev) {
-        double proj = 0.0;
-        for (int j = 0; j < x.cols; ++j) proj += vvec[static_cast<std::size_t>(j)] * pmat(j, prev);
-        for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= proj * pmat(j, prev);
-      }
-      nv = norm2(vvec);
-    }
-    if (nv <= 1e-12) {
-      std::fill(vvec.begin(), vvec.end(), 0.0);
-      vvec[static_cast<std::size_t>(a % x.cols)] = 1.0;
-      for (int prev = 0; prev < a; ++prev) {
-        double proj = 0.0;
-        for (int j = 0; j < x.cols; ++j) proj += vvec[static_cast<std::size_t>(j)] * pmat(j, prev);
-        for (int j = 0; j < x.cols; ++j) vvec[static_cast<std::size_t>(j)] -= proj * pmat(j, prev);
-      }
-      nv = std::max(norm2(vvec), 1e-12);
-    }
-    for (double& vv : vvec) vv /= nv;
-
-    for (int j = 0; j < x.cols; ++j) {
-      w(j, a) = wa[static_cast<std::size_t>(j)];
-      pmat(j, a) = vvec[static_cast<std::size_t>(j)];
-    }
-    for (int j = 0; j < y.cols; ++j) qmat(j, a) = right[static_cast<std::size_t>(j)];
-    for (int i = 0; i < x.rows; ++i) tmat(i, a) = t[static_cast<std::size_t>(i)];
-
-    std::vector<double> vs(static_cast<std::size_t>(s.cols), 0.0);
-    for (int c = 0; c < s.cols; ++c) {
-      long double val = 0.0;
-      for (int j = 0; j < s.rows; ++j) val += static_cast<long double>(vvec[static_cast<std::size_t>(j)]) * s(j, c);
-      vs[static_cast<std::size_t>(c)] = static_cast<double>(val);
-    }
-    for (int j = 0; j < s.rows; ++j) {
-      for (int c = 0; c < s.cols; ++c) {
-        s(j, c) -= vvec[static_cast<std::size_t>(j)] * vs[static_cast<std::size_t>(c)];
-      }
-    }
-  }
-  return PLSFit{w, pmat, qmat, tmat};
-}
-
-PLSFit fit_pls_components(const Dense& x, const Dense& y, int max_components) {
-  return fit_pls_components_from_crossprod(x, y, crossprod(x, y), max_components);
-}
-
-Dense transform_pls_scores(const Dense& x, const PLSFit& fit, int ncomp) {
-  Dense out(x.rows, ncomp);
-  for (int a = 0; a < ncomp; ++a) {
-    for (int i = 0; i < x.rows; ++i) {
-      long double val = 0.0;
-      for (int j = 0; j < x.cols; ++j) val += static_cast<long double>(x(i, j)) * fit.weights(j, a);
-      out(i, a) = static_cast<double>(val);
-    }
-  }
-  return out;
-}
-
 DenseF transform_pls_scores_float(const DenseF& x, const PLSFitF& fit, int ncomp) {
   DenseF out(x.rows, ncomp);
-  for (int a = 0; a < ncomp; ++a) {
-    for (int i = 0; i < x.rows; ++i) {
-      double val = 0.0;
-      for (int j = 0; j < x.cols; ++j) val += static_cast<double>(x(i, j)) * static_cast<double>(fit.weights(j, a));
-      out(i, a) = static_cast<float>(val);
+  for (int i = 0; i < x.rows; ++i) {
+    float* out_row = out.data.data() + static_cast<std::size_t>(i) * ncomp;
+    for (int j = 0; j < x.cols; ++j) {
+      const float value = x(i, j);
+      const float* weight_row = fit.weights.data.data() +
+        static_cast<std::size_t>(j) * fit.weights.cols;
+      for (int a = 0; a < ncomp; ++a) {
+        out_row[a] += value * weight_row[a];
+      }
     }
   }
   return out;
@@ -1486,22 +1011,30 @@ DenseF transform_pls_scores_metal_float(const DenseF& x, const PLSFitF& fit, int
   if (ncomp < 1 || ncomp > fit.weights.cols || x.cols != fit.weights.rows) {
     throw std::invalid_argument("Metal PLS score projection dimension mismatch.");
   }
-  std::vector<float> weights(static_cast<std::size_t>(fit.weights.rows) * static_cast<std::size_t>(ncomp));
-  for (int row = 0; row < fit.weights.rows; ++row) {
-    std::copy_n(
-      fit.weights.data.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(fit.weights.cols),
-      ncomp,
-      weights.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(ncomp)
-    );
+  std::vector<float> prefix;
+  const std::vector<float>* weights = &fit.weights.data;
+  if (ncomp != fit.weights.cols) {
+    prefix.resize(static_cast<std::size_t>(fit.weights.rows) * static_cast<std::size_t>(ncomp));
+    for (int row = 0; row < fit.weights.rows; ++row) {
+      std::copy_n(
+        fit.weights.data.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(fit.weights.cols),
+        ncomp,
+        prefix.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(ncomp)
+      );
+    }
+    weights = &prefix;
   }
   DenseF out(x.rows, ncomp);
   out.data = detail::metal_matrix_multiply(
     x.data,
     x.rows,
     x.cols,
-    weights,
+    *weights,
     fit.weights.rows,
-    ncomp
+    ncomp,
+    false,
+    false,
+    true
   );
   return out;
 }
@@ -1673,74 +1206,6 @@ PLSFitF fit_pls_components_cuda_labels_float(
 
 #endif
 
-Dense regression_coefficients(const Dense& t, const Dense& y, int ncomp) {
-  Dense lhs(ncomp, ncomp);
-  Dense rhs(ncomp, y.cols);
-  for (int i = 0; i < ncomp; ++i) {
-    for (int j = 0; j < ncomp; ++j) {
-      long double s = 0.0;
-      for (int r = 0; r < t.rows; ++r) s += static_cast<long double>(t(r, i)) * t(r, j);
-      lhs(i, j) = static_cast<double>(s);
-    }
-    for (int j = 0; j < y.cols; ++j) {
-      long double s = 0.0;
-      for (int r = 0; r < t.rows; ++r) s += static_cast<long double>(t(r, i)) * y(r, j);
-      rhs(i, j) = static_cast<double>(s);
-    }
-  }
-  return solve_linear(lhs, rhs);
-}
-
-Dense regression_coefficients(const Dense& t, const Dense& y) {
-  return regression_coefficients(t, y, t.cols);
-}
-
-Dense regression_coefficients_centered_one_hot(
-  const Dense& t,
-  const std::vector<int>& labels,
-  const std::vector<int>& classes,
-  const std::vector<double>& y_mean,
-  int ncomp
-) {
-  if (static_cast<int>(labels.size()) != t.rows) throw std::invalid_argument("PLS-DA label size mismatch.");
-  const int cnum = static_cast<int>(classes.size());
-  Dense lhs(ncomp, ncomp);
-  Dense rhs(ncomp, cnum);
-  std::map<int, int> class_pos;
-  for (int c = 0; c < cnum; ++c) class_pos[classes[static_cast<std::size_t>(c)]] = c;
-  std::vector<int> encoded(labels.size(), 0);
-  for (std::size_t i = 0; i < labels.size(); ++i) encoded[i] = class_pos.at(labels[i]);
-  std::vector<double> score_sums(static_cast<std::size_t>(ncomp), 0.0);
-  std::vector<double> lhs_accum(static_cast<std::size_t>(ncomp) * static_cast<std::size_t>(ncomp), 0.0);
-
-  for (int r = 0; r < t.rows; ++r) {
-    const int c = encoded[static_cast<std::size_t>(r)];
-    const double* t_row = t.data.data() + static_cast<std::size_t>(r) * static_cast<std::size_t>(t.cols);
-    for (int a = 0; a < ncomp; ++a) {
-      const double value = t_row[a];
-      rhs(a, c) += value;
-      score_sums[static_cast<std::size_t>(a)] += value;
-      for (int b = a; b < ncomp; ++b) {
-        lhs_accum[static_cast<std::size_t>(a) * static_cast<std::size_t>(ncomp) + static_cast<std::size_t>(b)] +=
-          value * t_row[b];
-      }
-    }
-  }
-  for (int a = 0; a < ncomp; ++a) {
-    for (int b = a; b < ncomp; ++b) {
-      const double value = lhs_accum[static_cast<std::size_t>(a) * static_cast<std::size_t>(ncomp) + static_cast<std::size_t>(b)];
-      lhs(a, b) = value;
-      lhs(b, a) = value;
-    }
-  }
-  for (int a = 0; a < ncomp; ++a) {
-    const double sum = score_sums[static_cast<std::size_t>(a)];
-    for (int c = 0; c < cnum; ++c) rhs(a, c) -= sum * y_mean[static_cast<std::size_t>(c)];
-  }
-
-  return solve_linear(lhs, rhs);
-}
-
 std::vector<float> label_means_float(
   const std::vector<int>& labels,
   const std::vector<int>& classes
@@ -1798,74 +1263,6 @@ DenseF regression_coefficients_centered_one_hot_float(
   return solve_linear_float(lhs, rhs);
 }
 
-Dense y_scores_from_q(const Dense& y, const Dense& q, int ncomp) {
-  Dense out(y.rows, ncomp);
-  for (int i = 0; i < y.rows; ++i) {
-    for (int a = 0; a < ncomp; ++a) {
-      long double s = 0.0;
-      for (int j = 0; j < y.cols; ++j) s += static_cast<long double>(y(i, j)) * q(j, a);
-      out(i, a) = static_cast<double>(s);
-    }
-  }
-  return out;
-}
-
-std::vector<int> predict_pls_da(
-  const Dense& t_train,
-  const Dense& y_train,
-  const Dense& t_val,
-  const std::vector<int>& classes,
-  const std::vector<double>& y_mean,
-  int ncomp
-) {
-  const Dense coef = regression_coefficients(t_train, y_train, ncomp);
-  std::vector<int> pred(static_cast<std::size_t>(t_val.rows), classes.front());
-  for (int i = 0; i < t_val.rows; ++i) {
-    int best = 0;
-    double best_score = -std::numeric_limits<double>::infinity();
-    for (int c = 0; c < static_cast<int>(classes.size()); ++c) {
-      long double score = c < static_cast<int>(y_mean.size()) ? y_mean[static_cast<std::size_t>(c)] : 0.0;
-      for (int a = 0; a < ncomp; ++a) {
-        score += static_cast<long double>(t_val(i, a)) * coef(a, c);
-      }
-      if (score > best_score) {
-        best_score = static_cast<double>(score);
-        best = c;
-      }
-    }
-    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(best)];
-  }
-  return pred;
-}
-
-std::vector<int> predict_pls_da_labels(
-  const Dense& t_train,
-  const std::vector<int>& y_train_labels,
-  const Dense& t_val,
-  const std::vector<int>& classes,
-  const std::vector<double>& y_mean,
-  int ncomp
-) {
-  const Dense coef = regression_coefficients_centered_one_hot(t_train, y_train_labels, classes, y_mean, ncomp);
-  std::vector<int> pred(static_cast<std::size_t>(t_val.rows), classes.front());
-  for (int i = 0; i < t_val.rows; ++i) {
-    int best = 0;
-    double best_score = -std::numeric_limits<double>::infinity();
-    for (int c = 0; c < static_cast<int>(classes.size()); ++c) {
-      long double score = c < static_cast<int>(y_mean.size()) ? y_mean[static_cast<std::size_t>(c)] : 0.0;
-      for (int a = 0; a < ncomp; ++a) {
-        score += static_cast<long double>(t_val(i, a)) * coef(a, c);
-      }
-      if (score > best_score) {
-        best_score = static_cast<double>(score);
-        best = c;
-      }
-    }
-    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(best)];
-  }
-  return pred;
-}
-
 std::vector<int> predict_pls_da_labels_float(
   const DenseF& t_train,
   const std::vector<int>& y_train_labels,
@@ -1894,66 +1291,7 @@ std::vector<int> predict_pls_da_labels_float(
   return pred;
 }
 
-std::vector<int> predict_pls_da(
-  const Dense& t_train,
-  const Dense& y_train,
-  const Dense& t_val,
-  const std::vector<int>& classes,
-  const std::vector<double>& y_mean
-) {
-  return predict_pls_da(t_train, y_train, t_val, classes, y_mean, t_val.cols);
-}
-
 #if defined(KODAMA_ENABLE_CUDA)
-std::vector<int> predict_pls_da_cuda(
-  const Dense& t_train,
-  const std::vector<int>& y_train_labels,
-  const Dense& t_val,
-  const std::vector<int>& classes,
-  const std::vector<double>& y_mean,
-  int gpu_device
-) {
-  if (t_val.rows < 1) return {};
-  const int n = t_val.rows;
-  const int kk = t_val.cols;
-  const int cnum = static_cast<int>(classes.size());
-  const Dense coef = regression_coefficients_centered_one_hot(t_train, y_train_labels, classes, y_mean, kk);
-
-  std::vector<double> linear(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(kk), 0.0);
-  std::vector<double> constants(static_cast<std::size_t>(cnum), 0.0);
-  for (int c = 0; c < cnum; ++c) {
-    constants[static_cast<std::size_t>(c)] =
-      c < static_cast<int>(y_mean.size()) ? y_mean[static_cast<std::size_t>(c)] : 0.0;
-    for (int a = 0; a < kk; ++a) {
-      linear[static_cast<std::size_t>(c) * static_cast<std::size_t>(kk) + static_cast<std::size_t>(a)] = coef(a, c);
-    }
-  }
-
-  check_cuda(cudaSetDevice(gpu_device), "cudaSetDevice(predict_pls_da_cuda)");
-  cudaStream_t stream = nullptr;
-  DeviceBuffer d_t(t_val.data.size());
-  DeviceBuffer d_linear(linear.size());
-  DeviceBuffer d_constants(constants.size());
-  DeviceIntBuffer d_pred(static_cast<std::size_t>(n));
-  check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate(predict_pls_da_cuda)");
-  check_cuda(cudaMemcpyAsync(d_t.data(), t_val.data.data(), t_val.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA PLS-DA T");
-  check_cuda(cudaMemcpyAsync(d_linear.data(), linear.data(), linear.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA PLS-DA linear");
-  check_cuda(cudaMemcpyAsync(d_constants.data(), constants.data(), constants.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA PLS-DA constants");
-  kodama_cuda_lda_score_argmax_row(d_t.data(), d_linear.data(), d_constants.data(), d_pred.data(), n, kk, cnum, stream);
-  check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row PLS-DA");
-  std::vector<int> codes(static_cast<std::size_t>(n), 1);
-  check_cuda(cudaMemcpyAsync(codes.data(), d_pred.data(), codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA PLS-DA labels");
-  check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA PLS-DA predict");
-  cudaStreamDestroy(stream);
-
-  std::vector<int> pred(static_cast<std::size_t>(n), classes.front());
-  for (int i = 0; i < n; ++i) {
-    const int cls = std::max(1, std::min(cnum, codes[static_cast<std::size_t>(i)])) - 1;
-    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
-  }
-  return pred;
-}
-
 std::vector<int> predict_pls_da_cuda_float(
   const DenseF& t_train,
   const std::vector<int>& y_train_labels,
@@ -2072,6 +1410,104 @@ bool cholesky_solve_float(const DenseF& matrix, const DenseF& rhs, DenseF& solut
   return true;
 }
 
+struct LDAFloatModel {
+  DenseF linear;
+  std::vector<float> constants;
+};
+
+LDAFloatModel fit_lda_from_score_statistics_float(
+  DenseF class_sums,
+  const std::vector<int>& counts,
+  const DenseF& score_crossprod,
+  int n_train
+) {
+  const int cnum = class_sums.rows;
+  const int ncomp = class_sums.cols;
+  for (int c = 0; c < cnum; ++c) {
+    const float inv = counts[static_cast<std::size_t>(c)] > 0 ?
+      1.0f / static_cast<float>(counts[static_cast<std::size_t>(c)]) : 0.0f;
+    for (int a = 0; a < ncomp; ++a) class_sums(c, a) *= inv;
+  }
+
+  DenseF pooled(ncomp, ncomp);
+  const float df = static_cast<float>(std::max(1, n_train - cnum));
+  float trace = 0.0f;
+  for (int r = 0; r < ncomp; ++r) {
+    for (int col = 0; col <= r; ++col) {
+      float between = 0.0f;
+      for (int c = 0; c < cnum; ++c) {
+        between += static_cast<float>(counts[static_cast<std::size_t>(c)]) *
+          class_sums(c, r) * class_sums(c, col);
+      }
+      const float covariance = (score_crossprod(r, col) - between) / df;
+      pooled(r, col) = covariance;
+      pooled(col, r) = covariance;
+    }
+    trace += pooled(r, r);
+  }
+
+  DenseF rhs(ncomp, cnum);
+  for (int c = 0; c < cnum; ++c) {
+    for (int a = 0; a < ncomp; ++a) rhs(a, c) = class_sums(c, a);
+  }
+  const float ridge_scale = std::isfinite(trace) && trace > 0.0f ?
+    trace / static_cast<float>(std::max(1, ncomp)) : 1.0f;
+  const float ridge_grid[] = {1e-8f, 1e-6f, 1e-5f, 1e-4f, 1e-3f, 1e-2f};
+  DenseF solved;
+  bool factorized = false;
+  for (float ridge : ridge_grid) {
+    DenseF covariance = pooled;
+    const float lambda = ridge * ridge_scale;
+    for (int component = 0; component < ncomp; ++component) {
+      covariance(component, component) += lambda;
+    }
+    if (cholesky_solve_float(covariance, rhs, solved)) {
+      factorized = true;
+      break;
+    }
+  }
+  if (!factorized) throw std::runtime_error("Float32 PLS-LDA Cholesky factorization failed.");
+
+  LDAFloatModel model{DenseF(cnum, ncomp), std::vector<float>(static_cast<std::size_t>(cnum), 0.0f)};
+  for (int c = 0; c < cnum; ++c) {
+    float dot_mu = 0.0f;
+    for (int a = 0; a < ncomp; ++a) {
+      model.linear(c, a) = solved(a, c);
+      dot_mu += class_sums(c, a) * model.linear(c, a);
+    }
+    const float prior = std::max(
+      static_cast<float>(counts[static_cast<std::size_t>(c)]) /
+        static_cast<float>(std::max(1, n_train)),
+      std::numeric_limits<float>::min()
+    );
+    model.constants[static_cast<std::size_t>(c)] = -0.5f * dot_mu + std::log(prior);
+  }
+  return model;
+}
+
+std::vector<int> predict_lda_scores_float(
+  const DenseF& scores,
+  const LDAFloatModel& model,
+  const std::vector<int>& classes,
+  int ncomp
+) {
+  std::vector<int> pred(static_cast<std::size_t>(scores.rows), classes.front());
+  for (int i = 0; i < scores.rows; ++i) {
+    int best = 0;
+    float best_score = -std::numeric_limits<float>::infinity();
+    for (int c = 0; c < static_cast<int>(classes.size()); ++c) {
+      float score = model.constants[static_cast<std::size_t>(c)];
+      for (int a = 0; a < ncomp; ++a) score += scores(i, a) * model.linear(c, a);
+      if (score > best_score) {
+        best_score = score;
+        best = c;
+      }
+    }
+    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(best)];
+  }
+  return pred;
+}
+
 std::vector<int> predict_pls_lda_float(
   const DenseF& t_train,
   const std::vector<int>& y_train,
@@ -2083,77 +1519,82 @@ std::vector<int> predict_pls_lda_float(
   std::vector<int> encoded;
   std::vector<int> counts;
   encode_labels_from_sorted_classes(y_train, classes, encoded, counts, 0);
-  DenseF cent(cnum, ncomp);
+  DenseF class_sums(cnum, ncomp);
   for (int i = 0; i < t_train.rows; ++i) {
     const int c = encoded[static_cast<std::size_t>(i)];
-    for (int a = 0; a < ncomp; ++a) cent(c, a) += t_train(i, a);
-  }
-  for (int c = 0; c < cnum; ++c) {
-    const float inv = counts[static_cast<std::size_t>(c)] > 0 ? 1.0f / static_cast<float>(counts[static_cast<std::size_t>(c)]) : 0.0f;
-    for (int a = 0; a < ncomp; ++a) cent(c, a) *= inv;
+    for (int a = 0; a < ncomp; ++a) class_sums(c, a) += t_train(i, a);
   }
 
-  DenseF pooled(ncomp, ncomp);
-  const float df = static_cast<float>(std::max(1, t_train.rows - cnum));
-  float trace = 0.0f;
+  DenseF score_crossprod(ncomp, ncomp);
   for (int r = 0; r < ncomp; ++r) {
     for (int col = 0; col <= r; ++col) {
       float total = 0.0f;
       for (int i = 0; i < t_train.rows; ++i) total += t_train(i, r) * t_train(i, col);
-      float between = 0.0f;
-      for (int c = 0; c < cnum; ++c) {
-        between += static_cast<float>(counts[static_cast<std::size_t>(c)]) * cent(c, r) * cent(c, col);
+      score_crossprod(r, col) = total;
+      score_crossprod(col, r) = total;
+    }
+  }
+  const LDAFloatModel model = fit_lda_from_score_statistics_float(
+    std::move(class_sums), counts, score_crossprod, t_train.rows
+  );
+  return predict_lda_scores_float(t_val, model, classes, ncomp);
+}
+
+std::vector<int> fit_predict_pls_lda_streamed_cpu_float(
+  const DenseF& x_train,
+  const std::vector<int>& y_train,
+  const DenseF& x_val,
+  const PLSFitF& fit,
+  const std::vector<int>& classes,
+  int ncomp
+) {
+  const int cnum = static_cast<int>(classes.size());
+  std::vector<int> encoded;
+  std::vector<int> counts;
+  encode_labels_from_sorted_classes(y_train, classes, encoded, counts, 0);
+  DenseF class_sums(cnum, ncomp);
+  DenseF score_crossprod(ncomp, ncomp);
+  std::vector<float> score_row(static_cast<std::size_t>(ncomp), 0.0f);
+
+  for (int i = 0; i < x_train.rows; ++i) {
+    std::fill(score_row.begin(), score_row.end(), 0.0f);
+    for (int j = 0; j < x_train.cols; ++j) {
+      const float value = x_train(i, j);
+      const float* weight_row = fit.weights.data.data() +
+        static_cast<std::size_t>(j) * static_cast<std::size_t>(fit.weights.cols);
+      for (int a = 0; a < ncomp; ++a) score_row[static_cast<std::size_t>(a)] += value * weight_row[a];
+    }
+    const int cls = encoded[static_cast<std::size_t>(i)];
+    for (int a = 0; a < ncomp; ++a) class_sums(cls, a) += score_row[static_cast<std::size_t>(a)];
+    for (int r = 0; r < ncomp; ++r) {
+      for (int col = 0; col <= r; ++col) {
+        score_crossprod(r, col) +=
+          score_row[static_cast<std::size_t>(r)] * score_row[static_cast<std::size_t>(col)];
       }
-      const float covariance = (total - between) / df;
-      pooled(r, col) = covariance;
-      pooled(col, r) = covariance;
-    }
-    trace += pooled(r, r);
-  }
-
-  DenseF rhs(ncomp, cnum);
-  for (int c = 0; c < cnum; ++c) {
-    for (int a = 0; a < ncomp; ++a) rhs(a, c) = cent(c, a);
-  }
-  const float ridge_scale = std::isfinite(trace) && trace > 0.0f ?
-    trace / static_cast<float>(std::max(1, ncomp)) : 1.0f;
-  const float ridge_grid[] = {1e-8f, 1e-6f, 1e-5f, 1e-4f, 1e-3f, 1e-2f};
-  DenseF solved;
-  bool factorized = false;
-  for (float ridge : ridge_grid) {
-    DenseF covariance = pooled;
-    const float lambda = ridge * ridge_scale;
-    for (int component = 0; component < ncomp; ++component) covariance(component, component) += lambda;
-    if (cholesky_solve_float(covariance, rhs, solved)) {
-      factorized = true;
-      break;
     }
   }
-  if (!factorized) throw std::runtime_error("CPU float32 PLS-LDA Cholesky factorization failed.");
-
-  DenseF linear(cnum, ncomp);
-  std::vector<float> constants(static_cast<std::size_t>(cnum), 0.0f);
-  for (int c = 0; c < cnum; ++c) {
-    float dot_mu = 0.0f;
-    for (int a = 0; a < ncomp; ++a) {
-      linear(c, a) = solved(a, c);
-      dot_mu += cent(c, a) * linear(c, a);
-    }
-    const float prior = std::max(
-      static_cast<float>(counts[static_cast<std::size_t>(c)]) / static_cast<float>(std::max(1, t_train.rows)),
-      std::numeric_limits<float>::min()
-    );
-    constants[static_cast<std::size_t>(c)] = -0.5f * dot_mu + std::log(prior);
+  for (int r = 0; r < ncomp; ++r) {
+    for (int col = 0; col < r; ++col) score_crossprod(col, r) = score_crossprod(r, col);
   }
 
-  std::vector<int> pred(static_cast<std::size_t>(t_val.rows), classes.front());
-  for (int i = 0; i < t_val.rows; ++i) {
+  const LDAFloatModel model = fit_lda_from_score_statistics_float(
+    std::move(class_sums), counts, score_crossprod, x_train.rows
+  );
+  std::vector<int> pred(static_cast<std::size_t>(x_val.rows), classes.front());
+  for (int i = 0; i < x_val.rows; ++i) {
+    std::fill(score_row.begin(), score_row.end(), 0.0f);
+    for (int j = 0; j < x_val.cols; ++j) {
+      const float value = x_val(i, j);
+      const float* weight_row = fit.weights.data.data() +
+        static_cast<std::size_t>(j) * static_cast<std::size_t>(fit.weights.cols);
+      for (int a = 0; a < ncomp; ++a) score_row[static_cast<std::size_t>(a)] += value * weight_row[a];
+    }
     int best = 0;
     float best_score = -std::numeric_limits<float>::infinity();
     for (int c = 0; c < cnum; ++c) {
-      float score = constants[static_cast<std::size_t>(c)];
+      float score = model.constants[static_cast<std::size_t>(c)];
       for (int a = 0; a < ncomp; ++a) {
-        score += t_val(i, a) * linear(c, a);
+        score += score_row[static_cast<std::size_t>(a)] * model.linear(c, a);
       }
       if (score > best_score) {
         best_score = score;
@@ -2165,515 +1606,67 @@ std::vector<int> predict_pls_lda_float(
   return pred;
 }
 
-std::vector<int> predict_pls_lda(
-  const Dense& t_train,
+std::vector<float> packed_pls_weight_prefix_float(const PLSFitF& fit, int ncomp) {
+  if (ncomp < 1 || ncomp > fit.weights.cols) {
+    throw std::invalid_argument("PLS weight prefix is outside the fitted component range.");
+  }
+  if (ncomp == fit.weights.cols) return fit.weights.data;
+  std::vector<float> prefix(
+    static_cast<std::size_t>(fit.weights.rows) * static_cast<std::size_t>(ncomp),
+    0.0f
+  );
+  for (int row = 0; row < fit.weights.rows; ++row) {
+    std::copy_n(
+      fit.weights.data.data() +
+        static_cast<std::size_t>(row) * static_cast<std::size_t>(fit.weights.cols),
+      ncomp,
+      prefix.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(ncomp)
+    );
+  }
+  return prefix;
+}
+
+std::vector<int> fit_predict_pls_lda_metal_float(
+  const DenseF& x_train,
   const std::vector<int>& y_train,
-  const Dense& t_val,
+  const DenseF& x_val,
+  const PLSFitF& fit,
   const std::vector<int>& classes,
   int ncomp
 ) {
-  const int cnum = static_cast<int>(classes.size());
-  std::map<int, int> cpos;
-  for (int i = 0; i < cnum; ++i) cpos[classes[static_cast<std::size_t>(i)]] = i;
-  Dense cent(cnum, ncomp);
-  std::vector<int> counts(static_cast<std::size_t>(cnum), 0);
-  for (int i = 0; i < t_train.rows; ++i) {
-    const int c = cpos[y_train[static_cast<std::size_t>(i)]];
-    counts[static_cast<std::size_t>(c)]++;
-    for (int a = 0; a < ncomp; ++a) cent(c, a) += t_train(i, a);
-  }
-  for (int c = 0; c < cnum; ++c) {
-    const double inv = counts[static_cast<std::size_t>(c)] > 0 ? 1.0 / counts[static_cast<std::size_t>(c)] : 0.0;
-    for (int a = 0; a < ncomp; ++a) cent(c, a) *= inv;
-  }
-
-  Dense pooled(ncomp, ncomp);
-  for (int i = 0; i < t_train.rows; ++i) {
-    const int c = cpos[y_train[static_cast<std::size_t>(i)]];
-    for (int r = 0; r < ncomp; ++r) {
-      const double dr = t_train(i, r) - cent(c, r);
-      for (int col = 0; col < ncomp; ++col) {
-        const double dc = t_train(i, col) - cent(c, col);
-        pooled(r, col) += dr * dc;
-      }
-    }
-  }
-  const double df = static_cast<double>(std::max(1, t_train.rows - cnum));
-  double trace = 0.0;
-  for (int r = 0; r < ncomp; ++r) {
-    for (int col = 0; col < ncomp; ++col) pooled(r, col) /= df;
-    trace += pooled(r, r);
-  }
-  const double ridge = 1e-8 * (std::isfinite(trace) && trace > 0.0 ? trace / std::max(1, ncomp) : 1.0);
-  for (int r = 0; r < ncomp; ++r) pooled(r, r) += ridge;
-
-  Dense rhs(ncomp, cnum);
-  for (int c = 0; c < cnum; ++c) {
-    for (int a = 0; a < ncomp; ++a) rhs(a, c) = cent(c, a);
-  }
-  Dense solved = solve_linear(pooled, rhs);
-
-  Dense linear(cnum, ncomp);
-  std::vector<double> constants(static_cast<std::size_t>(cnum), 0.0);
-  for (int c = 0; c < cnum; ++c) {
-    double dot_mu = 0.0;
-    for (int a = 0; a < ncomp; ++a) {
-      linear(c, a) = solved(a, c);
-      dot_mu += cent(c, a) * linear(c, a);
-    }
-    const double prior = std::max(
-      static_cast<double>(counts[static_cast<std::size_t>(c)]) / std::max(1, t_train.rows),
-      std::numeric_limits<double>::min()
-    );
-    constants[static_cast<std::size_t>(c)] = -0.5 * dot_mu + std::log(prior);
-  }
-
-  std::vector<int> pred(static_cast<std::size_t>(t_val.rows), classes.front());
-  for (int i = 0; i < t_val.rows; ++i) {
-    int best = 0;
-    double best_score = -std::numeric_limits<double>::infinity();
-    for (int c = 0; c < cnum; ++c) {
-      long double score = constants[static_cast<std::size_t>(c)];
-      for (int a = 0; a < ncomp; ++a) {
-        score += static_cast<long double>(t_val(i, a)) * linear(c, a);
-      }
-      if (score > best_score) {
-        best_score = static_cast<double>(score);
-        best = c;
-      }
-    }
-    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(best)];
-  }
-  return pred;
-}
-
-std::vector<int> predict_pls_lda(
-  const Dense& t_train,
-  const std::vector<int>& y_train,
-  const Dense& t_val,
-  const std::vector<int>& classes
-) {
-  return predict_pls_lda(t_train, y_train, t_val, classes, t_val.cols);
+  std::vector<int> encoded;
+  std::vector<int> counts;
+  encode_labels_from_sorted_classes(y_train, classes, encoded, counts, 0);
+  const std::vector<float> weights = packed_pls_weight_prefix_float(fit, ncomp);
+  const detail::MetalPLSScoreStatistics statistics = detail::metal_pls_score_statistics(
+    x_train.data,
+    x_train.rows,
+    x_train.cols,
+    weights,
+    ncomp,
+    encoded,
+    static_cast<int>(classes.size())
+  );
+  DenseF class_sums(statistics.classes, statistics.components);
+  class_sums.data = statistics.class_sums;
+  DenseF score_crossprod(statistics.components, statistics.components);
+  score_crossprod.data = statistics.score_crossprod;
+  const LDAFloatModel model = fit_lda_from_score_statistics_float(
+    std::move(class_sums), counts, score_crossprod, x_train.rows
+  );
+  return detail::metal_pls_lda_predict(
+    x_val.data,
+    x_val.rows,
+    x_val.cols,
+    weights,
+    ncomp,
+    model.linear.data,
+    model.constants,
+    classes
+  );
 }
 
 #if defined(KODAMA_ENABLE_CUDA)
-struct CudaLDAModel {
-  Dense linear;
-  std::vector<double> constants;
-};
-
-CudaLDAModel train_pls_lda_cuda(
-  const Dense& t_train,
-  const std::vector<int>& y_train,
-  const std::vector<int>& classes,
-  int gpu_device
-) {
-  if (t_train.rows < 1 || t_train.cols < 1) throw std::invalid_argument("CUDA LDA requires a non-empty score matrix.");
-  if (static_cast<int>(y_train.size()) != t_train.rows) throw std::invalid_argument("CUDA LDA label size mismatch.");
-  const int n = t_train.rows;
-  const int k = t_train.cols;
-  const int cnum = static_cast<int>(classes.size());
-  CudaLDAContext& context = cuda_lda_context(gpu_device);
-  cudaStream_t stream = context.stream();
-  cublasHandle_t blas = context.blas();
-  cusolverDnHandle_t solver = context.solver();
-
-  std::map<int, int> cpos;
-  for (int c = 0; c < cnum; ++c) cpos[classes[static_cast<std::size_t>(c)]] = c;
-  std::vector<int> encoded(static_cast<std::size_t>(n), 1);
-  std::vector<double> counts(static_cast<std::size_t>(cnum), 0.0);
-  for (int i = 0; i < n; ++i) {
-    const int cls = cpos.at(y_train[static_cast<std::size_t>(i)]);
-    encoded[static_cast<std::size_t>(i)] = cls + 1;
-    counts[static_cast<std::size_t>(cls)] += 1.0;
-  }
-
-  DeviceBuffer d_t(t_train.data.size());
-  DeviceIntBuffer d_labels(encoded.size());
-  DeviceBuffer d_counts(counts.size());
-  DeviceBuffer d_means(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
-  DeviceBuffer d_pooled(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
-  DeviceBuffer d_cov(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
-  DeviceBuffer d_rhs(static_cast<std::size_t>(k) * static_cast<std::size_t>(cnum));
-  DeviceBuffer d_linear(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
-  DeviceBuffer d_constants(static_cast<std::size_t>(cnum));
-  DeviceBuffer d_lambda(1);
-  DeviceIntBuffer d_info(1);
-  double* d_work = nullptr;
-
-  auto cleanup = [&]() {
-    if (d_work != nullptr) cudaFree(d_work);
-  };
-
-  try {
-    check_cuda(cudaMemcpyAsync(d_t.data(), t_train.data.data(), t_train.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA T");
-    check_cuda(cudaMemcpyAsync(d_labels.data(), encoded.data(), encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA labels");
-    check_cuda(cudaMemcpyAsync(d_counts.data(), counts.data(), counts.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA counts");
-
-    kodama_cuda_lda_label_sums_row(d_t.data(), d_labels.data(), n, k, cnum, d_means.data(), stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_label_sums_row");
-    kodama_cuda_lda_means_row(d_means.data(), d_counts.data(), k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_row");
-
-    const double one = 1.0;
-    const double zero = 0.0;
-    check_cublas(
-      cublasDgemm(
-        blas,
-        CUBLAS_OP_N,
-        CUBLAS_OP_T,
-        k,
-        k,
-        n,
-        &one,
-        d_t.data(),
-        k,
-        d_t.data(),
-        k,
-        &zero,
-        d_pooled.data(),
-        k
-      ),
-      "cublasDgemm CUDA LDA TtT"
-    );
-    kodama_cuda_lda_pooled_col(d_pooled.data(), d_means.data(), d_counts.data(), n, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_pooled_col");
-    kodama_cuda_lda_copy_cov(d_pooled.data(), d_cov.data(), k, k, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_copy_cov");
-    kodama_cuda_lda_add_ridge(d_cov.data(), k, 1e-8, d_lambda.data(), stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_add_ridge");
-    kodama_cuda_lda_means_to_rhs(d_means.data(), d_rhs.data(), k, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_to_rhs");
-
-    int lwork = 0;
-    check_cusolver(cusolverDnDpotrf_bufferSize(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, &lwork), "cusolverDnDpotrf_bufferSize CUDA LDA");
-    check_cuda(cudaMalloc(&d_work, sizeof(double) * static_cast<std::size_t>(std::max(lwork, 1))), "cudaMalloc CUDA LDA work");
-    check_cusolver(cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, d_work, lwork, d_info.data()), "cusolverDnDpotrf CUDA LDA");
-    int info = 0;
-    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA potrf info");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA potrf");
-    if (info != 0) throw std::runtime_error("cusolverDnDpotrf CUDA LDA returned non-zero info.");
-    check_cusolver(cusolverDnDpotrs(solver, CUBLAS_FILL_MODE_LOWER, k, cnum, d_cov.data(), k, d_rhs.data(), k, d_info.data()), "cusolverDnDpotrs CUDA LDA");
-    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA potrs info");
-    kodama_cuda_lda_finalize_linear_row(d_rhs.data(), d_means.data(), d_counts.data(), d_linear.data(), d_constants.data(), n, k, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_finalize_linear_row");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA solve");
-    if (info != 0) throw std::runtime_error("cusolverDnDpotrs CUDA LDA returned non-zero info.");
-
-    CudaLDAModel model{Dense(cnum, k), std::vector<double>(static_cast<std::size_t>(cnum), 0.0)};
-    check_cuda(cudaMemcpy(model.linear.data.data(), d_linear.data(), model.linear.data.size() * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy CUDA LDA linear");
-    check_cuda(cudaMemcpy(model.constants.data(), d_constants.data(), model.constants.size() * sizeof(double), cudaMemcpyDeviceToHost), "cudaMemcpy CUDA LDA constants");
-    cleanup();
-    return model;
-  } catch (...) {
-    cleanup();
-    throw;
-  }
-}
-
-std::vector<int> train_predict_pls_lda_cuda(
-  const Dense& t_train,
-  const std::vector<int>& y_train,
-  const Dense& t_val,
-  const std::vector<int>& classes,
-  int gpu_device
-) {
-  if (t_train.rows < 1 || t_train.cols < 1) throw std::invalid_argument("CUDA LDA requires a non-empty score matrix.");
-  if (static_cast<int>(y_train.size()) != t_train.rows) throw std::invalid_argument("CUDA LDA label size mismatch.");
-  if (t_val.rows < 1) return {};
-  if (t_val.cols != t_train.cols) throw std::invalid_argument("CUDA LDA train/validation score column mismatch.");
-  const int n = t_train.rows;
-  const int k = t_train.cols;
-  const int n_val = t_val.rows;
-  const int cnum = static_cast<int>(classes.size());
-  CudaLDAContext& context = cuda_lda_context(gpu_device);
-  cudaStream_t stream = context.stream();
-  cublasHandle_t blas = context.blas();
-  cusolverDnHandle_t solver = context.solver();
-
-  std::map<int, int> cpos;
-  for (int c = 0; c < cnum; ++c) cpos[classes[static_cast<std::size_t>(c)]] = c;
-  std::vector<int> encoded(static_cast<std::size_t>(n), 1);
-  std::vector<double> counts(static_cast<std::size_t>(cnum), 0.0);
-  for (int i = 0; i < n; ++i) {
-    const int cls = cpos.at(y_train[static_cast<std::size_t>(i)]);
-    encoded[static_cast<std::size_t>(i)] = cls + 1;
-    counts[static_cast<std::size_t>(cls)] += 1.0;
-  }
-
-  DeviceBuffer d_t(t_train.data.size());
-  DeviceIntBuffer d_labels(encoded.size());
-  DeviceBuffer d_counts(counts.size());
-  DeviceBuffer d_means(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
-  DeviceBuffer d_pooled(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
-  DeviceBuffer d_cov(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
-  DeviceBuffer d_rhs(static_cast<std::size_t>(k) * static_cast<std::size_t>(cnum));
-  DeviceBuffer d_linear(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
-  DeviceBuffer d_constants(static_cast<std::size_t>(cnum));
-  DeviceBuffer d_lambda(1);
-  DeviceIntBuffer d_info(1);
-  DeviceBuffer d_t_val(t_val.data.size());
-  DeviceIntBuffer d_pred(static_cast<std::size_t>(n_val));
-  double* d_work = nullptr;
-
-  auto cleanup = [&]() {
-    if (d_work != nullptr) cudaFree(d_work);
-  };
-
-  try {
-    check_cuda(cudaMemcpyAsync(d_t.data(), t_train.data.data(), t_train.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA T");
-    check_cuda(cudaMemcpyAsync(d_labels.data(), encoded.data(), encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA labels");
-    check_cuda(cudaMemcpyAsync(d_counts.data(), counts.data(), counts.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync LDA counts");
-
-    kodama_cuda_lda_label_sums_row(d_t.data(), d_labels.data(), n, k, cnum, d_means.data(), stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_label_sums_row");
-    kodama_cuda_lda_means_row(d_means.data(), d_counts.data(), k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_row");
-
-    const double one = 1.0;
-    const double zero = 0.0;
-    check_cublas(
-      cublasDgemm(
-        blas,
-        CUBLAS_OP_N,
-        CUBLAS_OP_T,
-        k,
-        k,
-        n,
-        &one,
-        d_t.data(),
-        k,
-        d_t.data(),
-        k,
-        &zero,
-        d_pooled.data(),
-        k
-      ),
-      "cublasDgemm CUDA LDA TtT"
-    );
-    kodama_cuda_lda_pooled_col(d_pooled.data(), d_means.data(), d_counts.data(), n, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_pooled_col");
-    kodama_cuda_lda_copy_cov(d_pooled.data(), d_cov.data(), k, k, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_copy_cov");
-    kodama_cuda_lda_add_ridge(d_cov.data(), k, 1e-8, d_lambda.data(), stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_add_ridge");
-    kodama_cuda_lda_means_to_rhs(d_means.data(), d_rhs.data(), k, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_to_rhs");
-
-    int lwork = 0;
-    check_cusolver(cusolverDnDpotrf_bufferSize(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, &lwork), "cusolverDnDpotrf_bufferSize CUDA LDA");
-    check_cuda(cudaMalloc(&d_work, sizeof(double) * static_cast<std::size_t>(std::max(lwork, 1))), "cudaMalloc CUDA LDA work");
-    check_cusolver(cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, d_work, lwork, d_info.data()), "cusolverDnDpotrf CUDA LDA");
-    int info = 0;
-    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA potrf info");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA potrf");
-    if (info != 0) throw std::runtime_error("cusolverDnDpotrf CUDA LDA returned non-zero info.");
-    check_cusolver(cusolverDnDpotrs(solver, CUBLAS_FILL_MODE_LOWER, k, cnum, d_cov.data(), k, d_rhs.data(), k, d_info.data()), "cusolverDnDpotrs CUDA LDA");
-    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA potrs info");
-    kodama_cuda_lda_finalize_linear_row(d_rhs.data(), d_means.data(), d_counts.data(), d_linear.data(), d_constants.data(), n, k, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_finalize_linear_row");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA solve");
-    if (info != 0) throw std::runtime_error("cusolverDnDpotrs CUDA LDA returned non-zero info.");
-
-    check_cuda(cudaMemcpyAsync(d_t_val.data(), t_val.data.data(), t_val.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict T");
-    kodama_cuda_lda_score_argmax_row(d_t_val.data(), d_linear.data(), d_constants.data(), d_pred.data(), n_val, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row");
-    std::vector<int> codes(static_cast<std::size_t>(n_val), 1);
-    check_cuda(cudaMemcpyAsync(codes.data(), d_pred.data(), codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA predict labels");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA predict");
-    cleanup();
-
-    std::vector<int> pred(static_cast<std::size_t>(n_val), classes.front());
-    for (int i = 0; i < n_val; ++i) {
-      const int cls = std::max(1, std::min(cnum, codes[static_cast<std::size_t>(i)])) - 1;
-      pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
-    }
-    return pred;
-  } catch (...) {
-    cleanup();
-    throw;
-  }
-}
-
-std::vector<int> train_predict_pls_lda_projected_cuda(
-  const Dense& x_train,
-  const std::vector<int>& y_train,
-  const Dense& x_val,
-  const PLSFit& fit,
-  int ncomp,
-  const std::vector<int>& classes,
-  int gpu_device
-) {
-  if (x_train.rows < 1 || x_train.cols < 1) throw std::invalid_argument("CUDA PLS-LDA requires a non-empty training matrix.");
-  if (static_cast<int>(y_train.size()) != x_train.rows) throw std::invalid_argument("CUDA PLS-LDA label size mismatch.");
-  if (x_val.rows < 1) return {};
-  if (x_val.cols != x_train.cols) throw std::invalid_argument("CUDA PLS-LDA train/validation column mismatch.");
-  if (fit.weights.rows != x_train.cols) throw std::invalid_argument("CUDA PLS-LDA projection column mismatch.");
-  if (ncomp < 1 || ncomp > fit.weights.cols) throw std::invalid_argument("CUDA PLS-LDA component count exceeds fit rank.");
-
-  const int n = x_train.rows;
-  const int p = x_train.cols;
-  const int n_val = x_val.rows;
-  const int k = ncomp;
-  const int cnum = static_cast<int>(classes.size());
-  CudaLDAContext& context = cuda_lda_context(gpu_device);
-  cudaStream_t stream = context.stream();
-  cublasHandle_t blas = context.blas();
-  cusolverDnHandle_t solver = context.solver();
-
-  std::map<int, int> cpos;
-  for (int c = 0; c < cnum; ++c) cpos[classes[static_cast<std::size_t>(c)]] = c;
-  std::vector<int> encoded(static_cast<std::size_t>(n), 1);
-  std::vector<double> counts(static_cast<std::size_t>(cnum), 0.0);
-  for (int i = 0; i < n; ++i) {
-    const int cls = cpos.at(y_train[static_cast<std::size_t>(i)]);
-    encoded[static_cast<std::size_t>(i)] = cls + 1;
-    counts[static_cast<std::size_t>(cls)] += 1.0;
-  }
-
-  std::vector<double> w_prefix(static_cast<std::size_t>(p) * static_cast<std::size_t>(k));
-  for (int i = 0; i < p; ++i) {
-    for (int j = 0; j < k; ++j) {
-      w_prefix[static_cast<std::size_t>(i) * static_cast<std::size_t>(k) + static_cast<std::size_t>(j)] = fit.weights(i, j);
-    }
-  }
-
-  DeviceBuffer d_x_train(x_train.data.size());
-  DeviceBuffer d_x_val(x_val.data.size());
-  DeviceBuffer d_w(w_prefix.size());
-  DeviceBuffer d_t(static_cast<std::size_t>(n) * static_cast<std::size_t>(k));
-  DeviceBuffer d_t_val(static_cast<std::size_t>(n_val) * static_cast<std::size_t>(k));
-  DeviceIntBuffer d_labels(encoded.size());
-  DeviceBuffer d_counts(counts.size());
-  DeviceBuffer d_means(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
-  DeviceBuffer d_pooled(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
-  DeviceBuffer d_cov(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
-  DeviceBuffer d_rhs(static_cast<std::size_t>(k) * static_cast<std::size_t>(cnum));
-  DeviceBuffer d_linear(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
-  DeviceBuffer d_constants(static_cast<std::size_t>(cnum));
-  DeviceBuffer d_lambda(1);
-  DeviceIntBuffer d_info(1);
-  DeviceIntBuffer d_pred(static_cast<std::size_t>(n_val));
-  double* d_work = nullptr;
-
-  auto cleanup = [&]() {
-    if (d_work != nullptr) cudaFree(d_work);
-  };
-
-  try {
-    check_cuda(cudaMemcpyAsync(d_x_train.data(), x_train.data.data(), x_train.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync PLS-LDA Xtrain");
-    check_cuda(cudaMemcpyAsync(d_x_val.data(), x_val.data.data(), x_val.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync PLS-LDA Xval");
-    check_cuda(cudaMemcpyAsync(d_w.data(), w_prefix.data(), w_prefix.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync PLS-LDA weights");
-    check_cuda(cudaMemcpyAsync(d_labels.data(), encoded.data(), encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync PLS-LDA labels");
-    check_cuda(cudaMemcpyAsync(d_counts.data(), counts.data(), counts.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync PLS-LDA counts");
-
-    const double one = 1.0;
-    const double zero = 0.0;
-    check_cublas(
-      cublasDgemm(
-        blas,
-        CUBLAS_OP_N,
-        CUBLAS_OP_N,
-        k,
-        n,
-        p,
-        &one,
-        d_w.data(),
-        k,
-        d_x_train.data(),
-        p,
-        &zero,
-        d_t.data(),
-        k
-      ),
-      "cublasDgemm PLS-LDA train scores"
-    );
-    check_cublas(
-      cublasDgemm(
-        blas,
-        CUBLAS_OP_N,
-        CUBLAS_OP_N,
-        k,
-        n_val,
-        p,
-        &one,
-        d_w.data(),
-        k,
-        d_x_val.data(),
-        p,
-        &zero,
-        d_t_val.data(),
-        k
-      ),
-      "cublasDgemm PLS-LDA validation scores"
-    );
-
-    kodama_cuda_lda_label_sums_row(d_t.data(), d_labels.data(), n, k, cnum, d_means.data(), stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_label_sums_row fused PLS-LDA");
-    kodama_cuda_lda_means_row(d_means.data(), d_counts.data(), k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_row fused PLS-LDA");
-    check_cublas(
-      cublasDgemm(
-        blas,
-        CUBLAS_OP_N,
-        CUBLAS_OP_T,
-        k,
-        k,
-        n,
-        &one,
-        d_t.data(),
-        k,
-        d_t.data(),
-        k,
-        &zero,
-        d_pooled.data(),
-        k
-      ),
-      "cublasDgemm fused CUDA LDA TtT"
-    );
-    kodama_cuda_lda_pooled_col(d_pooled.data(), d_means.data(), d_counts.data(), n, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_pooled_col fused PLS-LDA");
-    kodama_cuda_lda_copy_cov(d_pooled.data(), d_cov.data(), k, k, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_copy_cov fused PLS-LDA");
-    kodama_cuda_lda_add_ridge(d_cov.data(), k, 1e-8, d_lambda.data(), stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_add_ridge fused PLS-LDA");
-    kodama_cuda_lda_means_to_rhs(d_means.data(), d_rhs.data(), k, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_to_rhs fused PLS-LDA");
-
-    int lwork = 0;
-    check_cusolver(cusolverDnDpotrf_bufferSize(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, &lwork), "cusolverDnDpotrf_bufferSize fused PLS-LDA");
-    check_cuda(cudaMalloc(&d_work, sizeof(double) * static_cast<std::size_t>(std::max(lwork, 1))), "cudaMalloc fused PLS-LDA work");
-    check_cusolver(cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_LOWER, k, d_cov.data(), k, d_work, lwork, d_info.data()), "cusolverDnDpotrf fused PLS-LDA");
-    int info = 0;
-    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync fused PLS-LDA potrf info");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize fused PLS-LDA potrf");
-    if (info != 0) throw std::runtime_error("cusolverDnDpotrf fused PLS-LDA returned non-zero info.");
-    check_cusolver(cusolverDnDpotrs(solver, CUBLAS_FILL_MODE_LOWER, k, cnum, d_cov.data(), k, d_rhs.data(), k, d_info.data()), "cusolverDnDpotrs fused PLS-LDA");
-    check_cuda(cudaMemcpyAsync(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync fused PLS-LDA potrs info");
-    kodama_cuda_lda_finalize_linear_row(d_rhs.data(), d_means.data(), d_counts.data(), d_linear.data(), d_constants.data(), n, k, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_finalize_linear_row fused PLS-LDA");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize fused PLS-LDA solve");
-    if (info != 0) throw std::runtime_error("cusolverDnDpotrs fused PLS-LDA returned non-zero info.");
-
-    kodama_cuda_lda_score_argmax_row(d_t_val.data(), d_linear.data(), d_constants.data(), d_pred.data(), n_val, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row fused PLS-LDA");
-    std::vector<int> codes(static_cast<std::size_t>(n_val), 1);
-    check_cuda(cudaMemcpyAsync(codes.data(), d_pred.data(), codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync fused PLS-LDA labels");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize fused PLS-LDA predict");
-    cleanup();
-
-    std::vector<int> pred(static_cast<std::size_t>(n_val), classes.front());
-    for (int i = 0; i < n_val; ++i) {
-      const int cls = std::max(1, std::min(cnum, codes[static_cast<std::size_t>(i)])) - 1;
-      pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
-    }
-    return pred;
-  } catch (...) {
-    cleanup();
-    throw;
-  }
-}
-
 CudaPLSLDAFloatWorkspace::ResidentFold& prepare_cuda_resident_pls_fold(
   CudaPLSLDAFloatWorkspace& workspace,
   std::size_t fold_slot,
@@ -2741,7 +1734,6 @@ CudaPLSLDAFloatWorkspace::ResidentFold& prepare_cuda_resident_pls_fold(
     cudaStreamSynchronize(stream),
     "cudaStreamSynchronize resident PLS-LDA fold upload"
   );
-
   resident.epoch = epoch;
   resident.train_host = x_train.data.data();
   resident.validation_host = x_val.data.data();
@@ -2749,6 +1741,7 @@ CudaPLSLDAFloatWorkspace::ResidentFold& prepare_cuda_resident_pls_fold(
   resident.train_rows = x_train.rows;
   resident.validation_rows = x_val.rows;
   resident.predictors = x_train.cols;
+  resident.train_gram_ready = false;
   resident.ready = true;
   ++workspace.matrix_uploads;
   return resident;
@@ -2757,6 +1750,7 @@ CudaPLSLDAFloatWorkspace::ResidentFold& prepare_cuda_resident_pls_fold(
 std::vector<int> predict_pls_lda_device_float(
   const float* x_train_device,
   const float* x_val_device,
+  const float* train_gram_colmajor_device,
   const float* weights_rowmajor_device,
   int n,
   int p,
@@ -2770,8 +1764,9 @@ std::vector<int> predict_pls_lda_device_float(
   cudaStream_t stream = context.stream();
   cublasHandle_t blas = context.blas();
   cusolverDnHandle_t solver = context.solver();
-  workspace.train_scores.ensure(static_cast<std::size_t>(n) * static_cast<std::size_t>(k));
   workspace.val_scores.ensure(static_cast<std::size_t>(n_val) * static_cast<std::size_t>(k));
+  workspace.class_feature_sums.ensure(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(p));
+  workspace.projected_gram.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(p));
   workspace.means.ensure(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
   workspace.pooled.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
   workspace.cov.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
@@ -2784,24 +1779,37 @@ std::vector<int> predict_pls_lda_device_float(
 
   const float one = 1.0f;
   const float zero = 0.0f;
+  // LDA only needs class score sums and T'T from the training scores T=XW.
+  // Compute them algebraically as (class sums of X)W and W'(X'X)W so the
+  // sample-sized training score matrix never has to be materialized.
+  kodama_cuda_lda_label_sums_row_float(
+    x_train_device,
+    workspace.labels.data(),
+    n,
+    p,
+    cnum,
+    workspace.class_feature_sums.data(),
+    stream
+  );
+  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA feature class sums");
   check_cublas(
     cublasSgemm(
       blas,
       CUBLAS_OP_N,
       CUBLAS_OP_N,
       k,
-      n,
+      cnum,
       p,
       &one,
       weights_rowmajor_device,
       k,
-      x_train_device,
+      workspace.class_feature_sums.data(),
       p,
       &zero,
-      workspace.train_scores.data(),
+      workspace.means.data(),
       k
     ),
-    "cublasSgemm resident float32 PLS-LDA train scores"
+    "cublasSgemm resident float32 PLS-LDA class score sums"
   );
   check_cublas(
     cublasSgemm(
@@ -2823,16 +1831,6 @@ std::vector<int> predict_pls_lda_device_float(
     "cublasSgemm resident float32 PLS-LDA validation scores"
   );
 
-  kodama_cuda_lda_label_sums_row_float(
-    workspace.train_scores.data(),
-    workspace.labels.data(),
-    n,
-    k,
-    cnum,
-    workspace.means.data(),
-    stream
-  );
-  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA label sums");
   kodama_cuda_lda_means_row_float(
     workspace.means.data(),
     workspace.counts.data(),
@@ -2842,23 +1840,43 @@ std::vector<int> predict_pls_lda_device_float(
   );
   check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA means");
   check_cublas(
-    cublasSsyrk(
+    cublasSgemm(
       blas,
-      CUBLAS_FILL_MODE_LOWER,
+      CUBLAS_OP_N,
       CUBLAS_OP_N,
       k,
-      n,
+      p,
+      p,
       &one,
-      workspace.train_scores.data(),
+      weights_rowmajor_device,
+      k,
+      train_gram_colmajor_device,
+      p,
+      &zero,
+      workspace.projected_gram.data(),
+      k
+    ),
+    "cublasSgemm resident float32 CUDA LDA WtXtX"
+  );
+  check_cublas(
+    cublasSgemm(
+      blas,
+      CUBLAS_OP_N,
+      CUBLAS_OP_T,
+      k,
+      k,
+      p,
+      &one,
+      workspace.projected_gram.data(),
+      k,
+      weights_rowmajor_device,
       k,
       &zero,
       workspace.pooled.data(),
       k
     ),
-    "cublasSsyrk resident float32 CUDA LDA TtT"
+    "cublasSgemm resident float32 CUDA LDA WtXtXW"
   );
-  kodama_cuda_symmetrize_lower_float(workspace.pooled.data(), k, stream);
-  check_cuda(cudaGetLastError(), "resident CUDA PLS-LDA symmetrize covariance");
   kodama_cuda_lda_pooled_col_float(
     workspace.pooled.data(),
     workspace.means.data(),
@@ -2995,7 +2013,6 @@ std::vector<int> predict_pls_lda_device_float(
       "cusolverDnSpotrs resident float32 PLS-LDA returned non-zero info."
     );
   }
-
   kodama_cuda_lda_score_argmax_row_float(
     workspace.val_scores.data(),
     workspace.linear.data(),
@@ -3064,6 +2081,35 @@ std::vector<int> fit_predict_pls_lda_resident_cuda_float(
       stream
     );
 
+  if (!resident.train_gram_ready) {
+    resident.train_gram_colmajor.ensure(
+      static_cast<std::size_t>(x_train.cols) *
+      static_cast<std::size_t>(x_train.cols)
+    );
+    const float one = 1.0f;
+    const float zero = 0.0f;
+    check_cublas(
+      cublasSgemm(
+        context.blas(),
+        CUBLAS_OP_T,
+        CUBLAS_OP_N,
+        x_train.cols,
+        x_train.cols,
+        x_train.rows,
+        &one,
+        resident.train_colmajor.data(),
+        x_train.rows,
+        resident.train_colmajor.data(),
+        x_train.rows,
+        &zero,
+        resident.train_gram_colmajor.data(),
+        x_train.cols
+      ),
+      "cublasSgemm resident float32 PLS-LDA X'X"
+    );
+    resident.train_gram_ready = true;
+  }
+
   encode_labels_from_sorted_classes(
     y_train,
     classes,
@@ -3093,11 +2139,6 @@ std::vector<int> fit_predict_pls_lda_resident_cuda_float(
     ),
     "cudaMemcpyAsync resident PLS-LDA class counts"
   );
-  check_cuda(
-    cudaStreamSynchronize(stream),
-    "cudaStreamSynchronize resident PLS-LDA label upload"
-  );
-
   const int max_rank = pls_component_limit(
     max_components,
     x_train.rows,
@@ -3110,11 +2151,12 @@ std::vector<int> fit_predict_pls_lda_resident_cuda_float(
       resident.train_colmajor.data(),
       x_train.rows,
       x_train.cols,
-      nullptr,
+      resident.train_gram_colmajor.data(),
       workspace.labels.data(),
       workspace.counts.data(),
       static_cast<int>(classes.size()),
       trial_rank,
+      stream,
       &weights_column_major
     );
     if (ok) {
@@ -3143,6 +2185,7 @@ std::vector<int> fit_predict_pls_lda_resident_cuda_float(
   return predict_pls_lda_device_float(
     resident.train_rowmajor.data(),
     resident.validation_rowmajor.data(),
+    resident.train_gram_colmajor.data(),
     workspace.weights.data(),
     x_train.rows,
     x_train.cols,
@@ -3308,7 +2351,6 @@ std::vector<int> train_predict_pls_lda_projected_cuda_float(
     check_cuda(cudaGetLastError(), "kodama_cuda_lda_finalize_linear_row_float");
     check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize float32 PLS-LDA solve");
     if (info != 0) throw std::runtime_error("cusolverDnSpotrs float32 PLS-LDA returned non-zero info.");
-
     kodama_cuda_lda_score_argmax_row_float(workspace.val_scores.data(), workspace.linear.data(), workspace.constants.data(), workspace.pred.data(), n_val, k, cnum, stream);
     check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row_float");
     workspace.pred_codes.assign(static_cast<std::size_t>(n_val), 1);
@@ -3324,38 +2366,6 @@ std::vector<int> train_predict_pls_lda_projected_cuda_float(
   } catch (...) {
     throw;
   }
-}
-
-std::vector<int> predict_pls_lda_cuda(
-  const Dense& t_val,
-  const CudaLDAModel& model,
-  const std::vector<int>& classes,
-  int gpu_device
-) {
-  if (t_val.rows < 1) return {};
-  const int n = t_val.rows;
-  const int k = t_val.cols;
-  const int cnum = static_cast<int>(classes.size());
-  CudaLDAContext& context = cuda_lda_context(gpu_device);
-  cudaStream_t stream = context.stream();
-  DeviceBuffer d_t(t_val.data.size());
-  DeviceBuffer d_linear(model.linear.data.size());
-  DeviceBuffer d_constants(model.constants.size());
-  DeviceIntBuffer d_pred(static_cast<std::size_t>(n));
-  check_cuda(cudaMemcpyAsync(d_t.data(), t_val.data.data(), t_val.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict T");
-  check_cuda(cudaMemcpyAsync(d_linear.data(), model.linear.data.data(), model.linear.data.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict linear");
-  check_cuda(cudaMemcpyAsync(d_constants.data(), model.constants.data(), model.constants.size() * sizeof(double), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync CUDA LDA predict constants");
-  kodama_cuda_lda_score_argmax_row(d_t.data(), d_linear.data(), d_constants.data(), d_pred.data(), n, k, cnum, stream);
-  check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row");
-  std::vector<int> codes(static_cast<std::size_t>(n), 1);
-  check_cuda(cudaMemcpyAsync(codes.data(), d_pred.data(), codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync CUDA LDA predict labels");
-  check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize CUDA LDA predict");
-  std::vector<int> pred(static_cast<std::size_t>(n), classes.front());
-  for (int i = 0; i < n; ++i) {
-    const int cls = std::max(1, std::min(cnum, codes[static_cast<std::size_t>(i)])) - 1;
-    pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
-  }
-  return pred;
 }
 
 #endif
@@ -3384,15 +2394,16 @@ PLSCVResult run_plscv_host(
   detail::Timer timer;
   PLSCVResult result;
   result.true_labels = labels;
-  const bool use_fold_cache = !options.cv.stratified;
+  const bool use_fold_cache = !options.cv.stratified && options.data_epoch != 0;
   const PLSFoldXCacheF* fold_cache = use_fold_cache ?
     &get_pls_fold_x_cache_float(x, labels, constrain, options, false, backend == Backend::CPU) : nullptr;
+  std::uint64_t metal_residency_epoch = 0;
   if (backend == Backend::Metal) {
-    const std::uint64_t epoch = fold_cache != nullptr ?
+    static std::atomic<std::uint64_t> uncached_metal_epoch{1};
+    metal_residency_epoch = fold_cache != nullptr ?
       fold_cache->generation :
-      (options.cv.seed ^ static_cast<std::uint64_t>(x.rows << 1U) ^
-       static_cast<std::uint64_t>(x.cols));
-    detail::metal_set_pls_residency_epoch(epoch);
+      uncached_metal_epoch.fetch_add(1, std::memory_order_relaxed);
+    detail::metal_set_pls_residency_epoch(metal_residency_epoch);
   }
   result.fold_assignments = fold_cache != nullptr ?
     fold_cache->fold_assignments :
@@ -3406,6 +2417,11 @@ PLSCVResult run_plscv_host(
 
   std::vector<int> fold_evaluated_components(fold_ids.size(), evaluated_component);
   auto process_fold = [&](std::size_t fold_pos) {
+    if (backend == Backend::Metal) {
+      const std::uint64_t fold_epoch = metal_residency_epoch ^
+        (0x9e3779b97f4a7c15ULL + static_cast<std::uint64_t>(fold_pos));
+      detail::metal_set_pls_residency_epoch(fold_epoch);
+    }
     const int fold = fold_ids[fold_pos];
     std::vector<int> validation_storage;
     std::vector<int> train_storage;
@@ -3476,6 +2492,21 @@ PLSCVResult run_plscv_host(
     }
     const std::vector<int> eval_components = components_to_evaluate(options, fit.weights.cols);
     fold_evaluated_components[fold_pos] = eval_components.front();
+    if ((backend == Backend::CPU || backend == Backend::Metal) && mode == PLSMode::PLS_LDA) {
+      for (int a : eval_components) {
+        const std::vector<int> fold_pred = backend == Backend::Metal ?
+          fit_predict_pls_lda_metal_float(
+            *x_train, y_train_labels, *x_val, fit, fold_classes, a
+          ) :
+          fit_predict_pls_lda_streamed_cpu_float(
+            *x_train, y_train_labels, *x_val, fit, fold_classes, a
+          );
+        for (std::size_t i = 0; i < validation->size(); ++i) {
+          selected_pred[static_cast<std::size_t>((*validation)[i])] = fold_pred[i];
+        }
+      }
+      return;
+    }
     DenseF t_train_full = backend == Backend::Metal ?
       transform_pls_scores_metal_float(*x_train, fit, fit.weights.cols) :
       transform_pls_scores_float(*x_train, fit, fit.weights.cols);
@@ -3493,9 +2524,10 @@ PLSCVResult run_plscv_host(
     }
   };
 
-  const int fold_workers = backend == Backend::Metal ?
-    1 :
-    std::max(1, std::min(options.n_threads, static_cast<int>(fold_ids.size())));
+  const int fold_workers = std::max(
+    1,
+    std::min(options.n_threads, static_cast<int>(fold_ids.size()))
+  );
   if (fold_workers <= 1) {
     for (std::size_t fold_pos = 0; fold_pos < fold_ids.size(); ++fold_pos) process_fold(fold_pos);
   } else {
@@ -3572,7 +2604,7 @@ PLSCVResult run_plscv_cuda(
   check_cuda(cudaSetDevice(options.gpu_device), "cudaSetDevice(run_plscv_cuda)");
   PLSCVResult result;
   result.true_labels = labels;
-  const bool use_fold_cache = !options.cv.stratified;
+  const bool use_fold_cache = !options.cv.stratified && options.data_epoch != 0;
   const PLSFoldXCacheF* fold_cache = use_fold_cache ?
     &get_pls_fold_x_cache_float(
       x,
@@ -3591,8 +2623,12 @@ PLSCVResult run_plscv_cuda(
     fold_cache->fold_ids :
     detail::sorted_unique_folds(result.fold_assignments);
   int evaluated_component = options.fixed_components > 0 ? options.fixed_components : options.max_components;
+  std::vector<int> fold_evaluated_components(
+    fold_ids.size(),
+    evaluated_component
+  );
 
-  for (std::size_t fold_pos = 0; fold_pos < fold_ids.size(); ++fold_pos) {
+  auto process_fold = [&](std::size_t fold_pos) {
     const int fold = fold_ids[fold_pos];
     std::vector<int> validation_storage;
     std::vector<int> train_storage;
@@ -3630,11 +2666,11 @@ PLSCVResult run_plscv_cuda(
     const std::vector<int> fold_classes = detail::unique_labels(y_train_labels);
     if (fold_classes.size() <= 1U) {
       const int pred_label = fold_classes.empty() ? (labels.empty() ? 0 : labels.front()) : fold_classes.front();
-      evaluated_component = std::min(evaluated_component, 1);
+      fold_evaluated_components[fold_pos] = 1;
       for (std::size_t i = 0; i < validation->size(); ++i) {
         selected_pred[static_cast<std::size_t>((*validation)[i])] = pred_label;
       }
-      continue;
+      return;
     }
     if (mode == PLSMode::PLS_LDA &&
         fold_cache != nullptr &&
@@ -3655,14 +2691,14 @@ PLSCVResult run_plscv_cuda(
         );
       const int requested = options.fixed_components > 0 ?
         options.fixed_components : options.max_components;
-      evaluated_component = std::min(
-        evaluated_component,
+      fold_evaluated_components[fold_pos] = std::min(
+        fold_evaluated_components[fold_pos],
         std::min(requested, fitted_components)
       );
       for (std::size_t i = 0; i < validation->size(); ++i) {
         selected_pred[static_cast<std::size_t>((*validation)[i])] = fold_pred[i];
       }
-      continue;
+      return;
     }
 
     PLSFitF fit = fit_pls_components_cuda_labels_float(
@@ -3675,7 +2711,10 @@ PLSCVResult run_plscv_cuda(
         (x_train_gram_colmajor != nullptr && !x_train_gram_colmajor->empty()) ? x_train_gram_colmajor->data() : nullptr
       );
     const std::vector<int> eval_components = components_to_evaluate(options, fit.weights.cols);
-    evaluated_component = std::min(evaluated_component, eval_components.front());
+    fold_evaluated_components[fold_pos] = std::min(
+      fold_evaluated_components[fold_pos],
+      eval_components.front()
+    );
     if (mode == PLSMode::PLS_LDA) {
       for (int a : eval_components) {
         const std::vector<int> fold_pred = train_predict_pls_lda_projected_cuda_float(
@@ -3709,6 +2748,22 @@ PLSCVResult run_plscv_cuda(
         }
       }
     }
+  };
+
+  if (mode == PLSMode::PLS_LDA && fold_ids.size() > 1U) {
+    std::vector<std::function<void()>> fold_tasks;
+    fold_tasks.reserve(fold_ids.size());
+    for (std::size_t fold_pos = 0; fold_pos < fold_ids.size(); ++fold_pos) {
+      fold_tasks.emplace_back([&, fold_pos]() { process_fold(fold_pos); });
+    }
+    persistent_fold_executor(fold_ids.size()).run(fold_tasks);
+  } else {
+    for (std::size_t fold_pos = 0; fold_pos < fold_ids.size(); ++fold_pos) {
+      process_fold(fold_pos);
+    }
+  }
+  for (int component : fold_evaluated_components) {
+    evaluated_component = std::min(evaluated_component, component);
   }
 
   const int best_comp = std::min(evaluated_component, options.max_components);
@@ -3877,9 +2932,9 @@ std::vector<int> PLSLDAPredict_CPU(
   const int requested = options.fixed_components > 0 ? options.fixed_components : options.max_components;
   const int ncomp = std::max(1, std::min({requested, x_train.cols, std::max(1, x_train.rows - 1)}));
   PLSFitF fit = fit_pls_components_labels_float(x_train, labels, classes, ncomp);
-  DenseF t_train = transform_pls_scores_float(x_train, fit, fit.weights.cols);
-  DenseF t_test = transform_pls_scores_float(x_test, fit, fit.weights.cols);
-  return predict_pls_lda_float(t_train, labels, t_test, classes, fit.weights.cols);
+  return fit_predict_pls_lda_streamed_cpu_float(
+    x_train, labels, x_test, fit, classes, fit.weights.cols
+  );
 }
 
 std::vector<int> PLSLDAPredict_CUDA(
@@ -3906,6 +2961,10 @@ std::vector<int> PLSLDAPredict_METAL(
   const PLSOptions& options
 ) {
 #if defined(KODAMA_ENABLE_METAL)
+  static std::atomic<std::uint64_t> direct_prediction_epoch{1};
+  detail::metal_set_pls_residency_epoch(
+    direct_prediction_epoch.fetch_add(1, std::memory_order_relaxed)
+  );
   if (train.data == nullptr || test.data == nullptr) throw std::invalid_argument("PLSLDAPredict input matrix pointer is null.");
   if (train.rows != labels.size()) throw std::invalid_argument("PLSLDAPredict labels size must match training rows.");
   if (train.cols != test.cols) throw std::invalid_argument("PLSLDAPredict train/test column mismatch.");

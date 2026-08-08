@@ -18,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -25,6 +26,12 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#elif defined(__x86_64__) || defined(_M_X64)
+#include <emmintrin.h>
+#endif
 
 #ifdef KODAMA_ENABLE_CUDA
 #include "kodama_matrix_cuda.hpp"
@@ -38,6 +45,10 @@
 
 namespace kodama {
 namespace {
+
+#if defined(KODAMA_ENABLE_CUDA) || defined(KODAMA_ENABLE_METAL)
+constexpr double kKODAMAGraphTargetRecall = 0.99;
+#endif
 
 class OmpThreadScope {
  public:
@@ -62,6 +73,45 @@ class OmpThreadScope {
 #endif
 };
 
+inline float dot_float32(const float* lhs, const float* rhs, int size) {
+  int i = 0;
+#if defined(__aarch64__)
+  float32x4_t sum0 = vdupq_n_f32(0.0f);
+  float32x4_t sum1 = vdupq_n_f32(0.0f);
+  float32x4_t sum2 = vdupq_n_f32(0.0f);
+  float32x4_t sum3 = vdupq_n_f32(0.0f);
+  for (; i + 15 < size; i += 16) {
+    sum0 = vfmaq_f32(sum0, vld1q_f32(lhs + i), vld1q_f32(rhs + i));
+    sum1 = vfmaq_f32(sum1, vld1q_f32(lhs + i + 4), vld1q_f32(rhs + i + 4));
+    sum2 = vfmaq_f32(sum2, vld1q_f32(lhs + i + 8), vld1q_f32(rhs + i + 8));
+    sum3 = vfmaq_f32(sum3, vld1q_f32(lhs + i + 12), vld1q_f32(rhs + i + 12));
+  }
+  float sum = vaddvq_f32(vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3)));
+#elif defined(__x86_64__) || defined(_M_X64)
+  __m128 sum0 = _mm_setzero_ps();
+  __m128 sum1 = _mm_setzero_ps();
+  __m128 sum2 = _mm_setzero_ps();
+  __m128 sum3 = _mm_setzero_ps();
+  for (; i + 15 < size; i += 16) {
+    sum0 = _mm_add_ps(sum0, _mm_mul_ps(_mm_loadu_ps(lhs + i), _mm_loadu_ps(rhs + i)));
+    sum1 = _mm_add_ps(sum1, _mm_mul_ps(_mm_loadu_ps(lhs + i + 4), _mm_loadu_ps(rhs + i + 4)));
+    sum2 = _mm_add_ps(sum2, _mm_mul_ps(_mm_loadu_ps(lhs + i + 8), _mm_loadu_ps(rhs + i + 8)));
+    sum3 = _mm_add_ps(sum3, _mm_mul_ps(_mm_loadu_ps(lhs + i + 12), _mm_loadu_ps(rhs + i + 12)));
+  }
+  alignas(16) float lanes[4];
+  _mm_store_ps(lanes, _mm_add_ps(_mm_add_ps(sum0, sum1), _mm_add_ps(sum2, sum3)));
+  float sum = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+#else
+  float sum = 0.0f;
+#endif
+  for (; i < size; ++i) sum += lhs[i] * rhs[i];
+  return sum;
+}
+
+inline float squared_norm_float32(const float* values, int size) {
+  return dot_float32(values, values, size);
+}
+
 std::vector<float> copy_float32(MatrixView x, const std::vector<int>& rows = std::vector<int>()) {
   const std::size_t n = rows.empty() ? x.rows : rows.size();
   std::vector<float> out(n * x.cols, 0.0f);
@@ -70,15 +120,6 @@ std::vector<float> copy_float32(MatrixView x, const std::vector<int>& rows = std
     for (std::size_t j = 0; j < x.cols; ++j) {
       out[i * x.cols + j] = x.value_float(src, j);
     }
-  }
-  return out;
-}
-
-std::vector<float> copy_float32_rows(const std::vector<float>& x, std::size_t cols, const std::vector<int>& rows) {
-  std::vector<float> out(rows.size() * cols, 0.0f);
-  for (std::size_t i = 0; i < rows.size(); ++i) {
-    const std::size_t src = static_cast<std::size_t>(rows[i]) * cols;
-    std::copy_n(x.data() + src, cols, out.data() + i * cols);
   }
   return out;
 }
@@ -169,7 +210,8 @@ NeighborGraph hnsw_graph(
   DistanceMetric metric,
   int n_threads,
   bool self_search = false,
-  bool include_self = true
+  bool include_self = true,
+  detail::NativeHNSWIndex* retained_index = nullptr
 ) {
   if (n_base < 1 || n_query < 1 || dim < 1) throw std::invalid_argument("HNSW graph input is empty.");
   neighbors = std::max(1, std::min(neighbors, n_base));
@@ -204,21 +246,28 @@ NeighborGraph hnsw_graph(
     std::iota(query_train_indices.begin(), query_train_indices.end(), 0);
   }
   const int m = std::min(32, std::max(2, n_base > 1 ? n_base - 1 : 2));
-  const detail::NativeKNNResult search = detail::native_hnsw_search(
-    *xb,
-    n_base,
-    *xq,
-    n_query,
-    dim,
-    neighbors,
-    metric,
-    detail::NativeHNSWParameters{m, std::max(200, m), std::max(150, neighbors)},
-    n_threads,
-    query_train_indices
-  );
+  const detail::NativeHNSWParameters parameters{
+    m, std::max(200, m), std::max(150, neighbors)
+  };
+  detail::NativeKNNResult search;
+  if (retained_index != nullptr && self_search && n_base == n_query) {
+    *retained_index = detail::native_build_hnsw_index(
+      *xb, n_base, dim, metric, parameters, n_threads
+    );
+    search = detail::native_hnsw_index_search(
+      *retained_index, *xq,
+      n_query, neighbors, n_threads, query_train_indices
+    );
+  } else {
+    search = detail::native_hnsw_search(
+      *xb, n_base, *xq, n_query, dim, neighbors, metric,
+      parameters, n_threads, query_train_indices
+    );
+  }
 
   NeighborGraph graph;
   graph.neighbors = search.neighbors;
+  graph.index_base = GraphIndexBase::Zero;
   graph.indices = search.indices;
   graph.distances.resize(search.distances.size());
   for (std::size_t i = 0; i < search.distances.size(); ++i) {
@@ -266,6 +315,55 @@ NeighborGraph native_cuda_flat_graph(
   );
   NeighborGraph graph;
   graph.neighbors = search.neighbors;
+  graph.index_base = GraphIndexBase::Zero;
+  graph.indices = search.indices;
+  graph.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
+  for (std::size_t i = 0; i < search.distances.size(); ++i) {
+    graph.distances[i] = detail::native_knn_output_distance(search.distances[i], metric);
+  }
+  return graph;
+}
+
+NeighborGraph native_cuda_ivf_graph(
+  const std::vector<float>& data,
+  int n,
+  int dim,
+  int neighbors,
+  DistanceMetric metric,
+  int gpu_device,
+  bool include_self,
+  int requested_nlist,
+  int requested_nprobe,
+  detail::NativeCudaIVFStats* stats
+) {
+  std::vector<float> prepared = data;
+  if (metric == DistanceMetric::Cosine) {
+    normalize_rows_for_cosine(prepared, static_cast<std::size_t>(n), static_cast<std::size_t>(dim));
+  }
+  std::vector<int> exclusions;
+  if (!include_self) {
+    exclusions.resize(static_cast<std::size_t>(n));
+    std::iota(exclusions.begin(), exclusions.end(), 0);
+  }
+  detail::NativeCudaIVFIndex index = detail::native_cuda_build_ivf_index(
+    prepared,
+    n,
+    dim,
+    metric,
+    requested_nlist,
+    gpu_device
+  );
+  const detail::NativeKNNResult search = detail::native_cuda_ivf_index_self_search(
+    index,
+    neighbors,
+    requested_nprobe,
+    kKODAMAGraphTargetRecall,
+    exclusions,
+    stats
+  );
+  NeighborGraph graph;
+  graph.neighbors = search.neighbors;
+  graph.index_base = GraphIndexBase::Zero;
   graph.indices = search.indices;
   graph.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
   for (std::size_t i = 0; i < search.distances.size(); ++i) {
@@ -285,11 +383,23 @@ NeighborGraph self_knn_graph(
   Backend backend,
   int gpu_device,
   bool include_self,
-  KNNIndexType metal_index_type,
-  int metal_ivf_nlist,
-  int metal_ivf_nprobe
+  KNNIndexType index_type,
+  int ivf_nlist,
+  int ivf_nprobe,
+  int* used_nlist = nullptr,
+  int* used_nprobe = nullptr,
+  double* pilot_recall = nullptr,
+  KNNIndexType* used_index_type = nullptr
 ) {
-  if (backend != Backend::Metal && detail::should_use_spatial_grid_knn(n, dim, metric)) {
+#if !defined(KODAMA_ENABLE_CUDA) && !defined(KODAMA_ENABLE_METAL)
+  (void)index_type;
+  (void)ivf_nlist;
+  (void)ivf_nprobe;
+  (void)used_nlist;
+  (void)used_nprobe;
+  (void)pilot_recall;
+#endif
+  if (detail::should_use_spatial_grid_knn(n, dim, metric)) {
 #if defined(KODAMA_ENABLE_CUDA)
     if (backend == Backend::CUDA && neighbors <= 256) {
       return detail::spatial_grid_self_knn_cuda(data, n, dim, neighbors, gpu_device, false, include_self);
@@ -297,11 +407,54 @@ NeighborGraph self_knn_graph(
 #else
     (void)gpu_device;
 #endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend == Backend::Metal && neighbors <= 128) {
+      const detail::NativeKNNResult search = detail::metal_spatial_grid_self_knn(
+        data, n, dim, neighbors, include_self
+      );
+      NeighborGraph graph;
+      graph.neighbors = search.neighbors;
+      graph.index_base = GraphIndexBase::Zero;
+      graph.indices = search.indices;
+      graph.distances.resize(search.distances.size());
+      for (std::size_t i = 0; i < search.distances.size(); ++i) {
+        graph.distances[i] = detail::native_knn_output_distance(
+          search.distances[i], DistanceMetric::Euclidean
+        );
+      }
+      return graph;
+    }
+#endif
     return detail::spatial_grid_self_knn(data.data(), n, dim, neighbors, n_threads, false, include_self);
   }
 #if defined(KODAMA_ENABLE_CUDA)
   if (backend == Backend::CUDA) {
-    return native_cuda_flat_graph(data, data, n, n, dim, neighbors, metric, gpu_device, !include_self);
+    const double exact_work =
+      static_cast<double>(n) * static_cast<double>(n) * static_cast<double>(dim);
+    const bool use_ivf = index_type == KNNIndexType::CudaIVFFlat ||
+      (index_type != KNNIndexType::CudaExact && n > 5000 && exact_work > 2.0e8);
+    if (!use_ivf) {
+      if (used_index_type != nullptr) *used_index_type = KNNIndexType::CudaExact;
+      return native_cuda_flat_graph(data, data, n, n, dim, neighbors, metric, gpu_device, !include_self);
+    }
+    if (used_index_type != nullptr) *used_index_type = KNNIndexType::CudaIVFFlat;
+    detail::NativeCudaIVFStats stats;
+    NeighborGraph graph = native_cuda_ivf_graph(
+      data,
+      n,
+      dim,
+      neighbors,
+      metric,
+      gpu_device,
+      include_self,
+      ivf_nlist,
+      ivf_nprobe,
+      &stats
+    );
+    if (used_nlist != nullptr) *used_nlist = stats.nlist;
+    if (used_nprobe != nullptr) *used_nprobe = stats.nprobe;
+    if (pilot_recall != nullptr) *pilot_recall = stats.pilot_recall;
+    return graph;
   }
 #else
   (void)gpu_device;
@@ -315,18 +468,19 @@ NeighborGraph self_knn_graph(
       exclusions.resize(static_cast<std::size_t>(n));
       std::iota(exclusions.begin(), exclusions.end(), 0);
     }
-    const detail::NativeKNNResult search = metal_index_type == KNNIndexType::MetalIVFFlat ?
-      detail::metal_ivf_knn_search(
-        prepared,
-        n,
-        prepared,
-        n,
-        dim,
+    const double exact_work =
+      static_cast<double>(n) * static_cast<double>(n) * static_cast<double>(dim);
+    const bool use_ivf = index_type == KNNIndexType::MetalIVFFlat ||
+      (index_type != KNNIndexType::MetalExact && n > 5000 && exact_work > 2.0e8);
+    detail::MetalIVFStats stats;
+    const detail::NativeKNNResult search = use_ivf ?
+      detail::metal_ivf_index_self_search(
+        detail::metal_build_ivf_index(prepared, n, dim, metric, ivf_nlist),
         neighbors,
-        metric,
-        metal_ivf_nlist,
-        metal_ivf_nprobe,
-        exclusions
+        ivf_nprobe,
+        kKODAMAGraphTargetRecall,
+        exclusions,
+        &stats
       ) :
       detail::metal_exact_knn_search(
         prepared,
@@ -338,8 +492,17 @@ NeighborGraph self_knn_graph(
         metric,
         exclusions
       );
+    if (used_index_type != nullptr) {
+      *used_index_type = use_ivf ? KNNIndexType::MetalIVFFlat : KNNIndexType::MetalExact;
+    }
+    if (use_ivf) {
+      if (used_nlist != nullptr) *used_nlist = stats.nlist;
+      if (used_nprobe != nullptr) *used_nprobe = stats.nprobe;
+      if (pilot_recall != nullptr) *pilot_recall = stats.pilot_recall;
+    }
     NeighborGraph graph;
     graph.neighbors = search.neighbors;
+    graph.index_base = GraphIndexBase::Zero;
     graph.indices = search.indices;
     graph.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
     for (std::size_t i = 0; i < search.distances.size(); ++i) {
@@ -350,6 +513,7 @@ NeighborGraph self_knn_graph(
     throw std::runtime_error("KODAMA Metal graph construction requires an Apple Metal build.");
 #endif
   }
+  if (used_index_type != nullptr) *used_index_type = KNNIndexType::NativeHNSW;
   return hnsw_graph(data, data, n, n, dim, neighbors, metric, n_threads, true, include_self);
 }
 
@@ -491,15 +655,26 @@ std::vector<int> kmeans_labels(
   int max_iter = 10,
   int n_threads = 1,
   Backend backend = Backend::CPU,
-  int gpu_device = 0
+  int gpu_device = 0,
+  int worker_lane = 0,
+  detail::NativeCudaKMeansContext* cuda_context = nullptr,
+  detail::NativeMetalKMeansContext* metal_context = nullptr
 ) {
   k = std::max(1, std::min(k, n));
+#if !defined(KODAMA_ENABLE_METAL)
+  (void)metal_context;
+#endif
 
   if (backend == Backend::Metal) {
 #if defined(KODAMA_ENABLE_METAL)
     std::vector<int> order(static_cast<std::size_t>(n));
     std::iota(order.begin(), order.end(), 0);
     std::shuffle(order.begin(), order.end(), rng);
+    if (metal_context != nullptr) {
+      return detail::metal_kmeans_context_labels(
+        *metal_context, worker_lane, k, order, std::max(1, max_iter)
+      );
+    }
     return detail::metal_kmeans_labels(x, n, p, k, order, std::max(1, max_iter));
 #else
     throw std::runtime_error("KODAMA Metal k-means requires an Apple Metal build.");
@@ -510,6 +685,11 @@ std::vector<int> kmeans_labels(
 
 #ifdef KODAMA_ENABLE_CUDA
   if (backend == Backend::CUDA) {
+    if (cuda_context != nullptr) {
+      return detail::native_cuda_kmeans_context_labels(
+        *cuda_context, worker_lane, k, std::max(1, max_iter), kmeans_seed
+      );
+    }
     return detail::native_cuda_kmeans_labels(
       x,
       n,
@@ -522,6 +702,7 @@ std::vector<int> kmeans_labels(
   }
 #else
   (void)gpu_device;
+  (void)cuda_context;
 #endif
 
   const std::vector<int> order = faiss_compatible_permutation(n, kmeans_seed + 1u);
@@ -539,9 +720,7 @@ std::vector<int> kmeans_labels(
   std::vector<float> centroid_norms(static_cast<std::size_t>(k), 0.0f);
   for (int row = 0; row < n; ++row) {
     const float* point = x.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(p);
-    float norm = 0.0f;
-    for (int feature = 0; feature < p; ++feature) norm += point[feature] * point[feature];
-    point_norms[static_cast<std::size_t>(row)] = norm;
+    point_norms[static_cast<std::size_t>(row)] = squared_norm_float32(point, p);
   }
   std::vector<float> cluster_sizes(static_cast<std::size_t>(k), 0.0f);
   OmpThreadScope threads(n_threads);
@@ -549,9 +728,7 @@ std::vector<int> kmeans_labels(
   auto assign = [&]() {
     for (int cluster = 0; cluster < k; ++cluster) {
       const float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
-      float norm = 0.0f;
-      for (int feature = 0; feature < p; ++feature) norm += centroid[feature] * centroid[feature];
-      centroid_norms[static_cast<std::size_t>(cluster)] = norm;
+      centroid_norms[static_cast<std::size_t>(cluster)] = squared_norm_float32(centroid, p);
     }
     std::atomic<int> changed{0};
 #ifdef _OPENMP
@@ -563,8 +740,7 @@ std::vector<int> kmeans_labels(
       const float* point = x.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(p);
       for (int cluster = 0; cluster < k; ++cluster) {
         const float* centroid = centroids.data() + static_cast<std::size_t>(cluster) * static_cast<std::size_t>(p);
-        float dot = 0.0f;
-        for (int feature = 0; feature < p; ++feature) dot += point[feature] * centroid[feature];
+        const float dot = dot_float32(point, centroid, p);
         const float distance = point_norms[static_cast<std::size_t>(row)] +
           centroid_norms[static_cast<std::size_t>(cluster)] - 2.0f * dot;
         if (distance < best_distance || (distance == best_distance && cluster < best_cluster)) {
@@ -929,11 +1105,14 @@ std::vector<float> spatial_jitter_from_graph(
     0,
     0
   );
+  const bool one_based = graph.index_base == GraphIndexBase::One;
   const int far_col = std::min(19, graph.neighbors - 1);
   std::vector<double> sums(static_cast<std::size_t>(dims), 0.0);
   for (int i = 0; i < n; ++i) {
-    const int near_row = graph.indices[static_cast<std::size_t>(i) * graph.neighbors];
-    const int far_row = graph.indices[static_cast<std::size_t>(i) * graph.neighbors + static_cast<std::size_t>(far_col)];
+    const int near_stored = graph.indices[static_cast<std::size_t>(i) * graph.neighbors];
+    const int far_stored = graph.indices[static_cast<std::size_t>(i) * graph.neighbors + static_cast<std::size_t>(far_col)];
+    const int near_row = near_stored >= 0 && one_based ? near_stored - 1 : near_stored;
+    const int far_row = far_stored >= 0 && one_based ? far_stored - 1 : far_stored;
     if (near_row < 0 || far_row < 0) continue;
     for (int d = 0; d < dims; ++d) {
       sums[static_cast<std::size_t>(d)] += std::abs(
@@ -944,6 +1123,41 @@ std::vector<float> spatial_jitter_from_graph(
   }
   std::vector<float> jitter(static_cast<std::size_t>(dims), 0.0f);
   for (int d = 0; d < dims; ++d) jitter[static_cast<std::size_t>(d)] = static_cast<float>(3.0 * sums[static_cast<std::size_t>(d)] / std::max(1, n));
+  return jitter;
+}
+
+std::vector<float> spatial_jitter_from_precomputed_graph(
+  const std::vector<float>& spatial,
+  const NeighborGraph& graph,
+  int n,
+  int dims
+) {
+  if (graph.neighbors < 1 ||
+      graph.indices.size() != static_cast<std::size_t>(n) * graph.neighbors) {
+    throw std::invalid_argument("Precomputed spatial graph dimensions are inconsistent.");
+  }
+  const bool one_based = graph.index_base == GraphIndexBase::One;
+  const int far_col = std::min(19, graph.neighbors - 1);
+  std::vector<double> sums(static_cast<std::size_t>(dims), 0.0);
+  for (int i = 0; i < n; ++i) {
+    const std::size_t offset = static_cast<std::size_t>(i) * graph.neighbors;
+    const int near_stored = graph.indices[offset];
+    const int far_stored = graph.indices[offset + static_cast<std::size_t>(far_col)];
+    const int near_row = near_stored >= 0 && one_based ? near_stored - 1 : near_stored;
+    const int far_row = far_stored >= 0 && one_based ? far_stored - 1 : far_stored;
+    if (near_row < 0 || near_row >= n || far_row < 0 || far_row >= n) continue;
+    for (int d = 0; d < dims; ++d) {
+      sums[static_cast<std::size_t>(d)] += std::abs(
+        spatial[static_cast<std::size_t>(near_row) * dims + static_cast<std::size_t>(d)] -
+        spatial[static_cast<std::size_t>(far_row) * dims + static_cast<std::size_t>(d)]
+      );
+    }
+  }
+  std::vector<float> jitter(static_cast<std::size_t>(dims), 0.0f);
+  for (int d = 0; d < dims; ++d) {
+    jitter[static_cast<std::size_t>(d)] =
+      static_cast<float>(3.0 * sums[static_cast<std::size_t>(d)] / std::max(1, n));
+  }
   return jitter;
 }
 
@@ -1040,10 +1254,12 @@ NeighborGraph normalize_external_graph(const NeighborGraph& graph, int samples, 
     min_index = std::min(min_index, id);
     max_index = std::max(max_index, id);
   }
-  const bool one_based = min_index >= 1 && max_index <= samples;
+  const bool one_based = graph.index_base == GraphIndexBase::One ||
+    (graph.index_base == GraphIndexBase::Auto && min_index >= 1 && max_index <= samples);
   const int neighbors = std::max(1, std::min(max_neighbors > 0 ? max_neighbors : graph.neighbors, graph.neighbors));
   NeighborGraph out;
   out.neighbors = neighbors;
+  out.index_base = GraphIndexBase::Zero;
   out.indices.assign(static_cast<std::size_t>(samples) * static_cast<std::size_t>(neighbors), -1);
   out.distances.assign(static_cast<std::size_t>(samples) * static_cast<std::size_t>(neighbors), std::numeric_limits<float>::infinity());
   for (int i = 0; i < samples; ++i) {
@@ -1064,12 +1280,17 @@ NeighborGraph normalize_external_graph(const NeighborGraph& graph, int samples, 
   return out;
 }
 
-NeighborGraph subset_graph_to_rows(const NeighborGraph& graph, const std::vector<int>& rows, int samples) {
-  std::vector<int> global_to_local(static_cast<std::size_t>(samples), -1);
+void subset_graph_to_rows(
+  const NeighborGraph& graph,
+  const std::vector<int>& rows,
+  int samples,
+  std::vector<int>& global_to_local,
+  NeighborGraph& out
+) {
+  global_to_local.assign(static_cast<std::size_t>(samples), -1);
   for (std::size_t i = 0; i < rows.size(); ++i) {
     global_to_local[static_cast<std::size_t>(rows[i])] = static_cast<int>(i);
   }
-  NeighborGraph out;
   out.neighbors = graph.neighbors;
   out.indices.assign(rows.size() * static_cast<std::size_t>(graph.neighbors), -1);
   out.distances.assign(rows.size() * static_cast<std::size_t>(graph.neighbors), std::numeric_limits<float>::infinity());
@@ -1092,7 +1313,6 @@ NeighborGraph subset_graph_to_rows(const NeighborGraph& graph, const std::vector
       ++out_col;
     }
   }
-  return out;
 }
 
 struct SparseGraphOperator {
@@ -1379,11 +1599,6 @@ void merge_feature_spatial_graphs_in_place(
       try_add(i, feature_row[static_cast<std::size_t>(rank)], rank, out_col);
       try_add(i, spatial.indices[offset], rank, out_col);
     }
-    for (int rank = 0; rank < neighbors && out_col < neighbors; ++rank) {
-      const std::size_t offset = static_cast<std::size_t>(i) * neighbors + static_cast<std::size_t>(rank);
-      try_add(i, feature_row[static_cast<std::size_t>(rank)], rank, out_col);
-      try_add(i, spatial.indices[offset], rank, out_col);
-    }
     std::copy(output_row.begin(), output_row.end(), feature.indices.begin() + row_offset);
     std::copy(
       output_distances.begin(),
@@ -1406,6 +1621,10 @@ struct IterationResult {
   double accbest = std::numeric_limits<double>::quiet_NaN();
   double runtime = 0.0;
   double memory = 0.0;
+  bool resident_result = false;
+  bool sparse_projection_upload = false;
+  bool full_projection_download = false;
+  int resident_row_uploads = 0;
 };
 
 struct IterationScratch {
@@ -1427,10 +1646,187 @@ struct IterationScratch {
   std::vector<float> spatial_jittered;
   std::vector<int> spatial_clusters;
   std::vector<int> run_constrain;
+  NeighborGraph local_graph;
 };
 
 class DeviceResidentKODAMAGraph {
  public:
+  bool has_landmark_index() const noexcept {
+    if (!landmark_index_available_) return false;
+    if (backend_ == Backend::CPU) return cpu_hnsw_ != nullptr && cpu_hnsw_->valid();
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA) return cuda_ != nullptr && cuda_->has_landmark_index();
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal) return metal_ != nullptr && metal_->has_landmark_index();
+#endif
+    return false;
+  }
+
+  NeighborGraph landmark_knn_graph(
+    const std::vector<float>& landmark_data,
+    const std::vector<int>& landmark_rows,
+    int k,
+    const KNNOptions& options
+  ) const {
+    if (backend_ == Backend::CPU && cpu_hnsw_ != nullptr) {
+      std::vector<float> prepared = landmark_data;
+      if (cpu_hnsw_->metric() == DistanceMetric::Cosine) {
+        normalize_rows_for_cosine(
+          prepared, landmark_rows.size(), static_cast<std::size_t>(cpu_hnsw_->dimensions())
+        );
+      }
+      std::vector<int> allowed_local_ids(static_cast<std::size_t>(cpu_hnsw_->rows()), -1);
+      for (std::size_t local = 0; local < landmark_rows.size(); ++local) {
+        const int global = landmark_rows[local];
+        if (global < 0 || global >= cpu_hnsw_->rows()) {
+          throw std::out_of_range("CPU landmark row is outside the retained HNSW index.");
+        }
+        allowed_local_ids[static_cast<std::size_t>(global)] = static_cast<int>(local);
+      }
+      detail::NativeKNNResult result = detail::native_hnsw_index_filtered_search(
+        *cpu_hnsw_, prepared, static_cast<int>(landmark_rows.size()), k,
+        std::max(1, options.n_threads), landmark_rows, allowed_local_ids
+      );
+      NeighborGraph output;
+      output.neighbors = result.neighbors;
+      output.index_base = GraphIndexBase::Zero;
+      output.indices = std::move(result.indices);
+      output.distances.resize(result.distances.size());
+      for (std::size_t i = 0; i < result.distances.size(); ++i) {
+        output.distances[i] = detail::native_knn_output_distance(
+          result.distances[i], cpu_hnsw_->metric()
+        );
+      }
+      return output;
+    }
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA && cuda_ != nullptr) {
+      return detail::cuda_resident_landmark_knn_graph(
+        *cuda_, landmark_data, landmark_rows, k,
+        options.ivf_nprobe, options.hnsw_target_recall
+      );
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal && metal_ != nullptr) {
+      return detail::metal_resident_landmark_knn_graph(
+        *metal_, landmark_data, landmark_rows, k,
+        options.ivf_nprobe, options.hnsw_target_recall
+      );
+    }
+#endif
+    throw std::runtime_error("No reusable resident landmark index is available.");
+  }
+
+  void build_hnsw(
+    const std::vector<float>& data,
+    int samples,
+    int dimensions,
+    int neighbors,
+    DistanceMetric metric,
+    int n_threads
+  ) {
+    backend_ = Backend::CPU;
+    cpu_hnsw_ = std::make_unique<detail::NativeHNSWIndex>();
+    cpu_graph_ = hnsw_graph(
+      data, data, samples, samples, dimensions, neighbors, metric,
+      n_threads, true, false, cpu_hnsw_.get()
+    );
+    landmark_index_available_ = cpu_hnsw_->valid();
+  }
+
+  void build_ivf(
+    const std::vector<float>& data,
+    int samples,
+    int dimensions,
+    int neighbors,
+    DistanceMetric metric,
+    const KODAMAMatrixOptions& options,
+    int lanes,
+    int* used_nlist,
+    int* used_nprobe,
+    double* pilot_recall
+  ) {
+    backend_ = Backend::CPU;
+    landmark_index_available_ = false;
+    cpu_hnsw_.reset();
+    cpu_graph_ = {};
+    const std::vector<float>* graph_data = &data;
+    std::vector<float> normalized_data;
+    if (metric == DistanceMetric::Cosine) {
+      normalized_data = data;
+      normalize_rows_for_cosine(
+        normalized_data,
+        static_cast<std::size_t>(samples),
+        static_cast<std::size_t>(dimensions)
+      );
+      graph_data = &normalized_data;
+    }
+#if defined(KODAMA_ENABLE_CUDA)
+    cuda_.reset();
+    if (options.backend == Backend::CUDA) {
+      detail::NativeCudaIVFStats stats;
+      cuda_ = std::make_unique<detail::CudaResidentKODAMAGraph>(
+        detail::make_cuda_resident_kodama_graph_ivf(
+          *graph_data,
+          samples,
+          dimensions,
+          neighbors,
+          metric,
+          options.knn.ivf_nlist,
+          options.knn.ivf_nprobe,
+          options.knn.gpu_device,
+          lanes,
+          &stats
+        )
+      );
+      if (used_nlist != nullptr) *used_nlist = stats.nlist;
+      if (used_nprobe != nullptr) *used_nprobe = stats.nprobe;
+      if (pilot_recall != nullptr) *pilot_recall = stats.pilot_recall;
+      backend_ = Backend::CUDA;
+      landmark_index_available_ = true;
+      return;
+    }
+#else
+    (void)options;
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    metal_.reset();
+    if (options.backend == Backend::Metal) {
+      detail::MetalIVFStats stats;
+      metal_ = std::make_unique<detail::NativeMetalKODAMAGraph>(
+        detail::metal_build_resident_kodama_graph_ivf(
+          *graph_data,
+          samples,
+          dimensions,
+          neighbors,
+          metric,
+          options.knn.ivf_nlist,
+          options.knn.ivf_nprobe,
+          lanes,
+          &stats
+        )
+      );
+      if (used_nlist != nullptr) *used_nlist = stats.nlist;
+      if (used_nprobe != nullptr) *used_nprobe = stats.nprobe;
+      if (pilot_recall != nullptr) *pilot_recall = stats.pilot_recall;
+      backend_ = Backend::Metal;
+      landmark_index_available_ = true;
+      return;
+    }
+#endif
+    (void)graph_data;
+    (void)samples;
+    (void)dimensions;
+    (void)neighbors;
+    (void)metric;
+    (void)lanes;
+    (void)used_nlist;
+    (void)used_nprobe;
+    (void)pilot_recall;
+  }
+
   void build(
     const NeighborGraph& graph,
     int samples,
@@ -1438,7 +1834,11 @@ class DeviceResidentKODAMAGraph {
     int gpu_device,
     int lanes
   ) {
+    (void)backend;
     backend_ = Backend::CPU;
+    landmark_index_available_ = false;
+    cpu_hnsw_.reset();
+    cpu_graph_ = {};
 #if defined(KODAMA_ENABLE_CUDA)
     cuda_.reset();
     if (backend == Backend::CUDA) {
@@ -1485,35 +1885,62 @@ class DeviceResidentKODAMAGraph {
     return false;
   }
 
-  std::vector<int> project(
-    const std::vector<char>& is_landmark,
-    const std::vector<int>& labels,
-    int projection_k,
-    int fallback_label,
-    int lane
-  ) const {
+  void prepare_results(int runs) {
 #if defined(KODAMA_ENABLE_CUDA)
     if (backend_ == Backend::CUDA && cuda_) {
-      return detail::cuda_resident_project_landmark_labels(
-        *cuda_,
-        is_landmark,
-        labels,
-        projection_k,
-        fallback_label,
-        lane
-      );
+      detail::cuda_resident_prepare_results(*cuda_, runs);
+      return;
     }
 #endif
 #if defined(KODAMA_ENABLE_METAL)
     if (backend_ == Backend::Metal && metal_) {
-      return detail::metal_project_landmark_labels(
-        *metal_,
-        is_landmark,
-        labels,
+      detail::metal_prepare_resident_results(*metal_, runs);
+      return;
+    }
+#endif
+    throw std::runtime_error("Device-resident KODAMA results are unavailable.");
+  }
+
+  void project_to_result(
+    const std::vector<int>& landmark_rows,
+    const std::vector<int>& landmark_labels,
+    int projection_k,
+    int fallback_label,
+    int run,
+    int lane
+  ) {
+    (void)landmark_rows;
+    (void)landmark_labels;
+    (void)projection_k;
+    (void)fallback_label;
+    (void)run;
+    (void)lane;
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA && cuda_) {
+      detail::cuda_resident_project_landmark_labels_to_result(
+        *cuda_,
+        landmark_rows,
+        landmark_labels,
         projection_k,
         fallback_label,
+        run,
         lane
       );
+      return;
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal && metal_) {
+      detail::metal_project_landmark_labels_to_result(
+        *metal_,
+        landmark_rows,
+        landmark_labels,
+        projection_k,
+        fallback_label,
+        run,
+        lane
+      );
+      return;
     }
 #endif
     throw std::runtime_error(
@@ -1521,17 +1948,101 @@ class DeviceResidentKODAMAGraph {
     );
   }
 
+  void store_result_row(const std::vector<int>& labels, int run, int lane) {
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA && cuda_) {
+      detail::cuda_resident_store_result_row(*cuda_, labels, run, lane);
+      return;
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal && metal_) {
+      detail::metal_store_resident_result_row(*metal_, labels, run, lane);
+      return;
+    }
+#endif
+    throw std::runtime_error("Device-resident KODAMA result upload is unavailable.");
+  }
+
+  void constrain_result_row(
+    const std::vector<int>& constrain,
+    int max_label,
+    int run,
+    int lane
+  ) {
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA && cuda_) {
+      detail::cuda_resident_constrain_result_row(
+        *cuda_, constrain, max_label, run, lane);
+      return;
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal && metal_) {
+      detail::metal_constrain_resident_result_row(
+        *metal_, constrain, max_label, run, lane);
+      return;
+    }
+#endif
+    throw std::runtime_error("Device-resident constrained majority is unavailable.");
+  }
+
+  std::vector<int> download_result_row(int run, int lane) const {
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA && cuda_) {
+      return detail::cuda_resident_download_result_row(*cuda_, run, lane);
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal && metal_) {
+      return detail::metal_download_resident_result_row(*metal_, run, lane);
+    }
+#endif
+    throw std::runtime_error("Device-resident KODAMA result download is unavailable.");
+  }
+
+  std::vector<int> download_results(int runs) const {
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA && cuda_) {
+      return detail::cuda_resident_download_results(*cuda_, runs);
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal && metal_) {
+      return detail::metal_download_resident_results(*metal_, runs);
+    }
+#endif
+    throw std::runtime_error("Device-resident KODAMA results are unavailable.");
+  }
+
+  void replace_graph(const NeighborGraph& graph) {
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA && cuda_) {
+      detail::cuda_resident_replace_graph(*cuda_, graph);
+      return;
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal && metal_) {
+      detail::metal_replace_resident_kodama_graph(*metal_, graph);
+      return;
+    }
+#endif
+    throw std::runtime_error("Device-resident graph replacement is unavailable.");
+  }
+
   void apply_dissimilarity(
-    const std::vector<int>& labels,
     int runs,
     bool input_one_based,
     bool output_one_based
   ) {
+    (void)runs;
+    (void)input_one_based;
+    (void)output_one_based;
 #if defined(KODAMA_ENABLE_CUDA)
     if (backend_ == Backend::CUDA && cuda_) {
       detail::cuda_resident_apply_kodama_dissimilarity(
         *cuda_,
-        labels,
         runs,
         input_one_based,
         output_one_based
@@ -1543,7 +2054,6 @@ class DeviceResidentKODAMAGraph {
     if (backend_ == Backend::Metal && metal_) {
       detail::metal_apply_resident_kodama_dissimilarity(
         *metal_,
-        labels,
         runs,
         input_one_based,
         output_one_based
@@ -1557,6 +2067,7 @@ class DeviceResidentKODAMAGraph {
   }
 
   NeighborGraph download() const {
+    if (backend_ == Backend::CPU && !cpu_graph_.indices.empty()) return cpu_graph_;
 #if defined(KODAMA_ENABLE_CUDA)
     if (backend_ == Backend::CUDA && cuda_) {
       return detail::download_cuda_resident_kodama_graph(*cuda_);
@@ -1572,14 +2083,128 @@ class DeviceResidentKODAMAGraph {
     );
   }
 
+  void reset_graph() {
+#if defined(KODAMA_ENABLE_CUDA)
+    if (backend_ == Backend::CUDA && cuda_) {
+      detail::cuda_resident_reset_graph(*cuda_);
+      return;
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (backend_ == Backend::Metal && metal_) {
+      detail::metal_reset_resident_kodama_graph(*metal_);
+      return;
+    }
+#endif
+  }
+
  private:
   Backend backend_ = Backend::CPU;
+  bool landmark_index_available_ = false;
+  std::unique_ptr<detail::NativeHNSWIndex> cpu_hnsw_;
+  NeighborGraph cpu_graph_;
 #if defined(KODAMA_ENABLE_CUDA)
   std::unique_ptr<detail::CudaResidentKODAMAGraph> cuda_;
 #endif
 #if defined(KODAMA_ENABLE_METAL)
   std::unique_ptr<detail::NativeMetalKODAMAGraph> metal_;
 #endif
+};
+
+}  // namespace
+
+struct KODAMAGraphHandle::Impl {
+  Backend backend = Backend::CPU;
+  int samples = 0;
+  int neighbors = 0;
+  std::shared_ptr<DeviceResidentKODAMAGraph> resident;
+  mutable NeighborGraph host_graph;
+  mutable std::mutex mutex;
+};
+
+namespace detail {
+
+struct KODAMAGraphHandleAccess {
+  static std::shared_ptr<KODAMAGraphHandle> create(
+    Backend backend,
+    int samples,
+    int neighbors,
+    std::shared_ptr<DeviceResidentKODAMAGraph> resident,
+    NeighborGraph host_graph
+  ) {
+    auto impl = std::make_shared<KODAMAGraphHandle::Impl>();
+    impl->backend = backend;
+    impl->samples = samples;
+    impl->neighbors = neighbors;
+    impl->resident = std::move(resident);
+    impl->host_graph = std::move(host_graph);
+    return std::shared_ptr<KODAMAGraphHandle>(new KODAMAGraphHandle(std::move(impl)));
+  }
+
+  static std::shared_ptr<DeviceResidentKODAMAGraph> resident(
+    const std::shared_ptr<KODAMAGraphHandle>& handle
+  ) {
+    return handle && handle->impl_ ? handle->impl_->resident : nullptr;
+  }
+
+  static const NeighborGraph* host_graph(
+    const std::shared_ptr<KODAMAGraphHandle>& handle
+  ) {
+    return handle && handle->impl_ && !handle->impl_->host_graph.indices.empty() ?
+      &handle->impl_->host_graph : nullptr;
+  }
+
+  static std::unique_lock<std::mutex> lock(
+    const std::shared_ptr<KODAMAGraphHandle>& handle
+  ) {
+    return handle && handle->impl_ ?
+      std::unique_lock<std::mutex>(handle->impl_->mutex) :
+      std::unique_lock<std::mutex>();
+  }
+};
+
+}  // namespace detail
+
+KODAMAGraphHandle::KODAMAGraphHandle() = default;
+KODAMAGraphHandle::~KODAMAGraphHandle() = default;
+KODAMAGraphHandle::KODAMAGraphHandle(const KODAMAGraphHandle&) noexcept = default;
+KODAMAGraphHandle& KODAMAGraphHandle::operator=(const KODAMAGraphHandle&) noexcept = default;
+KODAMAGraphHandle::KODAMAGraphHandle(KODAMAGraphHandle&&) noexcept = default;
+KODAMAGraphHandle& KODAMAGraphHandle::operator=(KODAMAGraphHandle&&) noexcept = default;
+KODAMAGraphHandle::KODAMAGraphHandle(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
+bool KODAMAGraphHandle::valid() const noexcept { return impl_ != nullptr; }
+Backend KODAMAGraphHandle::backend() const noexcept {
+  return impl_ ? impl_->backend : Backend::Auto;
+}
+int KODAMAGraphHandle::samples() const noexcept { return impl_ ? impl_->samples : 0; }
+int KODAMAGraphHandle::neighbors() const noexcept { return impl_ ? impl_->neighbors : 0; }
+bool KODAMAGraphHandle::host_materialized() const noexcept {
+  return impl_ && !impl_->host_graph.indices.empty();
+}
+
+namespace {
+
+struct DatasetExecutionContext {
+  std::vector<float> matrix;
+  const VisualizationInitResult* pca_initialization = nullptr;
+  std::shared_ptr<DeviceResidentKODAMAGraph> graph =
+    std::make_shared<DeviceResidentKODAMAGraph>();
+#if defined(KODAMA_ENABLE_CUDA)
+  std::unique_ptr<detail::NativeCudaKMeansContext> cuda_kmeans;
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+  std::unique_ptr<detail::NativeMetalKMeansContext> metal_kmeans;
+#endif
+
+  std::uint64_t kmeans_input_uploads() const noexcept {
+#if defined(KODAMA_ENABLE_CUDA)
+    if (cuda_kmeans) return cuda_kmeans->input_uploads();
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (metal_kmeans) return metal_kmeans->input_uploads();
+#endif
+    return 0;
+  }
 };
 
 struct GpuWorkerPlan {
@@ -1590,6 +2215,68 @@ struct GpuWorkerPlan {
   double total_memory_mb = 0.0;
   double worker_memory_estimate_mb = 0.0;
 };
+
+#ifdef KODAMA_ENABLE_CUDA
+double estimate_gpu_worker_bytes(
+  const KODAMAMatrixOptions& options,
+  const int samples,
+  const int features,
+  const int landmarks,
+  const int graph_neighbors
+) {
+  const double x_bytes = static_cast<double>(samples) * static_cast<double>(features) * sizeof(float);
+  const double landmark_bytes = static_cast<double>(landmarks) * static_cast<double>(features) * sizeof(float);
+  const double graph_bytes = static_cast<double>(samples) * static_cast<double>(graph_neighbors) *
+    static_cast<double>(sizeof(int) + sizeof(float));
+  const double component_bytes = static_cast<double>(landmarks) *
+    static_cast<double>(std::max(1, options.components)) * sizeof(float);
+  double worker_bytes = 512.0 * 1024.0 * 1024.0;
+  worker_bytes += 1.5 * x_bytes;
+  worker_bytes += 6.0 * landmark_bytes;
+  worker_bytes += 0.25 * graph_bytes;
+  if (options.classifier != CoreClassifier::KNN) {
+    const double feature_component_ratio =
+      static_cast<double>(features) / static_cast<double>(std::max(1, options.components));
+    worker_bytes += 4.0 * feature_component_ratio * landmark_bytes;
+    worker_bytes += 10.0 * component_bytes;
+  } else {
+    worker_bytes += static_cast<double>(landmarks) * static_cast<double>(std::max(1, options.knn.k)) *
+      static_cast<double>(sizeof(int) + sizeof(float));
+  }
+  return worker_bytes;
+}
+#endif
+
+double estimate_metal_worker_bytes(
+  const KODAMAMatrixOptions& options,
+  const int samples,
+  const int features,
+  const int landmarks,
+  const int graph_neighbors
+) {
+  const double x_bytes = static_cast<double>(samples) * static_cast<double>(features) * sizeof(float);
+  const double landmark_bytes = static_cast<double>(landmarks) * static_cast<double>(features) * sizeof(float);
+  const double graph_bytes = static_cast<double>(samples) * static_cast<double>(graph_neighbors) *
+    static_cast<double>(sizeof(int) + sizeof(float));
+  const double component_bytes = static_cast<double>(landmarks) *
+    static_cast<double>(std::max(1, options.components)) * sizeof(float);
+
+  // Metal SIMPLS streams X through paired MPS matrix-vector products.
+  double worker_bytes = 128.0 * 1024.0 * 1024.0;
+  worker_bytes += 2.0 * x_bytes;
+  worker_bytes += 0.25 * graph_bytes;
+  if (options.classifier != CoreClassifier::KNN) {
+    worker_bytes += static_cast<double>(std::max(1, options.pls.cv.folds)) * landmark_bytes;
+    worker_bytes += 12.0 * component_bytes;
+    worker_bytes += static_cast<double>(features) *
+      static_cast<double>(std::max(1, options.components)) * 8.0;
+  } else {
+    worker_bytes += 6.0 * landmark_bytes;
+    worker_bytes += static_cast<double>(landmarks) * static_cast<double>(std::max(1, options.knn.k)) *
+      static_cast<double>(sizeof(int) + sizeof(float));
+  }
+  return worker_bytes;
+}
 
 #ifdef KODAMA_ENABLE_CUDA
 GpuWorkerPlan resolve_gpu_worker_plan(
@@ -1617,25 +2304,9 @@ GpuWorkerPlan resolve_gpu_worker_plan(
     plan.total_memory_mb = static_cast<double>(total_bytes) / (1024.0 * 1024.0);
   }
 
-  const double x_bytes = static_cast<double>(samples) * static_cast<double>(features) * sizeof(float);
-  const double landmark_bytes = static_cast<double>(landmarks) * static_cast<double>(features) * sizeof(float);
-  const double graph_bytes = static_cast<double>(samples) * static_cast<double>(graph_neighbors) *
-    static_cast<double>(sizeof(int) + sizeof(float));
-  const double component_bytes = static_cast<double>(landmarks) *
-    static_cast<double>(std::max(1, options.components)) * sizeof(float);
-  double worker_bytes = 512.0 * 1024.0 * 1024.0;
-  worker_bytes += 1.5 * x_bytes;
-  worker_bytes += 6.0 * landmark_bytes;
-  worker_bytes += 0.25 * graph_bytes;
-  if (options.classifier != CoreClassifier::KNN) {
-    const double feature_component_ratio =
-      static_cast<double>(features) / static_cast<double>(std::max(1, options.components));
-    worker_bytes += 4.0 * feature_component_ratio * landmark_bytes;
-    worker_bytes += 10.0 * component_bytes;
-  } else {
-    worker_bytes += static_cast<double>(landmarks) * static_cast<double>(std::max(1, options.knn.k)) *
-      static_cast<double>(sizeof(int) + sizeof(float));
-  }
+  const double worker_bytes = estimate_gpu_worker_bytes(
+    options, samples, features, landmarks, graph_neighbors
+  );
   plan.worker_memory_estimate_mb = worker_bytes / (1024.0 * 1024.0);
 
   int sm_cap = 2;
@@ -1713,64 +2384,94 @@ void apply_kodama_dissimilarity(
 ) {
   if (runs <= 0 || samples <= 0 || graph.neighbors <= 0) return;
   OmpThreadScope threads(n_threads);
+  std::vector<int> labels_by_sample(
+    static_cast<std::size_t>(samples) * static_cast<std::size_t>(runs)
+  );
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-  for (int i = 0; i < samples; ++i) {
-    std::vector<std::pair<float, int>> row(static_cast<std::size_t>(graph.neighbors));
-    const std::size_t row_offset = static_cast<std::size_t>(i) * static_cast<std::size_t>(graph.neighbors);
-    for (int j = 0; j < graph.neighbors; ++j) {
-      const std::size_t offset = row_offset + static_cast<std::size_t>(j);
-      const int stored_neighbor = graph.indices[offset];
-      const int neighbor =
-        stored_neighbor >= 0 && input_one_based ?
-          stored_neighbor - 1 :
-          stored_neighbor;
-      float distance = graph.distances[offset];
-      if (neighbor < 0 || neighbor >= samples || !std::isfinite(distance)) {
-        row[static_cast<std::size_t>(j)] = {
-          std::numeric_limits<float>::infinity(),
-          stored_neighbor
-        };
-        continue;
-      }
-      int same = 0;
-      int valid = 0;
-      for (int run = 0; run < runs; ++run) {
-        const std::size_t base = static_cast<std::size_t>(run) * static_cast<std::size_t>(samples);
-        const int lhs = res[base + static_cast<std::size_t>(i)];
-        const int rhs = res[base + static_cast<std::size_t>(neighbor)];
-        if (lhs == 0 || rhs == 0) continue;
-        ++valid;
-        if (lhs == rhs) ++same;
-      }
-      if (same == 0 || valid == 0) {
-        distance = std::numeric_limits<float>::infinity();
-      } else {
-        const double agreement = static_cast<double>(same) / static_cast<double>(valid);
-        distance = static_cast<float>((1.0 + static_cast<double>(distance)) / (agreement * agreement));
-      }
-      row[static_cast<std::size_t>(j)] = {
-        distance,
-        output_one_based ? neighbor + 1 : neighbor
-      };
+  for (int sample = 0; sample < samples; ++sample) {
+    int* destination = labels_by_sample.data() +
+      static_cast<std::size_t>(sample) * static_cast<std::size_t>(runs);
+    for (int run = 0; run < runs; ++run) {
+      destination[run] = res[
+        static_cast<std::size_t>(run) * static_cast<std::size_t>(samples) +
+        static_cast<std::size_t>(sample)
+      ];
     }
-    std::stable_sort(row.begin(), row.end(), [](const auto& a, const auto& b) {
-      if (a.first != b.first) return a.first < b.first;
-      return a.second < b.second;
-    });
-    for (int j = 0; j < graph.neighbors; ++j) {
-      const std::size_t offset = row_offset + static_cast<std::size_t>(j);
-      graph.distances[offset] = row[static_cast<std::size_t>(j)].first;
-      graph.indices[offset] = row[static_cast<std::size_t>(j)].second;
+  }
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+  {
+    std::vector<std::pair<float, int>> row(
+      static_cast<std::size_t>(graph.neighbors)
+    );
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+    for (int i = 0; i < samples; ++i) {
+      const std::size_t row_offset = static_cast<std::size_t>(i) *
+                                     static_cast<std::size_t>(graph.neighbors);
+      for (int j = 0; j < graph.neighbors; ++j) {
+        const std::size_t offset = row_offset + static_cast<std::size_t>(j);
+        const int stored_neighbor = graph.indices[offset];
+        const int neighbor = stored_neighbor >= 0 && input_one_based
+                                 ? stored_neighbor - 1
+                                 : stored_neighbor;
+        float distance = graph.distances[offset];
+        if (neighbor < 0 || neighbor >= samples || !std::isfinite(distance)) {
+          row[static_cast<std::size_t>(j)] = {
+              std::numeric_limits<float>::infinity(), stored_neighbor};
+          continue;
+        }
+        int same = 0;
+        int valid = 0;
+        const int *lhs_labels =
+            labels_by_sample.data() +
+            static_cast<std::size_t>(i) * static_cast<std::size_t>(runs);
+        const int *rhs_labels =
+            labels_by_sample.data() +
+            static_cast<std::size_t>(neighbor) * static_cast<std::size_t>(runs);
+        for (int run = 0; run < runs; ++run) {
+          const int lhs = lhs_labels[run];
+          const int rhs = rhs_labels[run];
+          const int pair_valid = lhs != 0 && rhs != 0;
+          valid += pair_valid;
+          same += pair_valid && lhs == rhs;
+        }
+        if (same == 0 || valid == 0) {
+          distance = std::numeric_limits<float>::infinity();
+        } else {
+          const double agreement =
+              static_cast<double>(same) / static_cast<double>(valid);
+          distance = static_cast<float>((1.0 + static_cast<double>(distance)) /
+                                        (agreement * agreement));
+        }
+        row[static_cast<std::size_t>(j)] = {
+            distance, output_one_based ? neighbor + 1 : neighbor};
+      }
+      std::stable_sort(row.begin(), row.end(),
+                       [](const auto &a, const auto &b) {
+                         if (a.first != b.first)
+                           return a.first < b.first;
+                         return a.second < b.second;
+                       });
+      for (int j = 0; j < graph.neighbors; ++j) {
+        const std::size_t offset = row_offset + static_cast<std::size_t>(j);
+        graph.distances[offset] = row[static_cast<std::size_t>(j)].first;
+        graph.indices[offset] = row[static_cast<std::size_t>(j)].second;
+      }
     }
   }
 }
 
 void make_graph_indices_one_based(NeighborGraph& graph) {
+  if (graph.index_base == GraphIndexBase::One) return;
   for (int& index : graph.indices) {
     if (index >= 0) ++index;
   }
+  graph.index_base = GraphIndexBase::One;
 }
 
 KODAMAGraphResult build_kodama_graph(
@@ -1790,6 +2491,7 @@ KODAMAGraphResult build_kodama_graph(
   result.samples = samples;
   result.dimensions = dimensions;
   result.backend = options.backend;
+  result.index_type = KNNIndexType::NativeHNSW;
 
   const int neighbors = std::max(1, std::min(options.neighbors, samples - 1));
   detail::Timer graph_timer;
@@ -1805,7 +2507,11 @@ KODAMAGraphResult build_kodama_graph(
     true,
     options.index_type,
     options.ivf_nlist,
-    options.ivf_nprobe
+    options.ivf_nprobe,
+    &result.ivf_nlist,
+    &result.ivf_nprobe,
+    &result.ivf_pilot_recall,
+    &result.index_type
   );
   trim_self_neighbors_in_place(result.knn, samples, neighbors);
   if (output_one_based) make_graph_indices_one_based(result.knn);
@@ -1858,7 +2564,8 @@ IterationResult run_iteration(
   const std::vector<float>& spatial,
   const std::vector<float>& spatial_jitter,
   const NeighborGraph& global_graph,
-  const DeviceResidentKODAMAGraph* resident_graph,
+  DeviceResidentKODAMAGraph* resident_graph,
+  DatasetExecutionContext* execution_context,
   int worker_lane,
   bool global_graph_is_input,
   const std::vector<int>& constrain,
@@ -1911,7 +2618,18 @@ IterationResult run_iteration(
       10,
       options.n_threads,
       options.backend,
-      kmeans_gpu_device
+      kmeans_gpu_device,
+      worker_lane,
+#if defined(KODAMA_ENABLE_CUDA)
+      execution_context == nullptr ? nullptr : execution_context->cuda_kmeans.get(),
+#else
+      nullptr,
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+      execution_context == nullptr ? nullptr : execution_context->metal_kmeans.get()
+#else
+      nullptr
+#endif
     );
     const IndexedStrata indexed = index_strata(scratch.coarse_labels, coarse_k);
     landmark_sample = quota_sample_landmarks(
@@ -2041,7 +2759,7 @@ IterationResult run_iteration(
   core.knn.k = std::max(core.knn.k, 1);
   core.knn.hnsw_tune_k = 50;
   core.knn.hnsw_target_recall = 0.99;
-  core.knn.n_threads = options.backend == Backend::CUDA ?
+  core.knn.n_threads = options.backend == Backend::CPU ?
     options.n_threads : std::max(1, options.knn.n_threads);
   core.pls = options.pls;
   core.pls.backend = options.backend;
@@ -2049,7 +2767,7 @@ IterationResult run_iteration(
   core.pls.cv.seed = options.seed + static_cast<std::uint64_t>(run_id);
   core.pls.max_components = options.components;
   core.pls.fixed_components = options.components;
-  core.pls.n_threads = options.backend == Backend::CUDA ?
+  core.pls.n_threads = options.backend == Backend::CPU ?
     options.n_threads : std::max(1, options.pls.n_threads);
 
   auto run_knn_core = [&](const std::vector<int>& labels, const CoreOptions& phase) {
@@ -2073,9 +2791,35 @@ IterationResult run_iteration(
 
   CoreResult core_result;
   if (options.classifier == CoreClassifier::KNN) {
-    if (global_graph_is_input) {
-      const NeighborGraph local_graph = subset_graph_to_rows(global_graph, landpoints, n);
-      core_result = CoreKNNGraph_CPU(local_graph, static_cast<int>(landpoints.size()), scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+    if (resident_graph != nullptr && resident_graph->has_landmark_index()) {
+      scratch.local_graph = resident_graph->landmark_knn_graph(
+        scratch.x_land,
+        landpoints,
+        core.knn.k,
+        core.knn
+      );
+      if (options.backend == Backend::CUDA) {
+        core_result = CoreKNNGraph_CUDA(scratch.local_graph, static_cast<int>(landpoints.size()), scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+      } else if (options.backend == Backend::Metal) {
+        core_result = CoreKNNGraph_METAL(scratch.local_graph, static_cast<int>(landpoints.size()), scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+      } else {
+        core_result = CoreKNNGraph_CPU(scratch.local_graph, static_cast<int>(landpoints.size()), scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+      }
+    } else if (global_graph_is_input) {
+      subset_graph_to_rows(
+        global_graph,
+        landpoints,
+        n,
+        scratch.global_to_local,
+        scratch.local_graph
+      );
+      if (options.backend == Backend::CUDA) {
+        core_result = CoreKNNGraph_CUDA(scratch.local_graph, static_cast<int>(landpoints.size()), scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+      } else if (options.backend == Backend::Metal) {
+        core_result = CoreKNNGraph_METAL(scratch.local_graph, static_cast<int>(landpoints.size()), scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+      } else {
+        core_result = CoreKNNGraph_CPU(scratch.local_graph, static_cast<int>(landpoints.size()), scratch.xw, scratch.x_constrain, scratch.x_fixed, core);
+      }
     } else {
       core_result = run_knn_core(scratch.xw, core);
     }
@@ -2098,13 +2842,23 @@ IterationResult run_iteration(
     if (options.classifier == CoreClassifier::KNN) {
       const int projection_k = std::max(1, options.knn.k);
       if (resident_graph != nullptr && resident_graph->valid()) {
-        out.res = resident_graph->project(
-          scratch.is_landmark,
-          out.res,
+        resident_graph->project_to_result(
+          landpoints,
+          core_result.clbest,
           projection_k,
           core_result.clbest.front(),
+          run_id - 1,
           worker_lane
         );
+        out.resident_result = true;
+        out.sparse_projection_upload = true;
+        if (!run_constrain_is_identity) {
+          const int max_label = *std::max_element(
+            core_result.clbest.begin(), core_result.clbest.end());
+          resident_graph->constrain_result_row(
+            run_constrain, max_label, run_id - 1, worker_lane);
+        }
+        out.res.clear();
       } else {
         scratch.global_to_local.assign(static_cast<std::size_t>(n), -1);
         for (std::size_t i = 0; i < landpoints.size(); ++i) {
@@ -2141,7 +2895,20 @@ IterationResult run_iteration(
       }
     }
   }
-  if (!run_constrain_is_identity) out.res = constrained_majority(out.res, run_constrain);
+  if (!run_constrain_is_identity && !out.res.empty()) {
+    out.res = constrained_majority(out.res, run_constrain);
+    if (out.resident_result) {
+      resident_graph->store_result_row(
+        out.res, run_id - 1, worker_lane);
+      ++out.resident_row_uploads;
+    }
+  }
+  if (resident_graph != nullptr && resident_graph->valid() && !out.resident_result) {
+    resident_graph->store_result_row(
+      out.res, run_id - 1, worker_lane);
+    out.resident_result = true;
+    ++out.resident_row_uploads;
+  }
   out.acc = core_result.vect_acc;
   out.accbest = core_result.accbest;
   out.runtime = core_result.runtime_seconds;
@@ -2155,7 +2922,8 @@ KODAMAMatrixResult run_kodama_matrix(
   const std::vector<int>& constrain_in,
   const std::vector<int>& fixed_in,
   KODAMAMatrixOptions options,
-  const NeighborGraph* input_graph = nullptr
+  const NeighborGraph* input_graph = nullptr,
+  const KODAMAGraphResult* prepared_graph = nullptr
 ) {
   detail::validate_inputs(x, std::vector<int>(x.rows, 1), std::vector<int>());
   if (!starting_labels.empty() && starting_labels.size() != x.rows) throw std::invalid_argument("starting_labels size must match number of rows.");
@@ -2188,6 +2956,26 @@ KODAMAMatrixResult run_kodama_matrix(
                 << ", per_worker_est=" << worker_plan.worker_memory_estimate_mb << " MiB)"
                 << std::endl;
     }
+  } else if (options.backend == Backend::Metal && options.n_threads <= 0) {
+    worker_plan.automatic = true;
+    const double worker_bytes = estimate_metal_worker_bytes(
+      options,
+      static_cast<int>(x.rows),
+      static_cast<int>(x.cols),
+      options.landmarks,
+      requested_neighbors
+    );
+    worker_plan.worker_memory_estimate_mb = worker_bytes / (1024.0 * 1024.0);
+    worker_plan.workers = detail::metal_recommended_worker_count(
+      static_cast<std::size_t>(std::ceil(worker_bytes)),
+      options.runs
+    );
+    options.n_threads = worker_plan.workers;
+    if (options.progress) {
+      std::cerr << "[kodama] Metal auto workers selected " << worker_plan.workers
+                << " (per_worker_est=" << worker_plan.worker_memory_estimate_mb
+                << " MiB)" << std::endl;
+    }
   } else {
     options.n_threads = std::max(1, options.n_threads);
     worker_plan.workers = std::min(options.n_threads, options.runs);
@@ -2203,16 +2991,22 @@ KODAMAMatrixResult run_kodama_matrix(
   }
 
   detail::Timer input_copy_timer;
-  const std::vector<float> full_float = copy_float32(x);
+  DatasetExecutionContext execution_context;
+  execution_context.matrix = copy_float32(x);
+  const std::vector<float>& full_float = execution_context.matrix;
   const std::vector<int> constrain = normalize_constrain(constrain_in, x.rows);
   const bool constrain_is_identity = is_identity_constrain(constrain);
   const std::vector<int> fixed = normalize_fixed(fixed_in, x.rows);
   const double input_copy_seconds = input_copy_timer.seconds();
 
   detail::Timer spatial_precompute_timer;
+  const bool reuse_spatial_jitter = prepared_graph != nullptr &&
+    prepared_graph->samples == static_cast<int>(x.rows) &&
+    prepared_graph->spatial_dimensions == options.spatial_cols &&
+    prepared_graph->spatial_jitter.size() == static_cast<std::size_t>(options.spatial_cols);
   const std::vector<float> spatial_jitter = options.spatial.empty() ?
-    std::vector<float>() :
-    spatial_jitter_from_graph(
+    std::vector<float>() : reuse_spatial_jitter ?
+    prepared_graph->spatial_jitter : spatial_jitter_from_graph(
       options.spatial,
       static_cast<int>(x.rows),
       options.spatial_cols,
@@ -2232,18 +3026,22 @@ KODAMAMatrixResult run_kodama_matrix(
   result.runs = options.runs;
   result.samples = static_cast<int>(x.rows);
   result.cycles = options.cycles;
+  result.res_constrain_rows = options.spatial.empty() ? 1 : options.runs;
   result.effective_landmarks = options.landmarks;
   result.n_threads = options.n_threads;
   result.backend = options.backend;
   result.gpu_auto_workers = worker_plan.automatic;
-  result.gpu_scheduler_enabled = options.backend == Backend::CUDA;
-  result.gpu_scheduler_lanes = options.backend == Backend::CUDA ? worker_plan.workers : 0;
+  const bool accelerator_scheduler =
+    options.backend == Backend::CUDA || options.backend == Backend::Metal;
+  result.gpu_scheduler_enabled = accelerator_scheduler;
+  result.gpu_scheduler_lanes = accelerator_scheduler ? worker_plan.workers : 0;
   result.gpu_sm_count = worker_plan.sm_count;
   result.gpu_free_memory_mb = worker_plan.free_memory_mb;
   result.gpu_total_memory_mb = worker_plan.total_memory_mb;
   result.gpu_worker_memory_estimate_mb = worker_plan.worker_memory_estimate_mb;
   result.input_copy_seconds = input_copy_seconds;
   result.spatial_precompute_seconds = spatial_precompute_seconds;
+  result.spatial_graph_builds = reuse_spatial_jitter ? 0 : (options.spatial.empty() ? 0 : 1);
   result.acc.assign(static_cast<std::size_t>(options.runs), std::numeric_limits<double>::quiet_NaN());
   result.landmark_occupied_strata.assign(static_cast<std::size_t>(options.runs), 0);
   result.landmark_represented_strata.assign(static_cast<std::size_t>(options.runs), 0);
@@ -2251,11 +3049,51 @@ KODAMAMatrixResult run_kodama_matrix(
   result.landmark_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
   result.v.assign(static_cast<std::size_t>(options.runs) * options.cycles, std::numeric_limits<double>::quiet_NaN());
   result.res.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
-  result.res_constrain.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
+  result.res_constrain.assign(static_cast<std::size_t>(result.res_constrain_rows) * x.rows, 0);
   const int workers = std::max(1, std::min(options.n_threads, options.runs));
   NeighborGraph global_graph;
   bool host_graph_trimmed = false;
-  const bool graph_is_input = input_graph != nullptr;
+  const std::shared_ptr<KODAMAGraphHandle> prepared_handle =
+    prepared_graph == nullptr ? nullptr : prepared_graph->handle;
+  auto prepared_handle_lock = detail::KODAMAGraphHandleAccess::lock(prepared_handle);
+  std::shared_ptr<DeviceResidentKODAMAGraph> shared_resident =
+    detail::KODAMAGraphHandleAccess::resident(prepared_handle);
+  const NeighborGraph* effective_input_graph = input_graph;
+  if (effective_input_graph == nullptr) {
+    effective_input_graph = detail::KODAMAGraphHandleAccess::host_graph(prepared_handle);
+  }
+  const bool graph_is_input = effective_input_graph != nullptr ||
+    (shared_resident != nullptr && shared_resident->valid());
+  result.graph_backend = graph_is_input ? Backend::Auto : options.backend;
+  result.optimization_backend = options.backend;
+  result.dissimilarity_backend = Backend::CPU;
+  DeviceResidentKODAMAGraph& resident_graph = shared_resident ?
+    *shared_resident : *execution_context.graph;
+  if (shared_resident && resident_graph.valid()) resident_graph.reset_graph();
+  const bool use_resident_graph =
+    (options.backend == Backend::CUDA || options.backend == Backend::Metal);
+  const double graph_exact_work =
+    static_cast<double>(x.rows) * static_cast<double>(x.rows) *
+    static_cast<double>(x.cols);
+  const bool cuda_resident_ivf = options.backend == Backend::CUDA &&
+    (options.knn.index_type == KNNIndexType::CudaIVFFlat ||
+     (options.knn.index_type != KNNIndexType::CudaExact &&
+      x.rows > 5000 && graph_exact_work > 2.0e8));
+  const bool metal_resident_ivf = options.backend == Backend::Metal &&
+    (options.knn.index_type == KNNIndexType::MetalIVFFlat ||
+     (options.knn.index_type != KNNIndexType::MetalExact &&
+      x.rows > 5000 && graph_exact_work > 2.0e8));
+  const bool direct_resident_ivf =
+    !graph_is_input && (cuda_resident_ivf || metal_resident_ivf) &&
+    !detail::should_use_spatial_grid_knn(
+      static_cast<int>(x.rows),
+      static_cast<int>(x.cols),
+      options.metric
+    );
+  const bool cpu_reusable_hnsw = !graph_is_input &&
+    options.backend == Backend::CPU &&
+    options.classifier == CoreClassifier::KNN &&
+    options.knn.index_type == KNNIndexType::NativeHNSW;
   if (graph_is_input) {
     if (options.compute_visual_init) {
       if (options.progress) {
@@ -2276,11 +3114,77 @@ KODAMAMatrixResult run_kodama_matrix(
     detail::Timer graph_timer;
     if (options.progress) {
       std::cerr << "[kodama] using caller-supplied KNN graph with "
-                << input_graph->neighbors << " neighbors" << std::endl;
+                << (effective_input_graph != nullptr ?
+                      effective_input_graph->neighbors : neighbors)
+                << " neighbors" << std::endl;
     }
-    const int retained = std::min(input_graph->neighbors, neighbors);
-    global_graph = normalize_external_graph(*input_graph, static_cast<int>(x.rows), retained);
+    if (effective_input_graph != nullptr) {
+      const int retained = std::min(effective_input_graph->neighbors, neighbors);
+      global_graph = normalize_external_graph(
+        *effective_input_graph, static_cast<int>(x.rows), retained);
+    }
     result.graph_seconds = graph_timer.seconds();
+    host_graph_trimmed = effective_input_graph == nullptr;
+  } else if (cpu_reusable_hnsw) {
+    if (options.progress) {
+      std::cerr << "[kodama] building one retained CPU HNSW index for all M runs"
+                << std::endl;
+    }
+    detail::Timer graph_timer;
+    resident_graph.build_hnsw(
+      full_float, static_cast<int>(x.rows), static_cast<int>(x.cols),
+      neighbors, options.metric, options.n_threads
+    );
+    global_graph = resident_graph.download();
+    result.graph_index_type = KNNIndexType::NativeHNSW;
+    result.graph_builds = 1;
+    result.graph_seconds = graph_timer.seconds();
+    host_graph_trimmed = true;
+    if (options.compute_visual_init) {
+      VisualizationInitOptions init_options;
+      init_options.n_components = 2;
+      init_options.n_threads = options.n_threads;
+      init_options.seed = options.seed;
+      init_options.gpu_device = options.knn.gpu_device;
+      init_options.backend = options.backend;
+      result.visual_init = KODAMAVisualizationPCAInit(x, init_options);
+      result.has_visual_init = true;
+      result.visual_init_seconds = result.visual_init.runtime_seconds;
+    }
+  } else if (direct_resident_ivf) {
+    if (options.progress) {
+      std::cerr << "[kodama] building one resident accelerator IVF-Flat graph for all M runs"
+                << std::endl;
+    }
+    detail::Timer graph_timer;
+    resident_graph.build_ivf(
+      full_float,
+      static_cast<int>(x.rows),
+      static_cast<int>(x.cols),
+      neighbors,
+      options.metric,
+      options,
+      workers,
+      &result.graph_ivf_nlist,
+      &result.graph_ivf_nprobe,
+      &result.graph_ivf_pilot_recall
+    );
+    result.graph_index_type = options.backend == Backend::CUDA ?
+      KNNIndexType::CudaIVFFlat : KNNIndexType::MetalIVFFlat;
+    result.graph_builds = 1;
+    result.graph_seconds = graph_timer.seconds();
+    host_graph_trimmed = true;
+    if (options.compute_visual_init) {
+      VisualizationInitOptions init_options;
+      init_options.n_components = 2;
+      init_options.n_threads = options.n_threads;
+      init_options.seed = options.seed;
+      init_options.gpu_device = options.knn.gpu_device;
+      init_options.backend = options.backend;
+      result.visual_init = KODAMAVisualizationPCAInit(x, init_options);
+      result.has_visual_init = true;
+      result.visual_init_seconds = result.visual_init.runtime_seconds;
+    }
   } else {
     if (options.progress) {
       std::cerr << "[kodama] running KODAMA.graph for " << x.rows
@@ -2301,13 +3205,13 @@ KODAMAMatrixResult run_kodama_matrix(
     result.visual_init = std::move(prepared.visual_init);
     result.has_visual_init = options.compute_visual_init;
     result.visual_init_seconds = prepared.visual_init_seconds;
+    result.graph_index_type = prepared.index_type;
+    result.graph_ivf_nlist = prepared.ivf_nlist;
+    result.graph_ivf_nprobe = prepared.ivf_nprobe;
+    result.graph_ivf_pilot_recall = prepared.ivf_pilot_recall;
     host_graph_trimmed = true;
   }
-
-  DeviceResidentKODAMAGraph resident_graph;
-  const bool use_resident_graph =
-    (options.backend == Backend::CUDA || options.backend == Backend::Metal);
-  if (use_resident_graph) {
+  if (use_resident_graph && !resident_graph.valid()) {
     resident_graph.build(
       global_graph,
       static_cast<int>(x.rows),
@@ -2315,17 +3219,75 @@ KODAMAMatrixResult run_kodama_matrix(
       options.knn.gpu_device,
       workers
     );
-    if (!graph_is_input && resident_graph.valid()) {
+    if (!graph_is_input && resident_graph.valid() && options.classifier != CoreClassifier::KNN) {
       std::vector<int>().swap(global_graph.indices);
       std::vector<float>().swap(global_graph.distances);
     }
   }
+  if (resident_graph.valid()) {
+    resident_graph.prepare_results(options.runs);
+  }
+  execution_context.pca_initialization = result.has_visual_init ? &result.visual_init : nullptr;
+  if (options.spatial.empty()) {
+    const int coarse_k = std::max(
+      2,
+      std::min(options.splitting > 0 ? options.splitting :
+        (static_cast<int>(x.rows) < 40000 ? 100 : 300), static_cast<int>(x.rows))
+    );
+#if defined(KODAMA_ENABLE_CUDA)
+    if (options.backend == Backend::CUDA) {
+      if (options.progress) {
+        std::cerr << "[kodama] uploading one resident CUDA k-means matrix for all M runs"
+                  << std::endl;
+      }
+      execution_context.cuda_kmeans =
+        std::make_unique<detail::NativeCudaKMeansContext>(
+          detail::native_cuda_build_kmeans_context(
+            full_float, static_cast<int>(x.rows), static_cast<int>(x.cols),
+            workers, coarse_k, options.knn.gpu_device
+          )
+        );
+    }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+    if (options.backend == Backend::Metal) {
+      if (options.progress) {
+        std::cerr << "[kodama] retaining one Metal k-means matrix for all M runs"
+                  << std::endl;
+      }
+      execution_context.metal_kmeans =
+        std::make_unique<detail::NativeMetalKMeansContext>(
+          detail::metal_build_kmeans_context(
+            full_float, static_cast<int>(x.rows), static_cast<int>(x.cols),
+            workers, coarse_k
+          )
+        );
+    }
+#endif
+  }
+  result.kmeans_input_uploads = execution_context.kmeans_input_uploads();
+  // A raw-data accelerator run queries the retained IVF index for each
+  // landmark set. The full graph stays resident until materialization is
+  // explicitly required; graph-only input remains host-backed by definition.
   detail::Timer optimization_timer;
   KODAMAMatrixOptions iteration_options = options;
   if (options.backend == Backend::CPU) {
     iteration_options.n_threads = std::max(1, options.n_threads / workers);
+  } else if (options.backend == Backend::Metal && workers > 1) {
+    // Independent M lanes already provide device concurrency. Letting every
+    // lane also spawn one host worker per CV fold creates workers * folds
+    // command queues and thread-local Metal workspaces for each proposal.
+    // Traverse folds sequentially inside each lane so its resident fold cache
+    // and command queue survive across Tcycles.
+    iteration_options.n_threads = 1;
   }
-  std::vector<IterationResult> iterations(static_cast<std::size_t>(options.runs));
+  std::vector<double> iteration_runtime(static_cast<std::size_t>(options.runs), 0.0);
+  std::vector<double> iteration_memory(static_cast<std::size_t>(options.runs), 0.0);
+  std::vector<int> iteration_landmarks(static_cast<std::size_t>(options.runs), 0);
+  std::vector<char> iteration_resident(static_cast<std::size_t>(options.runs), 0);
+  std::atomic<std::uint64_t> projection_sparse_uploads{0};
+  std::atomic<std::uint64_t> projection_full_downloads{0};
+  std::atomic<std::uint64_t> result_row_uploads{0};
 
   auto execute_run = [&](int run_id, int worker_lane, IterationScratch& scratch) {
     if (options.progress) {
@@ -2337,7 +3299,9 @@ KODAMAMatrixResult run_kodama_matrix(
       options.spatial,
       spatial_jitter,
       global_graph,
-      resident_graph.valid() ? &resident_graph : nullptr,
+      (resident_graph.valid() || resident_graph.has_landmark_index()) ?
+        &resident_graph : nullptr,
+      &execution_context,
       worker_lane,
       graph_is_input,
       constrain,
@@ -2353,7 +3317,34 @@ KODAMAMatrixResult run_kodama_matrix(
                 << " acc=" << iter.accbest
                 << " elapsed=" << timer.seconds() << "s" << std::endl;
     }
-    iterations[static_cast<std::size_t>(run_id - 1)] = std::move(iter);
+    const std::size_t row = static_cast<std::size_t>(run_id - 1);
+    result.acc[row] = iter.accbest;
+    result.landmark_occupied_strata[row] = iter.landmark_occupied_strata;
+    result.landmark_represented_strata[row] = iter.landmark_represented_strata;
+    result.landmark_grid_bins[row] = iter.landmark_grid_bins;
+    result.landmark_seconds[row] = iter.landmark_seconds;
+    if (!iter.res.empty()) {
+      std::copy(iter.res.begin(), iter.res.end(), result.res.begin() + row * x.rows);
+    }
+    if (result.res_constrain_rows > 1 || row == 0) {
+      const std::size_t constrain_row = result.res_constrain_rows > 1 ? row : 0;
+      std::copy(
+        iter.constrain.begin(),
+        iter.constrain.end(),
+        result.res_constrain.begin() + constrain_row * x.rows
+      );
+    }
+    for (int c = 0; c < options.cycles && c < static_cast<int>(iter.acc.size()); ++c) {
+      result.v[row * static_cast<std::size_t>(options.cycles) + static_cast<std::size_t>(c)] =
+        iter.acc[static_cast<std::size_t>(c)];
+    }
+    iteration_runtime[row] = iter.runtime;
+    iteration_memory[row] = iter.memory;
+    iteration_landmarks[row] = iter.landmarks_used;
+    iteration_resident[row] = iter.resident_result ? 1 : 0;
+    if (iter.sparse_projection_upload) projection_sparse_uploads.fetch_add(1);
+    if (iter.full_projection_download) projection_full_downloads.fetch_add(1);
+    result_row_uploads.fetch_add(static_cast<std::uint64_t>(iter.resident_row_uploads));
   };
 
 #ifdef KODAMA_ENABLE_CUDA
@@ -2386,24 +3377,19 @@ KODAMAMatrixResult run_kodama_matrix(
   }
   result.optimization_wall_seconds = optimization_timer.seconds();
 
-  for (int run_id = 1; run_id <= options.runs; ++run_id) {
-    const IterationResult& iter = iterations[static_cast<std::size_t>(run_id - 1)];
-    const std::size_t row = static_cast<std::size_t>(run_id - 1);
-    result.acc[row] = iter.accbest;
-    result.effective_landmarks = iter.landmarks_used;
-    result.landmark_occupied_strata[row] = iter.landmark_occupied_strata;
-    result.landmark_represented_strata[row] = iter.landmark_represented_strata;
-    result.landmark_grid_bins[row] = iter.landmark_grid_bins;
-    result.landmark_seconds[row] = iter.landmark_seconds;
-    std::copy(iter.res.begin(), iter.res.end(), result.res.begin() + row * x.rows);
-    std::copy(iter.constrain.begin(), iter.constrain.end(), result.res_constrain.begin() + row * x.rows);
-    for (int c = 0; c < options.cycles && c < static_cast<int>(iter.acc.size()); ++c) {
-      result.v[row * static_cast<std::size_t>(options.cycles) + static_cast<std::size_t>(c)] = iter.acc[static_cast<std::size_t>(c)];
-    }
-    result.optimization_sum_seconds += iter.runtime;
-    result.peak_memory_mb = std::max(result.peak_memory_mb, iter.memory);
+  const bool all_results_resident = resident_graph.valid() &&
+    std::all_of(iteration_resident.begin(), iteration_resident.end(),
+                [](char value) { return value != 0; });
+  result.projection_sparse_uploads = projection_sparse_uploads.load();
+  result.projection_full_downloads = projection_full_downloads.load();
+  result.result_row_uploads = result_row_uploads.load();
+
+  for (int run_id = 0; run_id < options.runs; ++run_id) {
+    const std::size_t row = static_cast<std::size_t>(run_id);
+    result.effective_landmarks = iteration_landmarks[row];
+    result.optimization_sum_seconds += iteration_runtime[row];
+    result.peak_memory_mb = std::max(result.peak_memory_mb, iteration_memory[row]);
   }
-  iterations.clear();
 
   if (!host_graph_trimmed) {
     trim_self_neighbors_in_place(
@@ -2413,13 +3399,7 @@ KODAMAMatrixResult run_kodama_matrix(
     );
     host_graph_trimmed = true;
     if (resident_graph.valid()) {
-      resident_graph.build(
-        global_graph,
-        static_cast<int>(x.rows),
-        options.backend,
-        options.knn.gpu_device,
-        workers
-      );
+      resident_graph.replace_graph(global_graph);
     }
   }
   if (!options.spatial.empty() && options.spatial_graph_mix) {
@@ -2428,27 +3408,43 @@ KODAMAMatrixResult run_kodama_matrix(
     }
     detail::Timer spatial_graph_timer;
     if (global_graph.indices.empty() && resident_graph.valid()) {
+      // Spatial graph fusion currently operates on host graph storage.
       global_graph = resident_graph.download();
     }
-    NeighborGraph spatial_graph = self_knn_graph(
-      options.spatial,
-      static_cast<int>(x.rows),
-      options.spatial_cols,
-      neighbors + 1,
-      DistanceMetric::Euclidean,
-      options.n_threads,
-      options.backend,
-      options.knn.gpu_device,
-      true,
-      options.knn.index_type,
-      options.knn.ivf_nlist,
-      options.knn.ivf_nprobe
-    );
-    trim_self_neighbors_in_place(
-      spatial_graph,
-      static_cast<int>(x.rows),
-      global_graph.neighbors
-    );
+    const bool reuse_spatial_graph = prepared_graph != nullptr &&
+      prepared_graph->samples == static_cast<int>(x.rows) &&
+      prepared_graph->spatial_dimensions == options.spatial_cols &&
+      prepared_graph->spatial_knn.neighbors >= global_graph.neighbors;
+    NeighborGraph spatial_graph;
+    if (reuse_spatial_graph) {
+      spatial_graph = normalize_external_graph(
+        prepared_graph->spatial_knn,
+        static_cast<int>(x.rows),
+        global_graph.neighbors
+      );
+      result.spatial_graph_builds = 0;
+    } else {
+      spatial_graph = self_knn_graph(
+        options.spatial,
+        static_cast<int>(x.rows),
+        options.spatial_cols,
+        neighbors + 1,
+        DistanceMetric::Euclidean,
+        options.n_threads,
+        options.backend,
+        options.knn.gpu_device,
+        true,
+        options.knn.index_type,
+        options.knn.ivf_nlist,
+        options.knn.ivf_nprobe
+      );
+      trim_self_neighbors_in_place(
+        spatial_graph,
+        static_cast<int>(x.rows),
+        global_graph.neighbors
+      );
+      ++result.spatial_graph_builds;
+    }
     merge_feature_spatial_graphs_in_place(
       global_graph,
       spatial_graph,
@@ -2456,35 +3452,30 @@ KODAMAMatrixResult run_kodama_matrix(
       global_graph.neighbors
     );
     if (resident_graph.valid()) {
-      resident_graph.build(
-        global_graph,
-        static_cast<int>(x.rows),
-        options.backend,
-        options.knn.gpu_device,
-        workers
-      );
+      resident_graph.replace_graph(global_graph);
     }
     result.spatial_graph_seconds = spatial_graph_timer.seconds();
   }
 
-  if (options.apply_kodama_dissimilarity) {
+  if (options.apply_kodama_dissimilarity && options.materialize_graph) {
     if (options.progress) {
       std::cerr << "[kodama] applying KODAMA dissimilarity to KNN graph" << std::endl;
     }
     detail::Timer dissimilarity_timer;
 #if defined(KODAMA_ENABLE_CUDA) || defined(KODAMA_ENABLE_METAL)
     if (resident_graph.valid()) {
+      result.dissimilarity_backend = options.backend;
       resident_graph.apply_dissimilarity(
-        result.res,
         result.runs,
         false,
-        true
+        false
       );
-      global_graph = resident_graph.download();
+      if (options.materialize_graph) global_graph = resident_graph.download();
     } else
 #endif
 #if defined(KODAMA_ENABLE_CUDA)
     if (options.backend == Backend::CUDA) {
+      result.dissimilarity_backend = Backend::CUDA;
       detail::apply_kodama_dissimilarity_cuda(
         global_graph,
         result.res,
@@ -2492,7 +3483,7 @@ KODAMAMatrixResult run_kodama_matrix(
         result.samples,
         options.knn.gpu_device,
         false,
-        true
+        false
       );
     } else
 #endif
@@ -2504,25 +3495,33 @@ KODAMAMatrixResult run_kodama_matrix(
         result.samples,
         options.n_threads,
         false,
-        true
+        false
       );
     }
     result.knn_is_kodama_corrected = true;
     result.dissimilarity_seconds = dissimilarity_timer.seconds();
   } else {
-    if (global_graph.indices.empty() && resident_graph.valid()) {
+    if (options.materialize_graph && global_graph.indices.empty() && resident_graph.valid()) {
       global_graph = resident_graph.download();
     }
-    make_graph_indices_one_based(global_graph);
-    if (options.progress) {
+    if (options.progress && !options.apply_kodama_dissimilarity) {
       std::cerr << "[kodama] retaining the base graph for lazy KODAMA dissimilarity"
                 << std::endl;
     }
   }
-  result.graph_storage_bytes =
-    static_cast<std::uint64_t>(global_graph.indices.capacity()) * sizeof(int) +
-    static_cast<std::uint64_t>(global_graph.distances.capacity()) * sizeof(float);
-  result.knn = std::move(global_graph);
+  if (all_results_resident) {
+    result.res = resident_graph.download_results(result.runs);
+    ++result.result_matrix_downloads;
+  }
+  if (options.materialize_graph) {
+    if (!global_graph.indices.empty()) make_graph_indices_one_based(global_graph);
+    result.graph_storage_bytes =
+      static_cast<std::uint64_t>(global_graph.indices.capacity()) * sizeof(int) +
+      static_cast<std::uint64_t>(global_graph.distances.capacity()) * sizeof(float);
+    result.knn = std::move(global_graph);
+  } else {
+    result.graph_storage_bytes = 0;
+  }
   result.runtime_seconds = timer.seconds();
   result.peak_memory_mb = std::max(result.peak_memory_mb, detail::peak_memory_mb());
   if (options.progress) {
@@ -2537,7 +3536,8 @@ namespace {
 
 KODAMAGraphResult run_public_kodama_graph(
   MatrixView x,
-  const KODAMAGraphOptions& options
+  const KODAMAGraphOptions& options,
+  const MatrixView* spatial = nullptr
 ) {
   detail::validate_inputs(x, std::vector<int>(x.rows, 1), std::vector<int>());
   if (x.rows < 2 || x.cols < 1) {
@@ -2548,14 +3548,120 @@ KODAMAGraphResult run_public_kodama_graph(
   detail::Timer input_copy_timer;
   const std::vector<float> data = copy_float32(x);
   const double input_copy_seconds = input_copy_timer.seconds();
-  KODAMAGraphResult result = build_kodama_graph(
-    data,
+  KODAMAGraphResult result;
+  result.samples = static_cast<int>(x.rows);
+  result.dimensions = static_cast<int>(x.cols);
+  result.backend = options.backend;
+  result.neighbors = std::max(1, std::min(options.neighbors, result.samples - 1));
+  const double exact_work = static_cast<double>(x.rows) * x.rows * x.cols;
+  const bool direct_ivf =
+    (options.backend == Backend::CUDA || options.backend == Backend::Metal) &&
+    !detail::should_use_spatial_grid_knn(result.samples, result.dimensions, options.metric) &&
+    ((options.backend == Backend::CUDA && options.index_type == KNNIndexType::CudaIVFFlat) ||
+     (options.backend == Backend::Metal && options.index_type == KNNIndexType::MetalIVFFlat) ||
+     (x.rows > 5000 && exact_work > 2.0e8));
+  NeighborGraph base_graph;
+  std::shared_ptr<DeviceResidentKODAMAGraph> resident;
+  if (direct_ivf) {
+    resident = std::make_shared<DeviceResidentKODAMAGraph>();
+    KODAMAMatrixOptions bridge;
+    bridge.backend = options.backend;
+    bridge.knn.index_type = options.index_type;
+    bridge.knn.ivf_nlist = options.ivf_nlist;
+    bridge.knn.ivf_nprobe = options.ivf_nprobe;
+    bridge.knn.gpu_device = options.gpu_device;
+    detail::Timer graph_timer;
+    resident->build_ivf(
+      data, result.samples, result.dimensions, result.neighbors, options.metric,
+      bridge, std::max(1, options.n_threads), &result.ivf_nlist,
+      &result.ivf_nprobe, &result.ivf_pilot_recall
+    );
+    result.index_type = options.backend == Backend::CUDA ?
+      KNNIndexType::CudaIVFFlat : KNNIndexType::MetalIVFFlat;
+    result.graph_seconds = graph_timer.seconds();
+    result.graph_builds = 1;
+    VisualizationInitOptions init_options;
+    init_options.n_components = 2;
+    init_options.n_threads = std::max(1, options.n_threads);
+    init_options.seed = options.seed;
+    init_options.gpu_device = options.gpu_device;
+    init_options.backend = options.backend;
+    result.visual_init = KODAMAVisualizationPCAInit(x, init_options);
+    result.visual_init_seconds = result.visual_init.runtime_seconds;
+    result.runtime_seconds = result.graph_seconds + result.visual_init_seconds;
+    result.graph_storage_bytes = static_cast<std::uint64_t>(result.samples) *
+      static_cast<std::uint64_t>(result.neighbors) * (sizeof(int) + sizeof(float));
+  } else {
+    result = build_kodama_graph(
+      data, result.samples, result.dimensions, options, true, false);
+    result.neighbors = result.knn.neighbors;
+    base_graph = std::move(result.knn);
+    if (options.backend == Backend::CUDA || options.backend == Backend::Metal) {
+      resident = std::make_shared<DeviceResidentKODAMAGraph>();
+      resident->build(
+        base_graph, result.samples, options.backend, options.gpu_device,
+        std::max(1, options.n_threads));
+    }
+  }
+  if (spatial != nullptr) {
+    if (spatial->data == nullptr || spatial->rows != x.rows || spatial->cols < 1) {
+      throw std::invalid_argument(
+        "KODAMAGraph spatial coordinates must have one row per data sample."
+      );
+    }
+    detail::Timer spatial_timer;
+    const std::vector<float> spatial_data = copy_float32(*spatial);
+    const int spatial_neighbors = std::min(
+      static_cast<int>(x.rows) - 1,
+      std::max(20, result.neighbors)
+    );
+    NeighborGraph spatial_with_self = self_knn_graph(
+      spatial_data,
+      static_cast<int>(x.rows),
+      static_cast<int>(spatial->cols),
+      spatial_neighbors + 1,
+      DistanceMetric::Euclidean,
+      std::max(1, options.n_threads),
+      options.backend,
+      options.gpu_device,
+      true,
+      options.index_type,
+      options.ivf_nlist,
+      options.ivf_nprobe
+    );
+    result.spatial_jitter = spatial_jitter_from_precomputed_graph(
+      spatial_data,
+      spatial_with_self,
+      static_cast<int>(x.rows),
+      static_cast<int>(spatial->cols)
+    );
+    trim_self_neighbors_in_place(
+      spatial_with_self,
+      static_cast<int>(x.rows),
+      spatial_neighbors
+    );
+    result.spatial_knn = std::move(spatial_with_self);
+    make_graph_indices_one_based(result.spatial_knn);
+    result.spatial_dimensions = static_cast<int>(spatial->cols);
+    result.spatial_graph_builds = 1;
+    result.spatial_graph_seconds = spatial_timer.seconds();
+    result.graph_storage_bytes +=
+      static_cast<std::uint64_t>(result.spatial_knn.indices.capacity()) * sizeof(int) +
+      static_cast<std::uint64_t>(result.spatial_knn.distances.capacity()) * sizeof(float) +
+      static_cast<std::uint64_t>(result.spatial_jitter.capacity()) * sizeof(float);
+  }
+  NeighborGraph retained_host;
+  if (!base_graph.indices.empty()) retained_host = base_graph;
+  result.handle = detail::KODAMAGraphHandleAccess::create(
+    options.backend,
     static_cast<int>(x.rows),
-    static_cast<int>(x.cols),
-    options,
-    true,
-    true
+    result.neighbors,
+    std::move(resident),
+    std::move(retained_host)
   );
+  if (options.materialize_graph) {
+    result.knn = KODAMAGraphMaterialize(result);
+  }
   result.input_copy_seconds = input_copy_seconds;
   result.runtime_seconds = timer.seconds();
   return result;
@@ -2570,6 +3676,16 @@ KODAMAGraphResult KODAMAGraph_CPU(
   KODAMAGraphOptions cpu_options = options;
   cpu_options.backend = Backend::CPU;
   return run_public_kodama_graph(x, cpu_options);
+}
+
+KODAMAGraphResult KODAMAGraph_CPU(
+  MatrixView x,
+  MatrixView spatial,
+  const KODAMAGraphOptions& options
+) {
+  KODAMAGraphOptions cpu_options = options;
+  cpu_options.backend = Backend::CPU;
+  return run_public_kodama_graph(x, cpu_options, &spatial);
 }
 
 KODAMAGraphResult KODAMAGraph_CUDA(
@@ -2587,6 +3703,23 @@ KODAMAGraphResult KODAMAGraph_CUDA(
 #endif
 }
 
+KODAMAGraphResult KODAMAGraph_CUDA(
+  MatrixView x,
+  MatrixView spatial,
+  const KODAMAGraphOptions& options
+) {
+#if defined(KODAMA_ENABLE_CUDA)
+  KODAMAGraphOptions cuda_options = options;
+  cuda_options.backend = Backend::CUDA;
+  return run_public_kodama_graph(x, cuda_options, &spatial);
+#else
+  (void)x;
+  (void)spatial;
+  (void)options;
+  throw std::runtime_error("KODAMAGraph_CUDA requires a CUDA build.");
+#endif
+}
+
 KODAMAGraphResult KODAMAGraph_METAL(
   MatrixView x,
   const KODAMAGraphOptions& options
@@ -2594,12 +3727,26 @@ KODAMAGraphResult KODAMAGraph_METAL(
 #if defined(KODAMA_ENABLE_METAL)
   KODAMAGraphOptions metal_options = options;
   metal_options.backend = Backend::Metal;
-  if (metal_options.index_type != KNNIndexType::MetalIVFFlat) {
-    metal_options.index_type = KNNIndexType::MetalExact;
-  }
   return run_public_kodama_graph(x, metal_options);
 #else
   (void)x;
+  (void)options;
+  throw std::runtime_error("KODAMAGraph_METAL requires an Apple Metal build.");
+#endif
+}
+
+KODAMAGraphResult KODAMAGraph_METAL(
+  MatrixView x,
+  MatrixView spatial,
+  const KODAMAGraphOptions& options
+) {
+#if defined(KODAMA_ENABLE_METAL)
+  KODAMAGraphOptions metal_options = options;
+  metal_options.backend = Backend::Metal;
+  return run_public_kodama_graph(x, metal_options, &spatial);
+#else
+  (void)x;
+  (void)spatial;
   (void)options;
   throw std::runtime_error("KODAMAGraph_METAL requires an Apple Metal build.");
 #endif
@@ -2614,6 +3761,35 @@ KODAMAGraphResult KODAMAGraph(
   return KODAMAGraph_CPU(x, options);
 }
 
+KODAMAGraphResult KODAMAGraph(
+  MatrixView x,
+  MatrixView spatial,
+  const KODAMAGraphOptions& options
+) {
+  if (options.backend == Backend::CUDA) return KODAMAGraph_CUDA(x, spatial, options);
+  if (options.backend == Backend::Metal) return KODAMAGraph_METAL(x, spatial, options);
+  return KODAMAGraph_CPU(x, spatial, options);
+}
+
+NeighborGraph KODAMAGraphMaterialize(const KODAMAGraphResult& graph) {
+  if (!graph.knn.indices.empty()) return graph.knn;
+  if (!graph.handle || !graph.handle->impl_) {
+    throw std::invalid_argument("KODAMAGraphMaterialize requires a valid graph handle.");
+  }
+  std::lock_guard<std::mutex> lock(graph.handle->impl_->mutex);
+  NeighborGraph materialized;
+  if (!graph.handle->impl_->host_graph.indices.empty()) {
+    materialized = graph.handle->impl_->host_graph;
+  } else if (graph.handle->impl_->resident && graph.handle->impl_->resident->valid()) {
+    graph.handle->impl_->resident->reset_graph();
+    materialized = graph.handle->impl_->resident->download();
+  } else {
+    throw std::runtime_error("The graph handle has no materializable graph storage.");
+  }
+  make_graph_indices_one_based(materialized);
+  return materialized;
+}
+
 void KODAMADissimilarityInPlace(
   NeighborGraph& graph,
   const std::vector<int>& run_labels,
@@ -2623,6 +3799,9 @@ void KODAMADissimilarityInPlace(
   int n_threads,
   int gpu_device
 ) {
+#if !defined(KODAMA_ENABLE_CUDA)
+  (void)gpu_device;
+#endif
   if (runs <= 0 || samples <= 0 || graph.neighbors <= 0) {
     throw std::invalid_argument("KODAMADissimilarityInPlace requires a non-empty graph and label matrix.");
   }
@@ -2656,6 +3835,30 @@ void KODAMADissimilarityInPlace(
 #else
   if (backend == Backend::CUDA) {
     throw std::runtime_error("KODAMADissimilarityInPlace CUDA backend is not enabled.");
+  }
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+  if (backend == Backend::Metal) {
+    detail::NativeMetalKODAMAGraph resident =
+      detail::metal_build_resident_kodama_graph(graph, samples, 1);
+    detail::metal_prepare_resident_results(resident, runs);
+    for (int run = 0; run < runs; ++run) {
+      const auto begin = run_labels.begin() + static_cast<std::size_t>(run) * samples;
+      detail::metal_store_resident_result_row(
+        resident, std::vector<int>(begin, begin + samples), run, 0);
+    }
+    detail::metal_apply_resident_kodama_dissimilarity(
+      resident,
+      runs,
+      true,
+      true
+    );
+    graph = detail::metal_download_resident_kodama_graph(resident);
+    return;
+  }
+#else
+  if (backend == Backend::Metal) {
+    throw std::runtime_error("KODAMADissimilarityInPlace Metal backend is not enabled.");
   }
 #endif
   apply_kodama_dissimilarity(
@@ -2713,9 +3916,6 @@ KODAMAMatrixResult KODAMAMatrix_METAL(
   KODAMAMatrixOptions metal_options = options;
   metal_options.backend = Backend::Metal;
   metal_options.knn.backend = Backend::Metal;
-  if (metal_options.knn.index_type != KNNIndexType::MetalIVFFlat) {
-    metal_options.knn.index_type = KNNIndexType::MetalExact;
-  }
   metal_options.pls.backend = Backend::Metal;
   return run_kodama_matrix(x, starting_labels, constrain, fixed, metal_options);
 #else
@@ -2763,15 +3963,28 @@ KODAMAMatrixResult KODAMAMatrix(
     graph.visual_init.opentsne.size() == x.rows * 2;
 
   KODAMAMatrixOptions prepared_options = options;
-  prepared_options.compute_visual_init = !reuse_visual_init;
-  KODAMAMatrixResult result = KODAMAMatrixFromGraphData(
+  prepared_options.compute_visual_init = options.compute_visual_init && !reuse_visual_init;
+  if (prepared_options.backend == Backend::Metal) {
+    prepared_options.knn.backend = Backend::Metal;
+    prepared_options.pls.backend = Backend::Metal;
+  } else if (prepared_options.backend == Backend::CUDA) {
+    prepared_options.knn.backend = Backend::CUDA;
+    prepared_options.pls.backend = Backend::CUDA;
+  }
+  KODAMAMatrixResult result = run_kodama_matrix(
     x,
-    graph.knn,
     starting_labels,
     constrain,
     fixed,
-    prepared_options
+    prepared_options,
+    graph.knn.indices.empty() ? nullptr : &graph.knn,
+    &graph
   );
+  result.graph_backend = graph.backend;
+  result.graph_index_type = graph.index_type;
+  result.graph_ivf_nlist = graph.ivf_nlist;
+  result.graph_ivf_nprobe = graph.ivf_nprobe;
+  result.graph_ivf_pilot_recall = graph.ivf_pilot_recall;
   if (reuse_visual_init) {
     result.visual_init = graph.visual_init;
     result.has_visual_init = true;
@@ -2790,10 +4003,11 @@ KODAMAMatrixResult KODAMAMatrix(
   if (graph.samples < 2) {
     throw std::invalid_argument("KODAMAMatrix requires a non-empty KODAMAGraphResult.");
   }
+  const NeighborGraph materialized = KODAMAGraphMaterialize(graph);
   KODAMAMatrixOptions prepared_options = options;
   prepared_options.compute_visual_init = false;
   KODAMAMatrixResult result = KODAMAMatrixFromGraph(
-    graph.knn,
+    materialized,
     graph.samples,
     starting_labels,
     constrain,
@@ -2908,9 +4122,6 @@ KODAMAMatrixResult KODAMAMatrixFromGraphData_METAL(
   KODAMAMatrixOptions metal_options = options;
   metal_options.backend = Backend::Metal;
   metal_options.knn.backend = Backend::Metal;
-  if (metal_options.knn.index_type != KNNIndexType::MetalIVFFlat) {
-    metal_options.knn.index_type = KNNIndexType::MetalExact;
-  }
   metal_options.pls.backend = Backend::Metal;
   KODAMAMatrixResult result = run_kodama_matrix(x, starting_labels, constrain, fixed, metal_options, &graph);
   result.graph_feature_seconds = 0.0;
@@ -2981,9 +4192,6 @@ KODAMAMatrixResult KODAMAMatrixFromGraph_METAL(
   KODAMAMatrixOptions metal_options = options;
   metal_options.backend = Backend::Metal;
   metal_options.knn.backend = Backend::Metal;
-  if (metal_options.knn.index_type != KNNIndexType::MetalIVFFlat) {
-    metal_options.knn.index_type = KNNIndexType::MetalExact;
-  }
   metal_options.pls.backend = Backend::Metal;
   detail::Timer feature_timer;
   std::vector<float> features = KODAMAGraphFeatures_CPU(graph, samples, metal_options);

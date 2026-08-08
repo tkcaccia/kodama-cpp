@@ -46,6 +46,49 @@ bool metal_backend_available() {
   return false;
 }
 
+std::vector<float> metal_umap_optimize(
+  const std::vector<int>&,
+  const std::vector<float>&,
+  const std::vector<float>&,
+  int,
+  int,
+  int,
+  int,
+  float,
+  float,
+  float,
+  float,
+  float,
+  std::uint32_t
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+std::vector<float> metal_opentsne_optimize(
+  const std::vector<int>&,
+  const std::vector<int>&,
+  const std::vector<float>&,
+  const std::vector<float>&,
+  int,
+  int,
+  int,
+  float,
+  float,
+  float,
+  bool,
+  float,
+  float,
+  float,
+  float,
+  std::uint32_t
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+int metal_recommended_worker_count(std::size_t, int) {
+  return 1;
+}
+
 void metal_set_pls_residency_epoch(std::uint64_t) {}
 
 NativeKNNResult metal_exact_knn_search(
@@ -59,6 +102,16 @@ NativeKNNResult metal_exact_knn_search(
   const std::vector<int>&
 ) {
   throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+NativeKNNResult metal_spatial_grid_self_knn(
+  const std::vector<float>&,
+  int,
+  int,
+  int,
+  bool
+) {
+  throw std::runtime_error("Metal spatial grid KNN is unavailable in this build.");
 }
 
 NativeKNNResult metal_ivf_knn_search(
@@ -130,10 +183,29 @@ NativeMetalKODAMAGraph metal_build_resident_kodama_graph(
   throw std::runtime_error("The Metal backend is not available in this build.");
 }
 
-std::vector<int> metal_project_landmark_labels(
-  const NativeMetalKODAMAGraph&,
-  const std::vector<char>&,
+NativeMetalKODAMAGraph metal_build_resident_kodama_graph_ivf(
+  const std::vector<float>&,
+  int,
+  int,
+  int,
+  DistanceMetric,
+  int,
+  int,
+  int,
+  MetalIVFStats*
+) {
+  throw std::runtime_error("Metal backend is unavailable in this build.");
+}
+
+void metal_prepare_resident_results(NativeMetalKODAMAGraph&, int) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+void metal_project_landmark_labels_to_result(
+  NativeMetalKODAMAGraph&,
   const std::vector<int>&,
+  const std::vector<int>&,
+  int,
   int,
   int,
   int
@@ -141,9 +213,32 @@ std::vector<int> metal_project_landmark_labels(
   throw std::runtime_error("The Metal backend is not available in this build.");
 }
 
+void metal_store_resident_result_row(
+  NativeMetalKODAMAGraph&, const std::vector<int>&, int, int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+void metal_constrain_resident_result_row(
+  NativeMetalKODAMAGraph&, const std::vector<int>&, int, int, int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+std::vector<int> metal_download_resident_results(
+  const NativeMetalKODAMAGraph&, int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+std::vector<int> metal_download_resident_result_row(
+  const NativeMetalKODAMAGraph&, int, int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
 void metal_apply_resident_kodama_dissimilarity(
   NativeMetalKODAMAGraph&,
-  const std::vector<int>&,
   int,
   bool,
   bool
@@ -157,6 +252,16 @@ NeighborGraph metal_download_resident_kodama_graph(
   throw std::runtime_error("The Metal backend is not available in this build.");
 }
 
+void metal_replace_resident_kodama_graph(
+  NativeMetalKODAMAGraph&, const NeighborGraph&
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+void metal_reset_resident_kodama_graph(NativeMetalKODAMAGraph&) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
 std::vector<float> metal_matrix_multiply(
   const std::vector<float>&,
   int,
@@ -165,7 +270,33 @@ std::vector<float> metal_matrix_multiply(
   int,
   int,
   bool,
+  bool,
   bool
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+MetalPLSScoreStatistics metal_pls_score_statistics(
+  const std::vector<float>&,
+  int,
+  int,
+  const std::vector<float>&,
+  int,
+  const std::vector<int>&,
+  int
+) {
+  throw std::runtime_error("The Metal backend is not available in this build.");
+}
+
+std::vector<int> metal_pls_lda_predict(
+  const std::vector<float>&,
+  int,
+  int,
+  const std::vector<float>&,
+  int,
+  const std::vector<float>&,
+  const std::vector<float>&,
+  const std::vector<int>&
 ) {
   throw std::runtime_error("The Metal backend is not available in this build.");
 }

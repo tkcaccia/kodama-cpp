@@ -142,6 +142,15 @@ KODAMA_CPP_BUILD_DIR="$(cd ../../build && pwd)" \
 R CMD INSTALL .
 ```
 
+During configuration, the wrapper records the selected core-library path and
+checksums of the core archive and public headers. If any of them changes, both
+Rcpp bridge objects are rebuilt and the package is relinked automatically; an
+unchanged core retains normal incremental-install behavior. This prevents a
+development reinstall from silently loading a wrapper linked against an older
+CPU, CUDA, or Metal build. `R CMD INSTALL --preclean` remains useful for a
+fully clean diagnostic build, but is not required merely because the selected
+core was rebuilt or changed.
+
 CUDA install uses the CUDA-enabled build directory and the runtime library
 environment. On a Linux machine with a conda/micromamba CUDA environment:
 
@@ -210,9 +219,12 @@ kk <- KODAMA.matrix(
 )
 
 KODAMA.timing(kk)
+kk$landmark_seconds
 head(kk$best_labels)
 
-prepared <- KODAMA.graph(x, k = 30, backend = "cpu")
+prepared <- KODAMA.graph(
+  x, k = 30, backend = "cpu", storage = "handle"
+)
 stopifnot(is.null(prepared$data))
 kk_from_graph <- KODAMA.matrix(
   graph = prepared,
@@ -230,8 +242,18 @@ pls_from_graph_and_x <- KODAMA.matrix(
 )
 ```
 
-The prepared object contains graph arrays and backend-matched UMAP/openTSNE PCA
-starts, but never retains the raw matrix. `KODAMA.matrix()` reserves `data` for
+With `storage = "handle"`, the prepared object owns one native float32 graph
+without creating R index and distance matrices. It can be passed directly to
+`KODAMA.matrix()`, `KODAMA.visualization()`, and `KODAMA.clustering()`; call
+`KODAMA.graph.materialize(prepared)` only when R matrices are required.
+`storage = "handle"` is the default; request `storage = "matrix"` explicitly
+when R arrays are required. Both forms carry
+backend-matched UMAP/openTSNE PCA starts and never retain the raw matrix.
+External handles are process-local; materialize the graph before saving it for
+use in another R session.
+`KODAMA.matrix(..., return.graph = FALSE)` returns labels only and omits the
+otherwise-unused final graph-distance correction.
+`KODAMA.matrix()` reserves `data` for
 the raw matrix and `graph` for a prepared graph or bare `indices`/`distances`
 list. Either can be supplied alone, or both can be supplied together.
 
@@ -239,6 +261,10 @@ For CUDA verification, switch `backend = "cuda"` after confirming that the R
 session can load the same CUDA Toolkit libraries used by the C++ build.
 For native KNN, PLS-LDA, Core, matrix, graph, and PCA verification on macOS,
 install against the Metal build and use `backend = "metal"`.
+For CUDA or Metal `KODAMA.matrix()`, set `n.cores = 0` to let the core select
+independent `M` lanes from device capacity and backend-specific workspace
+memory. Positive values remain explicit. The returned scheduler fields record
+the selected lane count and estimated memory per lane.
 
 ## Preprocessing and example manifolds
 
@@ -317,8 +343,11 @@ calculation. The observable fields are `graph_builds` and
 `timing$visual_init_seconds`. Only `knn` is serialized; the former duplicate
 `base_knn` payload has been removed. `knn_is_kodama_corrected` and
 `graph_storage_bytes` expose graph state and retained native capacity. An
-explicit `init` still has precedence,
-followed by a stored start whose backend matches the requested CPU or CUDA
+accelerator call returns labels and scores without materializing resident graph
+matrices by default. Set `return.graph = TRUE` when the result will be passed
+to `KODAMA.visualization()` or the graph matrices are otherwise required.
+Explicit `init` still has precedence,
+followed by a stored start whose backend matches the requested CPU, CUDA, or Metal
 visualization backend, then a start computed from `raw.data`. For example,
 after changing backends use:
 
@@ -353,5 +382,4 @@ CUDA build directory.
 
 If the Metal backend is unavailable, confirm that `kodama-cpp` was configured
 with `-DKODAMA_ENABLE_METAL=ON` and that the wrapper was installed against the
-same Metal build. UMAP and openTSNE currently expose CPU and CUDA backends;
-passing Metal is intentionally rejected rather than relabeled CPU execution.
+same Metal build. UMAP and FFT-grid openTSNE both expose native Metal paths.

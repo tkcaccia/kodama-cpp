@@ -71,7 +71,7 @@ def build_main_tex() -> None:
         \maketitle
 
         \begin{abstract}
-        KODAMA discovers latent structure by maximizing held-out label predictability. This standalone C++17 implementation is shared by thin R and Python wrappers. Native multicore CPU, NVIDIA CUDA, and Apple Metal backends provide float32 KNN and SIMPLS--LDA without silent fallback. The library also introduces prediction-guided label evolution and exact-quota landmark projection. Tests distinguish numerical consistency and systems performance from external-label diagnostics.
+        KODAMA discovers latent structure by maximizing held-out label predictability. This standalone C++17 implementation is shared by thin R and Python wrappers. Native multicore CPU, NVIDIA CUDA, and Apple Metal backends provide float32 KNN without silent fallback and introduce a label-aware SIMPLS route followed by LDA in latent component space. The library also introduces prediction-guided label evolution and exact-quota landmark projection. In an explicitly exploratory matched CUDA analysis, PLS--LDA KODAMA improved UMAP truth-label silhouette on 6 of 10 datasets (median $+0.025$, bootstrap 95\% interval $[-0.067,+0.084]$); KNN and openTSNE were less favorable. We therefore separate systems validation from external-label diagnostics and make no universal visualization claim.
         \end{abstract}
 
         \begin{keywords}
@@ -82,9 +82,8 @@ def build_main_tex() -> None:
 
         KODAMA treats labels as optimization variables: useful labels can be reproduced on held-out samples. An ensemble of optimized vectors then corrects neighborhood dissimilarities \citep{cacciatore2014kodama,cacciatore2017kodama}. Unlike stability analysis or prediction strength, predictability is inside the search and no observed labels anchor it \citep{benhur2002stability,tibshirani2005predictionstrength}.
 
-        Repeated cross-validation makes reusable state a systems concern. Our four contributions are \textbf{(1)} a typed C++ core shared by R and Python; \textbf{(2)} CPU, CUDA, and Metal under one float32 contract; \textbf{(3)} prediction-guided evolution with adaptive proposals, degeneracy guards, and error-scaled cooling; and \textbf{(4)} exact-quota landmark projection, formalizing the principle introduced by \citet{abdelshafy2025landmarks}.
+        Repeated cross-validation makes reusable state a systems concern. Our five contributions are \textbf{(1)} a typed C++ core shared by R and Python; \textbf{(2)} CPU, CUDA, and Metal under one float32 contract; \textbf{(3)} a new label-aware SIMPLS plus latent-space LDA evaluator alongside KNN; \textbf{(4)} prediction-guided evolution with adaptive proposals, degeneracy guards, and error-scaled cooling; and \textbf{(5)} exact-quota landmark projection for scalable, reproducible subsampling.
 
-        \clearpage
         \section{KODAMA objective and algorithm}
 
         For data $X\in\mathbb{R}^{n\times p}$, labels $y$, folds $\Pi$, and classifier family $\mathcal F$, let
@@ -105,7 +104,7 @@ def build_main_tex() -> None:
         \begin{figure}[h!]
         \hrule\vspace{2pt}
         \begin{minipage}{0.98\linewidth}
-        \footnotesize
+        \scriptsize
         \textbf{Algorithm 1: KODAMA ensemble}\\
         \textbf{Input:} $X,\mathcal F,M,T,L,K_0,\Pi,s$.\quad \textbf{Output:} $G,C,A_{\rm best},Z_U,Z_T$.
         \begin{tabbing}
@@ -123,51 +122,51 @@ def build_main_tex() -> None:
         $G\leftarrow\textsc{AgreementCorrectionInPlace}(G_0,C)$; \textbf{return} $G,C,A_{\rm best},Z_U,Z_T$
         \end{tabbing}
         \end{minipage}
-        \vspace{-4pt}\hrule
-        \caption{Compact pseudocode. The scaffold is common; the indicated coarsening and score term are PLS--LDA-specific.}
+        \vspace{2pt}\hrule
+        \caption{Compact pseudocode; PLS--LDA-specific steps are marked.}
         \label{alg:kodama}
         \end{figure}
 
-        \clearpage
         \section{Standalone heterogeneous implementation}
+
+        The typed C++ API owns folds, proposals, classifiers, landmark projection, graph correction, and metadata; R and Python only convert host objects. CPU provides parallel HNSW over contiguous float32 storage \citep{malkov2020hnsw}. CUDA and Metal provide exact/IVF search, k-means, label-aware SIMPLS--LDA, PCA, and persistent workspaces. Large accelerator graphs use one resident IVF-Flat index whose list count is independent of the probe bound; a fixed exact pilot raises \texttt{nprobe} until recall reaches 0.99. Unsupported backends raise instead of silently falling back.
+
+        \texttt{KODAMA.graph} prepares one graph and backend-matched PCA starts without retaining the raw matrix. \texttt{KODAMA.matrix} accepts raw features, this prepared object, or a bare paired $n\times k$ graph. PLS--LDA avoids dense one-hot responses, compacts active labels, and reuses backend-specific fold matrices and float32 workspaces. Metal retains a bounded fold working set and schedules independent $M$ runs against the device memory budget. The API also exposes both CV kernels, both core optimizers, PCA, and float32 UMAP/openTSNE on CPU, CUDA, and Metal \citep{mcinnes2018umap,vandermaaten2008tsne}. Full architecture, graph-only semantics, numerical safeguards, implementation changes, and wrapper contracts are documented in the supplement.
 
         \begin{figure}[h!]
         \centering
-        \includegraphics[width=0.68\linewidth]{kodama_cpp_architecture.png}
-        \caption{The C++17 core owns algorithm state; R and Python are thin adapters. For a fixed classifier, backends share folds, policy, component semantics, and typed results.}
-        \label{fig:architecture}
+        \includegraphics[width=0.56\linewidth]{jmlr_imagenet_comparison_20260807/imagenet_classic_vs_kodama.png}
+        \caption{Illustrative ImageNet layouts ($n=1{,}281{,}167$, 1,000 reference classes; colors repeat), CUDA seed 4. Classic embeddings use the raw feature graph; KODAMA panels use the KNN-corrected graph at $M=T=100$. Three-seed medians show increased sampled trustworthiness (openTSNE 0.680 to 0.694; UMAP 0.612 to 0.686) but lower truth-label silhouette (0.615 to 0.103; 0.629 to 0.178). Quantitative comparisons use paired metric samples; a frozen rerun will render the same plotting indices in all panels.}
+        \label{fig:imagenet}
         \end{figure}
-
-        The typed C++ API owns folds, proposals, classifiers, landmark projection, graph correction, and metadata; wrappers only convert host objects and results. CPU supplies parallel HNSW construction over contiguous float32 storage \citep{malkov2020hnsw}, with a deterministic connected base seed before lock-protected concurrent insertion and querying, plus SIMPLS--LDA, PCA, graph operations, and embeddings. CUDA supplies exact/IVF KNN, batched k-means, label-aware SIMPLS--LDA, PCA, and embeddings. Metal supplies exact/IVF KNN, k-means, MPS-assisted SIMPLS--LDA, and PCA. Accelerator IVF construction and persistent indices retain training data and index state on-device. During KODAMA, one resident full-data graph and persistent worker-lane buffers retain fold layouts, labels, projections, voting state, and PLS--LDA workspaces across proposal cycles; contents that depend on a new landmark sample are refreshed in place once per $M$ run. Unsupported backends raise an error rather than silently falling back.
-
-        PLS--LDA forms class cross-products without dense one-hot responses, compacts active labels, reuses fold workspaces, and evaluates the requested feasible component count without model selection. \texttt{KODAMA.graph} prepares one full-data neighbor graph and separately scaled backend-matched UMAP/openTSNE PCA starts. Its result owns only graph arrays, starts, and metadata: it never retains the raw matrix. The wrappers reserve \texttt{data} for raw features and \texttt{graph} for a prepared object or bare paired $n\times k$ index/distance graph; either can be supplied alone or both can be supplied together, and raw-only input invokes graph preparation internally. Graph-only execution uses disclosed self-tuning normalized-Laplacian geometry, including the PLS--LDA spectral surrogate, whereas supplying raw features retains ordinary data-input PLS--LDA. Fixed-graph KNN reuses supplied neighborhoods and is distinguished from data-native KNN rather than asserted to reproduce its stochastic trajectory. Final compaction and agreement correction mutate the single graph owner in place. The API also exposes both CV kernels, both core optimizers, PCA, and float32 UMAP/openTSNE \citep{mcinnes2018umap,vandermaaten2008tsne}. Explicit visualization starts take precedence, then backend-matched stored starts, then raw-data recomputation and graph-only fallbacks; provenance is reported. Derivations, safeguards, pseudocode, evidence, and API contracts are in the supplement.
 
         \section{Validation, availability, and scope}
 
         \begin{table}[h!]
-        \caption{Matched runtime and held-out accuracy. Times are seconds; KODAMA reports median raw CV accuracy for $M=T=100$.}
+        \caption{Systems validation and exploratory matched classic-versus-KODAMA visualization results. Silhouette changes are KODAMA minus classic fastEmbedR medians over seeds 4, 17, and 42; $M=T=100$.}
         \label{tab:validation}
         \centering\scriptsize
-        \begin{tabular}{lllrrrr}
+        {\setlength{\tabcolsep}{3pt}\begin{tabular}{llllr}
         \toprule
-        Scope & Data & Accel. & CPU & Device & Speedup & Accuracy \\
+        Scope & Comparison & Backend & Matched data & Result \\
         \midrule
-        KNNCV & MNIST & CUDA & 76.769 & 4.753 & 16.2 & .974/.973 \\
-        PLSLDACV & MetRef & CUDA & 1.294 & 0.308 & 4.20 & .992/.993 \\
-        KODAMA PLS--LDA & MetRef & CUDA & 341.648 & 270.408 & 1.26 & .9924/.9924 \\
-        KNNCV & MetRef & Metal & 11.145 & 0.026 & 425.0 & .827/.827 \\
-        PLSLDACV & MetRef & Metal & 0.790 & 0.202 & 3.90 & .991/.990 \\
+        Kernel & KNNCV, MNIST CPU/device & CUDA & one dataset & 16.2x; .974/.973 acc. \\
+        Kernel & PLSLDACV, MetRef CPU/device & CUDA & one dataset & 4.20x; .992/.993 acc. \\
+        Predecessor & MetRef PLS--DA (5 comp.), $M=T=100$ & CPU1 & contextual & 965.8 s; CV 1.000/.975 \\
+        Current & MetRef PLS--LDA (50 comp.), $M=T=100$ & CPU4/CUDA & contextual & 316.3/270.4 s \\
+        Optimizer & shared graph CPU4/device & Metal & 15 paired cells & 1.83x [1.53,2.12] \\
+        Pipeline & flow18 graph, exact/resident-IVF & CUDA & one dataset & 296.5/25.9 s; 11.5x \\
+        Visualization & KNN KODAMA vs UMAP & CUDA & 10 datasets & 2/10 improved; $-0.094$ \\
+        Visualization & PLS--LDA KODAMA vs UMAP & CUDA & 10 datasets & 6/10 improved; $+0.025$ \\
+        Visualization & KNN KODAMA vs openTSNE & CUDA & 10 datasets & 0/10 improved; $-0.084$ \\
+        Visualization & PLS--LDA KODAMA vs openTSNE & CUDA & 10 datasets & 3/10 improved; $-0.056$ \\
         \bottomrule
-        \end{tabular}
+        \end{tabular}}
         \end{table}
 
-        Table~\ref{tab:validation} separates kernels from the complete KODAMA call. CUDA and Metal preserved closely matched held-out accuracy, while end-to-end acceleration was smaller because repeated orchestration and graph work remain. Finite-precision ties may select different stochastic trajectories, so numerical consistency is assessed by contracts and paired metrics rather than bitwise label identity. Extended runtime, memory, landmark, $M/T$, visualization, and prior-version comparisons are reported in the supplement.
+        Table~\ref{tab:validation} separates acceleration from downstream structure. The historical MetRef PLS--DA route required 965.8 s at its five-component default; independently retained current 50-component PLS--LDA runs required 316.3 s on CPU4 and 270.4 s on CUDA. This is a contextual product comparison, not an implementation-only speedup: evaluator, components, search, parallelism, and retained seeds differ. On flow18 ($n=1{,}000{,}021$), resident IVF reduced full graph time from 296.5 to 25.9 s. The matched three-seed archive contains 10 datasets per classifier. PLS--LDA UMAP was the only positive cross-dataset median ($+0.025$, 95\% bootstrap interval $[-0.067,+0.084]$); KNN openTSNE was worse on all 10 (Holm $p=0.0078$). Figure~\ref{fig:imagenet} exposes the corresponding ImageNet trade-off instead of selecting only a favorable example. Labels were withheld during optimization. KODAMA R 2.4.1/2.4 is the sole predecessor; the supplement also reports matched MetRef KNN. All per-dataset timings, sensitivity analyses, and implementation evidence are in the supplement.
 
-        The fixed-$M=100$ sensitivity study also shows why classifier-independent scoring is not claimed: at $T=100$, median active-class counts were 9 versus 24 on MetRef and 32 versus 71 on USPS for KNN versus PLS--LDA. These observations establish different fragmentation regimes, but because they are not penalty-on/off ablations they do not establish the causal benefit of the PLS--LDA term.
-
-        CTest and wrapper suites exercise float32 numerics, strict backend identity, graph and PCA contracts, backend-matched visualization initialization, landmark counts, and the candidate-\texttt{0.1.0} API. A controlled CPU openTSNE comparison against the pinned fastEmbedR source was coordinate-identical. GitHub Actions covers Linux/macOS CPU, native Metal, wrappers, coverage, and API documentation; CUDA is validated on a dedicated NVIDIA host. The audited CPU snapshot reached 63.58\% line and 57.03\% branch coverage.
-
-        The MIT-licensed core is available at \url{https://github.com/tkcaccia/kodama-cpp}; the R wrapper is at \url{https://github.com/tkcaccia/kodama-r}, and tested Python wrapper source accompanies the core pending its standalone repository. Repeated CV remains the dominant cost. Graph and classifier workspaces are device resident, but landmark selection, proposal decisions, and compact result collection remain host orchestrated; approximate-neighbor ties can alter trajectories, and CUDA graph construction currently supports $k\leq256$.
+        Tests cover float32 numerics, backend identity, graph/PCA contracts, visualization initialization, wrappers, and direct public accelerator entry points; physical Metal and current-source CUDA execution are recorded separately from compile-only checks. The MIT repositories are \href{https://github.com/tkcaccia/kodama-cpp}{kodama-cpp} and \href{https://github.com/tkcaccia/kodama-r}{kodama-r}. Public snapshots checked on 6 August 2026 were \texttt{0b8b873} and \texttt{7090592}. A tagged confirmatory rerun remains a submission prerequisite; fragmentation, coverage, timings, and limitations are detailed in the supplement.
 
         \newpage
         \bibliography{kodama_cpp_refs}
@@ -228,7 +227,7 @@ def build_cover_letter() -> None:
         doc,
         "Python binding source",
         "https://github.com/tkcaccia/kodama-cpp/tree/main/split-repos/kodama-python "
-        "(standalone repository publication pending)",
+        "(versioned and tested with the core source)",
     )
     add_label_value(doc, "Software version", f"{SOFTWARE_VERSION} release candidate")
     add_label_value(doc, "Reviewed baseline", REVIEWED_BASELINE)
@@ -243,10 +242,11 @@ def build_cover_letter() -> None:
     doc.add_heading("Significance and software contribution", level=1)
     doc.add_paragraph(
         "The submission preserves KODAMA's cross-validated label-predictability signal while making "
-        "four contributions: a standalone C++17 core for thin R/Python wrappers; native and observable "
-        "CPU/CUDA/Metal execution; guided label evolution based on out-of-fold predictions and class "
-        "transitions; and an exact-quota landmark-projection strategy that generalizes the landmark "
-        "idea introduced in the KODAMA bioRxiv work. The repository contains installation instructions, "
+        "five contributions: a standalone C++17 core for thin R/Python wrappers; native and observable "
+        "CPU/CUDA/Metal execution; label-aware SIMPLS followed by latent-space LDA as a new KODAMA "
+        "evaluator; guided label evolution based on out-of-fold predictions and class transitions; "
+        "and an exact-quota landmark-projection strategy for scalable, reproducible subsampling. "
+        "The repository contains installation instructions, "
         "API examples, explicit pseudocode, tests, benchmark drivers, a public API snapshot, and a "
         "machine-checkable licensing/provenance audit."
     )
@@ -255,12 +255,15 @@ def build_cover_letter() -> None:
     doc.add_paragraph(
         "The KODAMA method was published by Cacciatore, Luchinat, and Tenori in PNAS (2014), and the "
         "historical R package was described by Cacciatore et al. in Bioinformatics (2017). Prior "
-        "publication of the method is disclosed. The landmark-projection principle was subsequently "
-        "introduced in the 2025 KODAMA bioRxiv preprint. This submission concerns its general formalization "
-        "and the new standalone software: a C++17 core independent of R, native CUDA and Metal backends, "
+        "publication of the method is disclosed. This submission concerns the new standalone software: "
+        "a C++17 core independent of R, native CUDA and Metal backends, "
         "guided search mechanics, exact-quota landmark selection, float32 label-aware SIMPLS/LDA, "
-        "package-owned neighbor search, strict backend metadata, and separately maintained R/Python bindings. "
-        "The detailed delta is recorded in docs/previous-version-delta.md. The prior papers and preprint "
+        "package-owned neighbor search, strict backend metadata, and thin R/Python bindings. "
+        "KODAMA R 2.4.1/2.4 is the sole previous-version comparator; later KODAMA releases are excluded from "
+        "performance, quality, and methodological comparisons. The matched KNN comparison is complemented by "
+        "a contextual MetRef PLS-DA benchmark. It is reported without a matched-speedup claim because the new "
+        "implementation introduces label-aware SIMPLS followed by latent-space LDA. "
+        "The detailed delta is recorded in docs/previous-version-delta.md. The prior peer-reviewed papers "
         "will be supplied as supplementary material."
     )
 
@@ -312,6 +315,12 @@ def build_readiness_report() -> None:
     doc = Document()
     supplement.apply_styles(doc)
     supplement.apply_compact_memo_styles(doc)
+    section = doc.sections[0]
+    section.top_margin = Inches(0.55)
+    section.bottom_margin = Inches(0.55)
+    section.left_margin = Inches(0.6)
+    section.right_margin = Inches(0.6)
+    doc.styles["Normal"].font.size = Pt(8.8)
     supplement.add_title(
         doc,
         "JMLR MLOSS reviewer comments and response status",
@@ -323,21 +332,26 @@ def build_readiness_report() -> None:
         "represented as complete until the remaining benchmark matrix, tagged archive, and author declarations are available."
     )
     rows = [
-        ("Legacy KNN comparison", "A matched MetRef KNN benchmark compares the KNN-capable KODAMA 2.4.1 release with kodama-cpp single-core CPU, four-core CPU, and CUDA paths. It is not presented as the current CRAN baseline.", "Completed on chiamaka"),
-        ("Current CRAN comparison", "A separately labeled MetRef M=20/Tcycle=20 systems check compares KODAMA 3.3 CPU4 with kodama-cpp PLS-LDA CPU4. It reports unfavorable results unchanged and explicitly states classifier non-parity and the CUDA k limit.", "Completed on chiamaka"),
+        ("KODAMA 2.4.1/2.4 comparison", "MetRef includes a classifier-matched KNN benchmark and a separately labeled historical PLS-DA benchmark. The latter contextualizes the predecessor but is not a matched speedup baseline for the new SIMPLS plus latent-space LDA route. Later KODAMA releases are excluded.", "Historical PLS-DA rerun completed on chiamaka"),
         ("Frozen public API", "Version 0.1.0 macros, SemVer policy, CMake package version, wrapper versions, and a compile-link API snapshot test are present.", "Completed locally"),
-        ("Version/tag/archive", "Release checklist and clean-tag archive script prevent an uncommitted or dirty artifact from being cited; a DOI is optional.", "External tag and deposit pending"),
+        ("Version/tag/archive", "The manuscript records public core commit 0b8b873 and R-wrapper commit 7090592. A release checklist and clean-tag archive script prevent an uncommitted or dirty artifact from being cited; a DOI is optional.", "External tag and deposit pending"),
         ("License provenance", "Pinned upstream snapshots, per-component licensing, SPDX tests, retained licenses, and the Metal Apache exception are documented.", "Engineering audit complete; coauthor contribution confirmation remains"),
         ("MLOSS page budget", "The detailed manuscript is retained as a technical supplement; a separate official-style main paper targets four description pages plus references.", "Completed; four description pages plus references verified"),
         ("CUDA release build", "Commit a32f718 passed all four configured license, numerical/core, public-API, and float32 smoke tests in the CUDA 13.0 build on chiamaka.", "Completed on chiamaka"),
         ("Continuous integration", "GitHub Actions builds and tests the CPU core on Linux/macOS, native Metal on macOS, and the R/Python wrappers on Ubuntu. Separate coverage and API-documentation workflows passed for a32f718.", "Completed at a32f718"),
         ("User documentation", "A compact C++/R/Python walkthrough and generated Doxygen API are published through GitHub Pages.", "Completed and URL verified"),
         ("Active user community", "The cover letter reports dated CRANlogs evidence for the predecessor R package and explicitly discloses that the new library has no public adoption metrics yet.", "Independent kodama-cpp usage evidence pending"),
-        ("Python publication", "The tested Python wrapper is included in the public core repository and exercised by CI.", "Standalone public repository pending"),
-        ("Coverage depth", "LLVM reports 63.58% line and 57.03% branch CPU coverage; hardware-specific tests cover Metal and manually validated CUDA paths.", "Substantial state-machine, graph, PLS, and CUDA audit expansion pending"),
+        ("Local wrapper release checks", "R CMD check --as-cran passed with no errors or warnings and one environment-only macOS detritus NOTE; an isolated wheel built against the installed core passed eight tests including physical-Metal visualization diagnostics.", "Completed locally on current worktree"),
+        ("Python packaging", "The tested Python wrapper is versioned with the public core repository and exercised by CI.", "Completed for the bundled-source release architecture"),
+        ("Coverage depth", "LLVM reports 80.48% line and 69.33% branch CPU coverage. Dedicated graph/clustering, binary UMAP, matrix orchestration, and resident-IVF ownership/error contracts exercise portable behavior; physical Metal separately covers the native resident index and accelerator failures.", "Improved locally; accelerator implementation branches and CUDA hardware CI remain pending"),
+        ("Large-sample SIMPLS range", "An overflow-only power-norm guard restores all 50 requested components on MNIST70k. Three-replicate CPU/Metal validation, a synthetic regression, AddressSanitizer, and physical Metal CTest pass.", "Local evidence complete; frozen CUDA confirmation pending"),
+        ("CPU PLS-LDA memory traffic", "Training class sums and the latent Gram matrix are streamed without complete score matrices. Four-dataset predictions match; TabulaMuris is 1.47x faster with a 0.587 peak-memory ratio.", "Accepted locally"),
         ("M/Tcycle rationale", "Named MetRef/USPS sweeps report CV accuracy, ARI, active classes, runtime, and agreement-graph convergence; M=100 is justified by ensemble precision rather than external-label tuning.", "Completed on CUDA"),
-        ("Final ablations", "The release driver fixes M=100, Tcycle=100, landmarks, k, ncomp, splitting, graph correction, backend, wrappers, and external metrics before inspection.", "Five-dataset CUDA panel complete; current-CRAN CPU4 check complete; exact current-CRAN CUDA match excluded because k=500 exceeds the native CUDA limit"),
-        ("Visualization claims", "Classic and KODAMA UMAP/openTSNE use the same implementation/settings. The completed five-dataset panel retains positive and negative results, and the paper explicitly declines a universal improvement claim.", "Completed for MetRef, PBMC3K PCA50, OptDigits, USPS, and Macosko2015 retina"),
+        ("Full-cycle local backend controls", "Shared-graph MetRef, USPS, ImageSegmentation, PageBlocks, PenDigits, and SatImage runs use M=Tcycle=100, CPU4 and physical Metal. Raw COIL20 adds paired KNN timing and a censored PLS-LDA stress cell. After the Metal lifecycle correction, SatImage KNN is 1.21x faster than CPU4 and PLS-LDA is 1.93x faster than its pre-fix Metal path, while remaining 3.04x slower than CPU4 in this low-dimensional regime. MetRef independently confirms the correction.", "Completed locally; clean tagged CPU4/CUDA replication pending"),
+        ("Metal lifecycle and graph correction", "A bounded resident fold cache and device-budgeted independent-M scheduler (up to 32 lanes) remove repeated uploads without changing KODAMA or classifier mathematics. MetRef M=T=100 PLS-LDA improved 631.415 to 312.029 s with exact core diagnostics.", "Accepted locally; physical Metal suite passed"),
+        ("Final ablations", "The release driver fixes M=100, Tcycle=100, landmarks, k, ncomp, splitting, graph correction, backend, wrappers, and external metrics before inspection.", "Eleven-dataset CUDA archive analyzed with three seed-matched replicates; replicated KODAMA 2.4.1 predecessor runs and the frozen confirmatory matrix remain required"),
+        ("Visualization claims", "Classic and KODAMA UMAP/openTSNE are paired by dataset, seed, and CUDA profile. Dataset-level seed medians, 100,000-resample bootstrap intervals, exact Wilcoxon and sign tests, and Holm adjustment are reported. The archive is explicitly exploratory and no universal improvement is claimed.", "PLS-LDA UMAP: 6/10, median +0.025, 95% CI [-0.067,+0.084], Holm p=0.557; KNN openTSNE: 0/10, Holm p=0.0078"),
+        ("HPC provenance", "Uploaded run manifests preserve dataset and parameter metadata but record git_commit=NA. The manuscript does not retrospectively assign them to a source revision.", "Clean tagged confirmatory rerun with source checksum and container digest pending"),
         ("Cover letter", "A track-specific draft includes prior-publication disclosure, license, URL, version, software delta, and explicit author-only fields.", "Draft complete; author fields pending"),
         ("Release sustainability", "README, changelog, contribution guide, API policy, prior-version delta, validation protocol, and release checklist are included.", "Completed locally"),
     ]

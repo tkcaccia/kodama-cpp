@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import inspect
+import platform
 
 import numpy as np
 import pytest
@@ -43,6 +44,7 @@ def test_matrix_knn_and_pls_lda_cpu(monkeypatch):
         classifier="knn",
         backend="cpu",
         progress=False,
+        return_graph=True,
     )
     pls = kodama.matrix(
         x,
@@ -66,6 +68,11 @@ def test_matrix_knn_and_pls_lda_cpu(monkeypatch):
     assert knn["visual_init"]["umap"].shape == (90, 2)
     assert knn["visual_init"]["opentsne"].shape == (90, 2)
     assert knn["graph_builds"] == 1
+    assert knn["n_cores"] == 4
+    assert knn["gpu_auto_workers"] is False
+    assert knn["gpu_scheduler_enabled"] is False
+    assert knn["gpu_scheduler_lanes"] == 0
+    assert knn["gpu_worker_memory_estimate_mb"] == 0.0
     assert knn["knn_is_kodama_corrected"] is True
     assert "base_knn" not in knn
     assert knn["graph_storage_bytes"] >= (
@@ -131,6 +138,7 @@ def test_public_api_cpu():
     core_pls = kodama.CorePLSLDA(x, labels, cycles=1, folds=3, ncomp=2, backend="cpu")
     pca = kodama.PCA(x, ncomp=3, backend="cpu", seed=4)
     graph = kodama.graph(x, k=5, backend="cpu")
+    assert "handle" in graph and "indices" not in graph
     emb_default = kodama.visualization(
         graph,
         method="UMAP",
@@ -181,7 +189,7 @@ def test_public_api_cpu():
     assert pca["scores"].dtype == np.float32
     assert pca["precision"] == "float32"
     assert np.all(np.diff(pca["singular_values"]) <= 1e-5)
-    assert graph["indices"].shape == (60, 5)
+    assert kodama.graph_materialize(graph)["indices"].shape == (60, 5)
     assert "data" not in graph
     assert graph["visual_init"]["umap"].shape == (60, 2)
     assert graph["visual_init"]["opentsne"].shape == (60, 2)
@@ -192,8 +200,20 @@ def test_public_api_cpu():
     assert tsne_raw.shape == (60, 2)
     assert emb_default.initialization == "raw_pca"
     assert emb_default.initialization_backend == "cpu"
+    assert emb_default.backend == "cpu"
+    assert emb_default.optimizer == "csr_epoch_schedule"
+    assert emb_default.graph_edges > 0
+    assert emb_default.graph_max_weight == pytest.approx(1.0)
+    assert emb_default.runtime_seconds >= 0.0
     assert emb_raw.initialization == "raw_pca"
     assert tsne_raw.initialization == "raw_pca"
+    assert tsne_raw.backend == "cpu"
+    assert tsne_raw.optimizer in {
+        "opentsne_exact_sparse_knn_float32",
+        "opentsne_fitsne_fft_grid_sparse_knn_float32",
+    }
+    assert tsne_raw.graph_edges == 0
+    assert tsne_raw.graph_max_weight == 0.0
     np.testing.assert_array_equal(emb_default, emb_fuzzy)
     assert np.all(np.isfinite(emb_default))
     assert np.all(np.isfinite(emb_fuzzy))
@@ -243,7 +263,11 @@ def test_matrix_graph_cpu():
     assert pls["parameters"]["graph_feature_mode"] == "laplacian_self_tuning"
     assert any(row["step"] == "graph_feature_seconds" for row in kodama.timing(pls))
 
-    bare = {"indices": g["indices"], "distances": g["distances"]}
+    materialized = kodama.graph_materialize(g)
+    bare = {
+        "indices": materialized["indices"],
+        "distances": materialized["distances"],
+    }
     common = dict(
         M=1,
         Tcycle=1,
@@ -257,10 +281,11 @@ def test_matrix_graph_cpu():
         seed=3,
         progress=False,
     )
-    from_raw = kodama.matrix(data=x, **common)
+    from_raw = kodama.matrix(data=x, return_graph=True, **common)
     from_prepared = kodama.matrix(graph=g, **common)
     from_prepared_data = kodama.matrix(data=x, graph=g, **common)
     from_bare = kodama.matrix(graph=bare, **common)
+    labels_only = kodama.matrix(data=x, **common)
 
     assert from_raw["graph_builds"] == 1
     assert from_prepared["graph_builds"] == 0
@@ -270,6 +295,8 @@ def test_matrix_graph_cpu():
     assert from_prepared_data["parameters"]["graph_uses_data_geometry"] is True
     assert from_bare["parameters"]["graph_uses_data_geometry"] is False
     assert from_prepared_data["res"].shape == from_raw["res"].shape
+    assert labels_only["knn"] is None
+    np.testing.assert_array_equal(labels_only["res"], from_raw["res"])
     np.testing.assert_array_equal(
         from_prepared["visual_init"]["umap"], g["visual_init"]["umap"]
     )
@@ -368,9 +395,11 @@ def test_python_signatures_mirror_r_api():
         "visual_init",
         "progress",
         "apply_kodama_dissimilarity",
+        "return_graph",
     ]
     assert matrix_signature.parameters["spatial_resolution"].default == 0.4
     assert matrix_signature.parameters["spatial_constraint_mode"].default == "kmeans"
+    assert matrix_signature.parameters["return_graph"].default is False
     assert "n_cores" in matrix_signature.parameters
     assert "n_threads" not in matrix_signature.parameters
 
@@ -403,9 +432,11 @@ def test_python_signatures_mirror_r_api():
         "visual_init",
         "progress",
         "apply_kodama_dissimilarity",
+        "return_graph",
     ]
     assert graph_signature.parameters["spatial_resolution"].default == 0.4
     assert graph_signature.parameters["spatial_constraint_mode"].default == "kmeans"
+    assert graph_signature.parameters["return_graph"].default is False
     assert "n_cores" in graph_signature.parameters
 
     visualization_signature = inspect.signature(kodama.visualization)
@@ -436,9 +467,10 @@ def test_python_signatures_mirror_r_api():
         "metric",
         "backend",
         "n_cores",
-        "gpu_device",
-        "seed",
-    ]
+            "gpu_device",
+            "seed",
+            "storage",
+        ]
     assert list(inspect.signature(kodama.kodama_pca).parameters) == [
         "data",
         "ncomp",
@@ -493,3 +525,50 @@ def test_python_high_level_validation_matches_r_choices():
         kodama.visualization(x, method="umap")
     with pytest.raises(TypeError):
         kodama.KNNCV(x, labels, n_threads=1)
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="Metal requires macOS")
+def test_native_metal_umap_and_opentsne():
+    rng = np.random.default_rng(12)
+    x = rng.normal(size=(96, 8)).astype(np.float32)
+    try:
+        layout = kodama.visualization(
+            x,
+            method="UMAP",
+            k=10,
+            n_epochs=10,
+            backend="metal",
+            seed=4,
+        )
+    except RuntimeError as error:
+        if "No Apple Metal device is available" not in str(error):
+            raise
+        pytest.skip("the current process cannot access a Metal device")
+    assert layout.shape == (96, 2)
+    assert layout.initialization == "raw_pca"
+    assert layout.initialization_backend == "metal"
+    assert layout.backend == "metal"
+    assert layout.optimizer == "metal_clean_atomic_edge_sampler"
+    assert layout.graph_edges > 0
+    assert layout.graph_max_weight == pytest.approx(1.0)
+    assert layout.runtime_seconds >= 0.0
+    assert np.all(np.isfinite(layout))
+    tsne = kodama.visualization(
+        x,
+        method="opentsne",
+        k=10,
+        perplexity=3,
+        early_exaggeration_iter=2,
+        n_iter=3,
+        backend="metal",
+        seed=4,
+    )
+    assert tsne.shape == (96, 2)
+    assert tsne.initialization == "raw_pca"
+    assert tsne.initialization_backend == "metal"
+    assert tsne.backend == "metal"
+    assert tsne.optimizer == "metal_opentsne_fft_grid_sparse_knn_float32"
+    assert tsne.graph_edges == 0
+    assert tsne.graph_max_weight == 0.0
+    assert tsne.runtime_seconds >= 0.0
+    assert np.all(np.isfinite(tsne))

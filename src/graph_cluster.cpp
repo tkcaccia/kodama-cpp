@@ -42,6 +42,7 @@ std::vector<float> copy_float32(MatrixView x) {
   return out;
 }
 
+#if defined(KODAMA_ENABLE_CUDA)
 void normalize_rows(std::vector<float>& x, std::size_t rows, std::size_t cols) {
   for (std::size_t i = 0; i < rows; ++i) {
     double norm2 = 0.0;
@@ -54,6 +55,7 @@ void normalize_rows(std::vector<float>& x, std::size_t rows, std::size_t cols) {
     for (std::size_t j = 0; j < cols; ++j) x[i * cols + j] = static_cast<float>(x[i * cols + j] / norm);
   }
 }
+#endif
 
 NeighborGraph build_hnsw_graph(MatrixView x, const GraphClusterOptions& options) {
   if (x.rows < 2 || x.cols < 1) throw std::invalid_argument("KODAMAKNNGraph requires at least two rows.");
@@ -82,6 +84,7 @@ NeighborGraph build_hnsw_graph(MatrixView x, const GraphClusterOptions& options)
 
   NeighborGraph out;
   out.neighbors = k;
+  out.index_base = GraphIndexBase::One;
   out.indices.assign(static_cast<std::size_t>(n) * k, -1);
   out.distances.assign(static_cast<std::size_t>(n) * k, std::numeric_limits<float>::infinity());
   for (int i = 0; i < n; ++i) {
@@ -97,6 +100,7 @@ NeighborGraph build_hnsw_graph(MatrixView x, const GraphClusterOptions& options)
   return out;
 }
 
+#if defined(KODAMA_ENABLE_METAL)
 NeighborGraph build_metal_graph(MatrixView x, const GraphClusterOptions& options) {
   if (x.rows < 2 || x.cols < 1) throw std::invalid_argument("KODAMAKNNGraph requires at least two rows.");
   const int n = static_cast<int>(x.rows);
@@ -118,6 +122,7 @@ NeighborGraph build_metal_graph(MatrixView x, const GraphClusterOptions& options
 
   NeighborGraph out;
   out.neighbors = search.neighbors;
+  out.index_base = GraphIndexBase::One;
   out.indices.resize(search.indices.size(), -1);
   out.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
   for (std::size_t i = 0; i < search.indices.size(); ++i) {
@@ -126,6 +131,7 @@ NeighborGraph build_metal_graph(MatrixView x, const GraphClusterOptions& options
   }
   return out;
 }
+#endif
 
 std::uint64_t edge_key(int a, int b) {
   const std::uint32_t u = static_cast<std::uint32_t>(std::min(a, b));
@@ -148,6 +154,8 @@ int normalize_index(int idx, int n, bool one_based) {
 }
 
 bool graph_is_one_based(const NeighborGraph& graph, int n) {
+  if (graph.index_base == GraphIndexBase::One) return true;
+  if (graph.index_base == GraphIndexBase::Zero) return false;
   for (int idx : graph.indices) {
     if (idx == 0) return false;
     if (idx == n) return true;
@@ -733,6 +741,7 @@ NeighborGraph KODAMAKNNGraph_CUDA(MatrixView x, const GraphClusterOptions& optio
   );
   NeighborGraph out;
   out.neighbors = search.neighbors;
+  out.index_base = GraphIndexBase::One;
   out.indices = search.indices;
   out.distances.resize(search.distances.size(), std::numeric_limits<float>::infinity());
   for (std::size_t i = 0; i < out.indices.size(); ++i) {

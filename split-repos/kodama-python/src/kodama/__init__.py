@@ -15,10 +15,12 @@ from ._core import (
     core_plslda as _core_plslda,
     embedding_clustering as _embedding_clustering,
     graph as _graph,
+    graph_materialize as _graph_materialize,
     graph_clustering as _graph_clustering,
     knncv as _knncv,
     matrix as _matrix,
     matrix_graph as _matrix_graph,
+    matrix_graph_handle as _matrix_graph_handle,
     normalization as _normalization,
     opentsne as _opentsne,
     pca as _pca,
@@ -29,7 +31,7 @@ from ._core import (
 )
 
 _BACKENDS = ("cpu", "cuda", "metal")
-_VISUALIZATION_BACKENDS = ("cpu", "cuda")
+_VISUALIZATION_BACKENDS = ("cpu", "cuda", "metal")
 _METRICS = ("euclidean", "cosine", "inner_product")
 _CLASSIFIERS = ("knn", "pls_lda")
 _SPATIAL_CONSTRAINT_MODES = ("kmeans", "graph", "auto")
@@ -349,12 +351,28 @@ class KodamaMatrixResult(dict):
 
 
 class KodamaEmbedding(np.ndarray):
-    """Float32 embedding with observable initialization provenance."""
+    """Float32 embedding with observable execution and graph provenance."""
 
-    def __new__(cls, values, initialization, initialization_backend):
+    def __new__(
+        cls,
+        values,
+        initialization,
+        initialization_backend,
+        *,
+        backend=None,
+        optimizer=None,
+        graph_edges=0,
+        graph_max_weight=0.0,
+        runtime_seconds=np.nan,
+    ):
         obj = np.asarray(values, dtype=np.float32).view(cls)
         obj.initialization = initialization
         obj.initialization_backend = initialization_backend
+        obj.backend = backend
+        obj.optimizer = optimizer
+        obj.graph_edges = int(graph_edges)
+        obj.graph_max_weight = float(graph_max_weight)
+        obj.runtime_seconds = float(runtime_seconds)
         return obj
 
     def __array_finalize__(self, source):
@@ -364,6 +382,31 @@ class KodamaEmbedding(np.ndarray):
         self.initialization_backend = getattr(
             source, "initialization_backend", None
         )
+        self.backend = getattr(source, "backend", None)
+        self.optimizer = getattr(source, "optimizer", None)
+        self.graph_edges = getattr(source, "graph_edges", 0)
+        self.graph_max_weight = getattr(source, "graph_max_weight", 0.0)
+        self.runtime_seconds = getattr(source, "runtime_seconds", np.nan)
+
+
+def _embedding_from_native(result, initialization, initialization_backend):
+    """Convert the extension result while accepting pre-diagnostic builds."""
+    if isinstance(result, dict):
+        return KodamaEmbedding(
+            result["embedding"],
+            initialization,
+            initialization_backend,
+            backend=result.get("backend"),
+            optimizer=result.get("optimizer"),
+            graph_edges=result.get("graph_edges", 0),
+            graph_max_weight=result.get("graph_max_weight", 0.0),
+            runtime_seconds=result.get("runtime_seconds", np.nan),
+        )
+    return KodamaEmbedding(
+        result,
+        initialization,
+        initialization_backend,
+    )
 
 
 def _default_splitting(n_samples):
@@ -395,6 +438,7 @@ def matrix(
     visual_init=True,
     progress=True,
     apply_kodama_dissimilarity=True,
+    return_graph=False,
 ):
     """Run KODAMA matrix optimization, mirroring ``kodamaR::kodama_matrix``.
 
@@ -414,7 +458,11 @@ def matrix(
                 "data must be the raw array; pass graph inputs through graph"
             )
         raw = data
-        samples = np.asarray(supplied_graph["indices"]).shape[0]
+        samples = (
+            int(supplied_graph["samples"])
+            if "handle" in supplied_graph
+            else np.asarray(supplied_graph["indices"]).shape[0]
+        )
         if raw is not None and np.asarray(raw).shape[0] != samples:
             raise ValueError(
                 "data and graph must contain the same number of samples"
@@ -451,6 +499,7 @@ def matrix(
             visual_init=visual_init,
             progress=progress,
             apply_kodama_dissimilarity=apply_kodama_dissimilarity,
+            return_graph=return_graph,
         )
 
     if data is None:
@@ -495,6 +544,7 @@ def matrix(
         progress=bool(progress),
         apply_kodama_dissimilarity=bool(apply_kodama_dissimilarity),
         compute_visual_init=bool(visual_init),
+        return_graph=bool(return_graph),
     )
     result = KodamaMatrixResult(result)
     result["parameters"] = {
@@ -515,6 +565,7 @@ def matrix(
         "seed": int(seed),
         "visual_init": bool(visual_init),
         "apply_kodama_dissimilarity": bool(apply_kodama_dissimilarity),
+        "return_graph": bool(return_graph),
     }
     result["class_counts"] = result.class_counts
     result["best_run"] = result.best_run
@@ -550,25 +601,27 @@ def matrix_graph(
     visual_init=True,
     progress=True,
     apply_kodama_dissimilarity=True,
+    return_graph=False,
 ):
     """Run KODAMA from a KNN matrix, mirroring ``kodamaR::kodama_matrix_graph``."""
     graph_object = indices if isinstance(indices, dict) else None
     supplied_graph = _extract_graph(indices)
+    graph_handle = supplied_graph.get("handle") if isinstance(supplied_graph, dict) else None
     if supplied_graph is not None:
         distances = supplied_graph.get("distances", distances)
         indices = supplied_graph.get("indices")
-    if indices is None or distances is None:
+    if graph_handle is None and (indices is None or distances is None):
         raise ValueError("indices and distances are required")
-    idx = np.asarray(indices, dtype=np.int32)
-    dst = np.asarray(distances, dtype=np.float32)
-    if idx.ndim != 2 or dst.ndim != 2 or idx.shape != dst.shape:
+    idx = None if graph_handle is not None else np.asarray(indices, dtype=np.int32)
+    dst = None if graph_handle is not None else np.asarray(distances, dtype=np.float32)
+    if graph_handle is None and (idx.ndim != 2 or dst.ndim != 2 or idx.shape != dst.shape):
         raise ValueError("indices and distances must be matrices with the same shape")
     if graph_neighbors is None:
-        graph_neighbors = idx.shape[1]
+        graph_neighbors = int(supplied_graph.get("neighbors")) if graph_handle is not None else idx.shape[1]
     if ncomp is None:
         ncomp = 50 if data is None else min(50, np.asarray(data).shape[1])
     if splitting is None:
-        splitting = _default_splitting(idx.shape[0])
+        splitting = _default_splitting(int(supplied_graph["samples"]) if graph_handle is not None else idx.shape[0])
     classifier = _choice(classifier, "classifier", _CLASSIFIERS)
     if backend is None:
         backend = graph_object.get("backend", "cpu") if isinstance(graph_object, dict) else "cpu"
@@ -577,9 +630,10 @@ def matrix_graph(
         graph_feature_mode, "graph_feature_mode", _GRAPH_FEATURE_MODES
     )
     spatial_constraint_code = _spatial_constraint_code(spatial_constraint_mode)
-    result = _matrix_graph(
-        idx,
-        dst,
+    native = _matrix_graph_handle if graph_handle is not None else _matrix_graph
+    positional = (graph_handle,) if graph_handle is not None else (idx, dst)
+    result = native(
+        *positional,
         data=None if data is None else _matrix32(data),
         spatial=None if spatial is None else _matrix32(spatial, "spatial"),
         W=_int_vector(W),
@@ -604,6 +658,7 @@ def matrix_graph(
         seed=int(seed),
         progress=bool(progress),
         apply_kodama_dissimilarity=bool(apply_kodama_dissimilarity),
+        return_graph=bool(return_graph),
     )
     result = KodamaMatrixResult(result)
     if visual_init and isinstance(graph_object, dict):
@@ -638,6 +693,7 @@ def matrix_graph(
         "seed": int(seed),
         "visual_init": bool(visual_init),
         "apply_kodama_dissimilarity": bool(apply_kodama_dissimilarity),
+        "return_graph": bool(return_graph),
     }
     result["class_counts"] = result.class_counts
     result["best_run"] = result.best_run
@@ -653,6 +709,7 @@ def graph(
     n_cores=4,
     gpu_device=0,
     seed=1234,
+    storage="handle",
 ):
     """Build a reusable KODAMA graph and backend-specific PCA starts."""
     metric = _choice(metric, "metric", _METRICS)
@@ -666,6 +723,7 @@ def graph(
         n_threads=int(n_cores),
         gpu_device=int(gpu_device),
         seed=int(seed),
+        storage=storage,
     )
     result["parameters"] = {
         "k": int(k),
@@ -678,9 +736,24 @@ def graph(
     return result
 
 
+def graph_materialize(value):
+    """Explicitly copy a handle-backed graph into NumPy index/distance arrays."""
+    graph_object = _extract_graph(value)
+    if graph_object is None:
+        raise ValueError("value is not a KODAMA graph")
+    if "handle" not in graph_object:
+        return graph_object
+    out = _graph_materialize(graph_object["handle"])
+    out.update({k: v for k, v in graph_object.items() if k not in ("handle", "indices", "distances")})
+    out["storage"] = "matrix"
+    return out
+
+
 def _extract_graph(value):
     if isinstance(value, dict) and "knn" in value:
         return value["knn"]
+    if isinstance(value, dict) and "handle" in value:
+        return value
     if (
         isinstance(value, dict)
         and "indices" in value
@@ -713,6 +786,7 @@ def visualization(
     metric = _choice(metric, "metric", _METRICS)
     backend = _choice(backend, "backend", _VISUALIZATION_BACKENDS)
     graph_mode = _choice(graph_mode, "graph_mode", ("fuzzy", "binary"))
+    method_l = method.lower()
     raw = None
     if raw_data is not None:
         raw = _matrix32(raw_data, "raw_data")
@@ -729,8 +803,9 @@ def visualization(
             n_cores=n_cores,
             gpu_device=gpu_device,
         )
+    if "handle" in g:
+        g = graph_materialize(g)
 
-    method_l = method.lower()
     method_key = "umap" if method_l == "umap" else "opentsne"
     initialization = "explicit" if init is not None else None
     initialization_backend = backend if init is not None else None
@@ -774,7 +849,7 @@ def visualization(
             graph_mode=graph_mode,
             **kwargs,
         )
-        return KodamaEmbedding(
+        return _embedding_from_native(
             values,
             initialization or "graph_spectral",
             initialization_backend or "cpu",
@@ -793,10 +868,10 @@ def visualization(
             gpu_device=gpu_device,
             **kwargs,
         )
-        return KodamaEmbedding(
+        return _embedding_from_native(
             values,
             initialization or "random",
-            initialization_backend or "cpu",
+            initialization_backend or backend,
         )
     raise ValueError(f"Unsupported visualization method: {method}")
 
@@ -881,6 +956,8 @@ def clustering(
     graph_backend = _choice(graph_backend, "graph_backend", _BACKENDS)
     supplied_graph = _extract_graph(x)
     if supplied_graph is not None:
+        if "handle" in supplied_graph:
+            supplied_graph = graph_materialize(supplied_graph)
         return _graph_clustering(
             supplied_graph["indices"],
             supplied_graph["distances"],

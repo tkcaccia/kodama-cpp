@@ -12,6 +12,7 @@ LLVM_PROFDATA=${KODAMA_LLVM_PROFDATA:-$(command -v llvm-profdata)}
 LLVM_COV=${KODAMA_LLVM_COV:-$(command -v llvm-cov)}
 
 mkdir -p "$BUILD_DIR" "$OUTPUT_DIR" "$BUILD_DIR/profiles"
+find "$BUILD_DIR/profiles" -type f -name '*.profraw' -delete
 
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -30,11 +31,14 @@ cmake --build "$BUILD_DIR" --parallel
 LLVM_PROFILE_FILE="$BUILD_DIR/profiles/cv-%p.profraw" "$BUILD_DIR/kodama_cpp_tests"
 LLVM_PROFILE_FILE="$BUILD_DIR/profiles/api-%p.profraw" "$BUILD_DIR/kodama_public_api_0_1_tests"
 
-"$LLVM_PROFDATA" merge -sparse "$BUILD_DIR"/profiles/*.profraw -o "$OUTPUT_DIR/kodama.profdata"
+# The API executable is still run as a compile/link contract test. Its profile
+# adds no project-source coverage and has a distinct function named `main`,
+# which LLVM correctly reports as a hash conflict with the numerical test
+# executable. Merge only the substantive source-coverage profile.
+"$LLVM_PROFDATA" merge -sparse "$BUILD_DIR"/profiles/cv-*.profraw -o "$OUTPUT_DIR/kodama.profdata"
 
 COMMON_ARGS=(
   "$BUILD_DIR/kodama_cpp_tests"
-  "-object=$BUILD_DIR/kodama_public_api_0_1_tests"
   "-instr-profile=$OUTPUT_DIR/kodama.profdata"
   "-ignore-filename-regex=.*/(tests|benchmarks|examples|build[^/]*)/.*"
 )

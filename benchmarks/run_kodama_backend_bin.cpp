@@ -60,6 +60,21 @@ int unique_labels(const int* labels, int rows) {
   return static_cast<int>(std::unique(values.begin(), values.end()) - values.begin());
 }
 
+double median_classes(const kodama::KODAMAMatrixResult& result) {
+  std::vector<int> counts(static_cast<std::size_t>(result.runs));
+  for (int run = 0; run < result.runs; ++run) {
+    counts[static_cast<std::size_t>(run)] = unique_labels(
+      result.res.data() + static_cast<std::size_t>(run) * result.samples,
+      result.samples
+    );
+  }
+  std::sort(counts.begin(), counts.end());
+  const std::size_t middle = counts.size() / 2;
+  return counts.size() % 2 == 0 ?
+    0.5 * static_cast<double>(counts[middle - 1] + counts[middle]) :
+    static_cast<double>(counts[middle]);
+}
+
 bool method_enabled(const std::string& name) {
   const char* filter = std::getenv("KODAMA_BENCH_METHODS");
   return filter == nullptr || std::string(filter).empty() || std::string(filter).find(name) != std::string::npos;
@@ -83,7 +98,14 @@ void print_result(
   }
   const double best_cv = *std::max_element(result.acc.begin(), result.acc.end());
   std::cout << method << ',' << backend << ',' << std::fixed << std::setprecision(6)
-            << result.runtime_seconds << ',' << best_cv << ',' << best_ari << ',' << best_classes << '\n';
+            << result.runtime_seconds << ',' << result.graph_seconds << ','
+            << best_cv << ',' << best_ari << ',' << best_classes << ','
+            << result.graph_ivf_nlist << ',' << result.graph_ivf_nprobe << ','
+            << result.graph_ivf_pilot_recall << ',' << median_classes(result) << ','
+            << result.projection_sparse_uploads << ','
+            << result.projection_full_downloads << ','
+            << result.result_row_uploads << ','
+            << result.result_matrix_downloads << '\n';
 }
 
 }  // namespace
@@ -113,6 +135,9 @@ int main(int argc, char** argv) {
   options.cycles = cycles;
   options.components = components;
   options.landmarks = 100000;
+  if (const char* value = std::getenv("KODAMA_LANDMARKS")) {
+    options.landmarks = std::max(1, std::stoi(value));
+  }
   options.splitting = rows < 40000 ? 100 : 300;
   options.graph_neighbors = 100;
   options.n_threads = threads;
@@ -122,12 +147,33 @@ int main(int argc, char** argv) {
   options.pls.cv.folds = 5;
   options.pls.n_threads = threads;
   options.seed = 1234;
+  if (const char* path = std::getenv("KODAMA_SPATIAL_BIN")) {
+    const char* cols_value = std::getenv("KODAMA_SPATIAL_COLS");
+    if (cols_value == nullptr) {
+      throw std::invalid_argument("KODAMA_SPATIAL_COLS is required with KODAMA_SPATIAL_BIN.");
+    }
+    options.spatial_cols = std::stoi(cols_value);
+    options.spatial = read_binary<float>(
+      path, static_cast<std::size_t>(rows) * options.spatial_cols);
+    options.spatial_resolution = 0.3;
+    options.spatial_constraint_mode = 0;
+    options.spatial_graph_mix = true;
+  }
+  if (const char* value = std::getenv("KODAMA_RETURN_GRAPH")) {
+    options.materialize_graph = std::string(value) != "0";
+  }
   const char* metal_index = std::getenv("KODAMA_METAL_INDEX");
   if (metal_index != nullptr && std::string(metal_index) == "ivf") {
     options.knn.index_type = kodama::KNNIndexType::MetalIVFFlat;
   }
+  const char* cuda_index = std::getenv("KODAMA_CUDA_INDEX");
+  if (cuda_index != nullptr && std::string(cuda_index) == "exact") {
+    options.knn.index_type = kodama::KNNIndexType::CudaExact;
+  } else if (cuda_index != nullptr && std::string(cuda_index) == "ivf") {
+    options.knn.index_type = kodama::KNNIndexType::CudaIVFFlat;
+  }
 
-  std::cout << "method,backend,seconds,best_cv_accuracy,best_ari,best_classes\n";
+  std::cout << "method,backend,seconds,graph_seconds,best_cv_accuracy,best_ari,best_classes,nlist,nprobe,pilot_recall,median_classes,sparse_projection_uploads,full_projection_downloads,result_row_uploads,result_matrix_downloads\n";
   options.classifier = kodama::CoreClassifier::KNN;
   if (method_enabled("KODAMA_KNN_CPU")) {
     options.backend = kodama::Backend::CPU;

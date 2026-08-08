@@ -31,11 +31,6 @@ struct HNSWParameters {
   double target_recall = 0.99;
 };
 
-bool better_neighbor(const Neighbor& a, const Neighbor& b) {
-  if (a.score != b.score) return a.score > b.score;
-  return a.label < b.label;
-}
-
 int clamp_int(int value, int fallback, int lo, int hi) {
   const int x = value > 0 ? value : fallback;
   return std::min(hi, std::max(lo, x));
@@ -86,6 +81,7 @@ HNSWParameters tune_hnsw_parameters(int n, int p, int k, DistanceMetric metric, 
   return out;
 }
 
+#if defined(KODAMA_ENABLE_CUDA)
 std::vector<float> make_search_matrix(
   MatrixView x,
   const std::vector<int>& rows,
@@ -93,20 +89,24 @@ std::vector<float> make_search_matrix(
 ) {
   std::vector<float> out(rows.size() * x.cols, 0.0f);
   for (std::size_t r = 0; r < rows.size(); ++r) {
-    long double ss = 0.0;
+    double squared_norm = 0.0;
     const int row = rows[r];
     for (std::size_t j = 0; j < x.cols; ++j) {
-      const float v = x.value_float(static_cast<std::size_t>(row), j);
-      ss += static_cast<long double>(v) * static_cast<long double>(v);
+      const float value = x.value_float(static_cast<std::size_t>(row), j);
+      squared_norm += static_cast<double>(value) * static_cast<double>(value);
     }
-    const double n = std::sqrt(static_cast<double>(ss));
-    const double scale = metric == DistanceMetric::Cosine && n > 0.0 && std::isfinite(n) ? 1.0 / n : 1.0;
+    const double norm = std::sqrt(squared_norm);
+    const double scale = metric == DistanceMetric::Cosine && norm > 0.0 && std::isfinite(norm) ?
+      1.0 / norm : 1.0;
     for (std::size_t j = 0; j < x.cols; ++j) {
-      out[r * x.cols + j] = static_cast<float>(static_cast<double>(x.value_float(static_cast<std::size_t>(row), j)) * scale);
+      out[r * x.cols + j] = static_cast<float>(
+        static_cast<double>(x.value_float(static_cast<std::size_t>(row), j)) * scale
+      );
     }
   }
   return out;
 }
+#endif
 
 int majority_vote(const std::vector<Neighbor>& neighbors) {
   std::map<int, std::pair<int, double>> votes;
@@ -184,6 +184,7 @@ std::vector<int> knn_predict_native_hnsw_cpu(
   return predicted;
 }
 
+#if defined(KODAMA_ENABLE_METAL)
 std::vector<int> knn_predict_metal(
   MatrixView x,
   const std::vector<int>& labels,
@@ -238,6 +239,7 @@ std::vector<int> knn_predict_metal(
   }
   return predicted;
 }
+#endif
 
 #if defined(KODAMA_ENABLE_CUDA)
 std::vector<int> knn_predict_native_cuda(

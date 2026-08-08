@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "kodama/kodama.hpp"
+#include "metal_backend.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -489,10 +490,12 @@ PreparedGraph prepare_graph(const NeighborGraph& graph, int requested_neighbors)
   int min_index = std::numeric_limits<int>::max();
   int max_index = std::numeric_limits<int>::min();
   for (int value : graph.indices) {
+    if (value < 0) continue;
     min_index = std::min(min_index, value);
     max_index = std::max(max_index, value);
   }
-  const bool one_based = min_index >= 1 && max_index <= out.samples;
+  const bool one_based = graph.index_base == GraphIndexBase::One ||
+    (graph.index_base == GraphIndexBase::Auto && min_index >= 1 && max_index <= out.samples);
 
   for (int i = 0; i < out.samples; ++i) {
     float row_max = 1.0f;
@@ -1117,7 +1120,7 @@ CsrGraph build_selected_umap_graph(
     build_umap_csr_graph(graph, options.n_threads);
 }
 
-void scale_embedding_max_abs_and_jitter(std::vector<double>& embedding, int n, double scale, double jitter, std::mt19937& rng) {
+void scale_embedding_max_abs_and_jitter(std::vector<double>& embedding, double scale, double jitter, std::mt19937& rng) {
   double max_abs = 0.0;
   for (double v : embedding) max_abs = std::max(max_abs, std::abs(v));
   const double factor = max_abs > 0.0 ? scale / max_abs : 1.0;
@@ -1337,7 +1340,7 @@ std::vector<float> initialize_layout_csr_spectral(
     const double mean = std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(n);
     for (int i = 0; i < n; ++i) embedding[static_cast<std::size_t>(i) * n_components + c] = values[static_cast<std::size_t>(i)] - mean;
   }
-  scale_embedding_max_abs_and_jitter(embedding, n, 10.0, 1.0e-4, rng);
+  scale_embedding_max_abs_and_jitter(embedding, 10.0, 1.0e-4, rng);
 
   std::vector<float> out(embedding.size());
   for (std::size_t i = 0; i < out.size(); ++i) out[i] = static_cast<float>(embedding[i]);
@@ -1346,7 +1349,6 @@ std::vector<float> initialize_layout_csr_spectral(
 
 void add_delta_2d(
   std::vector<float>& delta,
-  const int n,
   const int i,
   const double dx,
   const double dy,
@@ -1606,7 +1608,7 @@ std::vector<float> optimize_umap_csr_cpu(
               grad_coeff = -2.0 * ab.first * ab.second * (dist_pow / dist_sq) /
                            (ab.first * dist_pow + 1.0);
             }
-            add_delta_2d(delta, n, head, dx, dy, grad_coeff, true, tail);
+            add_delta_2d(delta, head, dx, dy, grad_coeff, true, tail);
             epoch_of_next_sample[edge] += epochs_per_sample[edge];
 
             int n_neg_samples = 0;
@@ -1631,7 +1633,7 @@ std::vector<float> optimize_umap_csr_cpu(
                           ((0.001 + neg_dist_sq) *
                            (ab.first * umap_pow(neg_dist_sq, ab.second) + 1.0));
               }
-              add_delta_2d(delta, n, head, ndx, ndy, repulse, false, neg);
+              add_delta_2d(delta, head, ndx, ndy, repulse, false, neg);
             }
             if (n_neg_samples > 0) {
               epoch_of_next_negative_sample[edge] +=
@@ -1891,22 +1893,6 @@ SparseProbabilitiesF build_tsne_probabilities_float(
   return p;
 }
 
-float squared_distance_f(
-  const std::vector<float>& y,
-  const int i,
-  const int j,
-  const int dims
-) {
-  const std::size_t ib = static_cast<std::size_t>(i) * dims;
-  const std::size_t jb = static_cast<std::size_t>(j) * dims;
-  float out = 0.0f;
-  for (int d = 0; d < dims; ++d) {
-    const float diff = y[ib + d] - y[jb + d];
-    out += diff * diff;
-  }
-  return out;
-}
-
 void add_sparse_attractive_gradient_f(
   const SparseProbabilitiesF& p,
   const std::vector<float>& y,
@@ -2016,7 +2002,7 @@ int env_positive_int(const char* name, const int fallback) {
 
 int tsne_fft_grid_size(const int n) {
   const int fallback = n >= 50000 ? 256 : (n >= 10000 ? 128 : 64);
-  const int requested = env_positive_int("FASTEMBEDR_TSNE_FFT_GRID", fallback);
+  const int requested = env_positive_int("KODAMA_TSNE_FFT_GRID", fallback);
   int grid = 32;
   while (grid < requested && grid < 512) grid <<= 1;
   return std::max(32, std::min(512, grid));
@@ -2603,9 +2589,9 @@ const char* cuda_embedding_error();
 
 #if defined(KODAMA_ENABLE_CUDA)
 extern "C" {
-bool fastembedr_cuda_available();
-const char* fastembedr_cuda_embedding_last_error();
-int fastembedr_cuda_umap_from_knn_spectral_float(
+bool kodama_cuda_available();
+const char* kodama_cuda_embedding_last_error();
+int kodama_cuda_umap_from_knn_spectral_float(
   const int* indices,
   const float* distances,
   int n,
@@ -2622,7 +2608,7 @@ int fastembedr_cuda_umap_from_knn_spectral_float(
   int optimizer_mode,
   float* out
 );
-int fastembedr_cuda_umap_optimize_coo(
+int kodama_cuda_umap_optimize_coo(
   const int* heads,
   const int* tails,
   const float* weights,
@@ -2640,7 +2626,7 @@ int fastembedr_cuda_umap_optimize_coo(
   int optimizer_mode,
   float* out
 );
-int fastembedr_cuda_opentsne_fft_from_knn_float(
+int kodama_cuda_opentsne_fft_from_knn_float(
   const int* indices,
   const float* distances,
   const float* init,
@@ -2667,7 +2653,7 @@ int fastembedr_cuda_opentsne_fft_from_knn_float(
 
 namespace {
 const char* cuda_embedding_error() {
-  const char* message = fastembedr_cuda_embedding_last_error();
+  const char* message = kodama_cuda_embedding_last_error();
   return message == nullptr || message[0] == '\0' ? "unknown CUDA embedding error" : message;
 }
 }  // namespace
@@ -2882,6 +2868,9 @@ EmbeddingResult KODAMAUMAP_CPU(
   result.samples = prepared.samples;
   result.components = 2;
   result.backend = Backend::CPU;
+  result.optimizer = "csr_epoch_schedule";
+  result.graph_edges = csr.neighbors.size();
+  result.graph_max_weight = csr.max_weight;
   result.embedding = optimize_umap_csr_cpu(csr, options, prepared.samples);
   set_embedding_initialization(
     result,
@@ -2900,13 +2889,15 @@ EmbeddingResult KODAMAUMAP_CUDA(
   const UMAPOptions& options
 ) {
 #if !defined(KODAMA_ENABLE_CUDA)
+  (void)graph;
+  (void)options;
   throw std::runtime_error(cuda_embedding_error());
 #else
   if (options.n_components != 2) {
     throw std::invalid_argument("CUDA UMAP currently supports n_components=2.");
   }
   validate_umap_options(options);
-  if (!fastembedr_cuda_available()) {
+  if (!kodama_cuda_available()) {
     throw std::runtime_error("No CUDA device is available for KODAMA UMAP.");
   }
   const auto started = Clock::now();
@@ -2938,9 +2929,12 @@ EmbeddingResult KODAMAUMAP_CUDA(
   result.samples = prepared.samples;
   result.components = 2;
   result.backend = Backend::CUDA;
+  result.optimizer = "cuda_atomic_coo_epoch_schedule";
+  result.graph_edges = csr.neighbors.size();
+  result.graph_max_weight = csr.max_weight;
   result.embedding.assign(static_cast<std::size_t>(prepared.samples) * 2u, 0.0f);
 
-  const int status = fastembedr_cuda_umap_optimize_coo(
+  const int status = kodama_cuda_umap_optimize_coo(
     heads.data(),
     csr.neighbors.data(),
     csr.weights.data(),
@@ -2974,6 +2968,104 @@ EmbeddingResult KODAMAUMAP_CUDA(
 #endif
 }
 
+EmbeddingResult KODAMAUMAP_METAL(
+  const NeighborGraph& graph,
+  const UMAPOptions& options
+) {
+  if (options.n_components != 2) {
+    throw std::invalid_argument("Metal UMAP currently supports n_components=2.");
+  }
+  validate_umap_options(options);
+  if (!detail::metal_backend_available()) {
+    throw std::runtime_error("No Metal device is available for KODAMA UMAP.");
+  }
+  const auto started = Clock::now();
+  PreparedGraph prepared = prepare_graph(graph, options.n_neighbors);
+  CsrGraph csr = build_selected_umap_graph(prepared, options);
+  if (csr.neighbors.empty() || !std::isfinite(csr.max_weight) ||
+      csr.max_weight <= 0.0f) {
+    throw std::runtime_error("Metal UMAP requires at least one usable graph edge.");
+  }
+
+  int width = 0;
+  for (int row = 0; row < prepared.samples; ++row) {
+    width = std::max(
+      width,
+      csr.offsets[static_cast<std::size_t>(row + 1)] -
+      csr.offsets[static_cast<std::size_t>(row)]
+    );
+  }
+  if (width < 1) {
+    throw std::runtime_error("Metal UMAP graph has no usable rows.");
+  }
+  const std::size_t rectangular_size =
+    static_cast<std::size_t>(prepared.samples) * static_cast<std::size_t>(width);
+  std::vector<int> neighbors(rectangular_size, -1);
+  std::vector<float> weights(rectangular_size, 0.0f);
+  for (int row = 0; row < prepared.samples; ++row) {
+    const int begin = csr.offsets[static_cast<std::size_t>(row)];
+    const int end = csr.offsets[static_cast<std::size_t>(row + 1)];
+    int column = 0;
+    for (int position = begin; position < end; ++position) {
+      const int neighbor = csr.neighbors[static_cast<std::size_t>(position)];
+      const float weight = csr.weights[static_cast<std::size_t>(position)];
+      if (neighbor < 0 || neighbor >= prepared.samples || neighbor == row ||
+          !std::isfinite(weight) || weight <= 0.0f) {
+        continue;
+      }
+      const std::size_t output =
+        static_cast<std::size_t>(row) * static_cast<std::size_t>(width) +
+        static_cast<std::size_t>(column++);
+      neighbors[output] = neighbor;
+      weights[output] = weight;
+    }
+  }
+
+  std::vector<float> initialization = options.init;
+  if (initialization.size() != static_cast<std::size_t>(prepared.samples) * 2u) {
+    initialization = initialize_layout_csr_spectral(
+      csr,
+      prepared.samples,
+      2,
+      options.spectral_n_iter,
+      options.seed
+    );
+  }
+  const auto ab = find_ab_params(1.0, options.min_dist);
+  EmbeddingResult result;
+  result.samples = prepared.samples;
+  result.components = 2;
+  result.backend = Backend::Metal;
+  result.optimizer = "metal_clean_atomic_edge_sampler";
+  result.graph_edges = csr.neighbors.size();
+  result.graph_max_weight = csr.max_weight;
+  result.embedding = detail::metal_umap_optimize(
+    neighbors,
+    weights,
+    initialization,
+    prepared.samples,
+    width,
+    options.n_epochs,
+    options.negative_sample_rate,
+    static_cast<float>(options.learning_rate),
+    static_cast<float>(ab.first),
+    static_cast<float>(ab.second),
+    csr.max_weight,
+    static_cast<float>(options.repulsion_strength),
+    static_cast<std::uint32_t>(options.seed)
+  );
+  set_embedding_initialization(
+    result,
+    options.init.size() == static_cast<std::size_t>(prepared.samples) * 2u,
+    options.init_source,
+    options.init_backend,
+    "graph_spectral"
+  );
+  const auto finished = Clock::now();
+  result.runtime_seconds = std::chrono::duration<double>(finished - started).count();
+  return result;
+}
+
 EmbeddingResult KODAMAOpenTSNE_CPU(
   const NeighborGraph& graph,
   const OpenTSNEOptions& options
@@ -2988,6 +3080,9 @@ EmbeddingResult KODAMAOpenTSNE_CPU(
   result.components = options.n_components;
   result.backend = Backend::CPU;
   result.embedding = optimize_opentsne_cpu(prepared, options);
+  result.optimizer = options.theta > 0.0 && options.n_components == 2 ?
+    "opentsne_fitsne_fft_grid_sparse_knn_float32" :
+    "opentsne_exact_sparse_knn_float32";
   set_embedding_initialization(
     result,
     options.init.size() ==
@@ -3006,12 +3101,14 @@ EmbeddingResult KODAMAOpenTSNE_CUDA(
   const OpenTSNEOptions& options
 ) {
 #if !defined(KODAMA_ENABLE_CUDA)
+  (void)graph;
+  (void)options;
   throw std::runtime_error(cuda_embedding_error());
 #else
   if (options.n_components != 2) {
     throw std::invalid_argument("CUDA openTSNE currently supports n_components=2.");
   }
-  if (!fastembedr_cuda_available()) {
+  if (!kodama_cuda_available()) {
     throw std::runtime_error("No CUDA device is available for KODAMA openTSNE.");
   }
   const auto started = Clock::now();
@@ -3031,8 +3128,9 @@ EmbeddingResult KODAMAOpenTSNE_CUDA(
   result.samples = prepared.samples;
   result.components = 2;
   result.backend = Backend::CUDA;
+  result.optimizer = "cuda_opentsne_fft_grid_sparse_knn_float32";
   result.embedding.assign(static_cast<std::size_t>(prepared.samples) * 2u, 0.0f);
-  const int status = fastembedr_cuda_opentsne_fft_from_knn_float(
+  const int status = kodama_cuda_opentsne_fft_from_knn_float(
     prepared.indices.data(),
     prepared.distances.data(),
     init.data(),
@@ -3067,6 +3165,71 @@ EmbeddingResult KODAMAOpenTSNE_CUDA(
   );
   const auto finished = Clock::now();
   result.runtime_seconds = std::chrono::duration<double>(finished - started).count();
+  return result;
+#endif
+}
+
+EmbeddingResult KODAMAOpenTSNE_METAL(
+  const NeighborGraph& graph,
+  const OpenTSNEOptions& options
+) {
+#if !defined(KODAMA_ENABLE_METAL)
+  (void)graph;
+  (void)options;
+  throw std::runtime_error("The Metal backend is not available in this build.");
+#else
+  if (options.n_components != 2) {
+    throw std::invalid_argument("Metal openTSNE currently supports n_components=2.");
+  }
+  if (!detail::metal_backend_available()) {
+    throw std::runtime_error("No Metal device is available for KODAMA openTSNE.");
+  }
+  const auto started = Clock::now();
+  const int requested_neighbors = options.n_neighbors > 0 ?
+    options.n_neighbors :
+    static_cast<int>(std::ceil(options.perplexity));
+  PreparedGraph prepared = prepare_graph(graph, requested_neighbors);
+  validate_opentsne_options(options, prepared.samples);
+  const int threads = effective_cpu_threads(options.n_threads, prepared.samples);
+  SparseProbabilitiesF probabilities = build_tsne_probabilities_float(
+    prepared, options.perplexity, threads);
+  std::vector<float> init = options.init;
+  if (init.size() != static_cast<std::size_t>(prepared.samples) * 2u) {
+    init = make_opentsne_random_init(prepared.samples, 2, options.seed);
+  }
+
+  EmbeddingResult result;
+  result.samples = prepared.samples;
+  result.components = 2;
+  result.backend = Backend::Metal;
+  result.optimizer = "metal_opentsne_fft_grid_sparse_knn_float32";
+  result.embedding = detail::metal_opentsne_optimize(
+    probabilities.row_ptr,
+    probabilities.col,
+    probabilities.val,
+    init,
+    prepared.samples,
+    options.early_exaggeration_iter,
+    options.n_iter,
+    static_cast<float>(options.early_exaggeration),
+    static_cast<float>(options.exaggeration),
+    static_cast<float>(options.learning_rate),
+    options.learning_rate_auto,
+    static_cast<float>(options.initial_momentum),
+    static_cast<float>(options.final_momentum),
+    static_cast<float>(options.min_gain),
+    static_cast<float>(options.max_step_norm),
+    static_cast<std::uint32_t>(options.seed)
+  );
+  set_embedding_initialization(
+    result,
+    options.init.size() == static_cast<std::size_t>(prepared.samples) * 2u,
+    options.init_source,
+    options.init_backend,
+    "random"
+  );
+  result.runtime_seconds = std::chrono::duration<double>(
+    Clock::now() - started).count();
   return result;
 #endif
 }
@@ -3117,6 +3280,29 @@ EmbeddingResult KODAMAUMAP_CUDA(
   return KODAMAUMAP_CUDA(graph, resolved);
 }
 
+EmbeddingResult KODAMAUMAP_METAL(
+  const NeighborGraph& graph,
+  const MatrixView raw_data,
+  const UMAPOptions& options
+) {
+  validate_raw_initialization_rows(graph, raw_data);
+  UMAPOptions resolved = options;
+  if (resolved.init.size() != raw_data.rows * 2u) {
+    VisualizationInitOptions init_options;
+    init_options.n_components = 2;
+    init_options.n_threads = options.n_threads;
+    init_options.seed = static_cast<std::uint64_t>(options.seed);
+    init_options.gpu_device = options.gpu_device;
+    init_options.backend = Backend::Metal;
+    const VisualizationInitResult init =
+      KODAMAVisualizationPCAInit(raw_data, init_options);
+    resolved.init = init.umap;
+    resolved.init_source = "raw_pca";
+    resolved.init_backend = init.backend;
+  }
+  return KODAMAUMAP_METAL(graph, resolved);
+}
+
 EmbeddingResult KODAMAOpenTSNE_CPU(
   const NeighborGraph& graph,
   const MatrixView raw_data,
@@ -3163,6 +3349,29 @@ EmbeddingResult KODAMAOpenTSNE_CUDA(
     resolved.init_backend = init.backend;
   }
   return KODAMAOpenTSNE_CUDA(graph, resolved);
+}
+
+EmbeddingResult KODAMAOpenTSNE_METAL(
+  const NeighborGraph& graph,
+  const MatrixView raw_data,
+  const OpenTSNEOptions& options
+) {
+  validate_raw_initialization_rows(graph, raw_data);
+  OpenTSNEOptions resolved = options;
+  if (resolved.init.size() != raw_data.rows * 2u) {
+    VisualizationInitOptions init_options;
+    init_options.n_components = 2;
+    init_options.n_threads = options.n_threads;
+    init_options.seed = static_cast<std::uint64_t>(options.seed);
+    init_options.gpu_device = options.gpu_device;
+    init_options.backend = Backend::Metal;
+    const VisualizationInitResult init =
+      KODAMAVisualizationPCAInit(raw_data, init_options);
+    resolved.init = init.opentsne;
+    resolved.init_source = "raw_pca";
+    resolved.init_backend = init.backend;
+  }
+  return KODAMAOpenTSNE_METAL(graph, resolved);
 }
 
 }  // namespace kodama

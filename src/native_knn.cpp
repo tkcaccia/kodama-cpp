@@ -28,8 +28,76 @@
 #include <utility>
 #include <vector>
 
+#if (defined(__x86_64__) || defined(_M_X64)) && \
+  (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#define KODAMA_NATIVE_AVX2_DISPATCH 1
+#endif
+
 namespace kodama::detail {
 namespace {
+
+#ifdef KODAMA_NATIVE_AVX2_DISPATCH
+__attribute__((target("avx2,fma"))) float avx2_distance(
+  const float* a,
+  const float* b,
+  int dimensions,
+  bool euclidean
+) {
+  __m256 sum0 = _mm256_setzero_ps();
+  __m256 sum1 = _mm256_setzero_ps();
+  __m256 sum2 = _mm256_setzero_ps();
+  __m256 sum3 = _mm256_setzero_ps();
+  int d = 0;
+  for (; d + 31 < dimensions; d += 32) {
+    const __m256 a0 = _mm256_loadu_ps(a + d);
+    const __m256 a1 = _mm256_loadu_ps(a + d + 8);
+    const __m256 a2 = _mm256_loadu_ps(a + d + 16);
+    const __m256 a3 = _mm256_loadu_ps(a + d + 24);
+    const __m256 b0 = _mm256_loadu_ps(b + d);
+    const __m256 b1 = _mm256_loadu_ps(b + d + 8);
+    const __m256 b2 = _mm256_loadu_ps(b + d + 16);
+    const __m256 b3 = _mm256_loadu_ps(b + d + 24);
+    if (euclidean) {
+      const __m256 delta0 = _mm256_sub_ps(a0, b0);
+      const __m256 delta1 = _mm256_sub_ps(a1, b1);
+      const __m256 delta2 = _mm256_sub_ps(a2, b2);
+      const __m256 delta3 = _mm256_sub_ps(a3, b3);
+      sum0 = _mm256_fmadd_ps(delta0, delta0, sum0);
+      sum1 = _mm256_fmadd_ps(delta1, delta1, sum1);
+      sum2 = _mm256_fmadd_ps(delta2, delta2, sum2);
+      sum3 = _mm256_fmadd_ps(delta3, delta3, sum3);
+    } else {
+      sum0 = _mm256_fmadd_ps(a0, b0, sum0);
+      sum1 = _mm256_fmadd_ps(a1, b1, sum1);
+      sum2 = _mm256_fmadd_ps(a2, b2, sum2);
+      sum3 = _mm256_fmadd_ps(a3, b3, sum3);
+    }
+  }
+  const __m256 sum01 = _mm256_add_ps(sum0, sum1);
+  const __m256 sum23 = _mm256_add_ps(sum2, sum3);
+  const __m256 sum = _mm256_add_ps(sum01, sum23);
+  const __m128 low = _mm256_castps256_ps128(sum);
+  const __m128 high = _mm256_extractf128_ps(sum, 1);
+  const __m128 sum128 = _mm_add_ps(low, high);
+  alignas(16) float lanes[4];
+  _mm_store_ps(lanes, sum128);
+  float result = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+  if (euclidean) {
+    for (; d < dimensions; ++d) {
+      const float delta = a[d] - b[d];
+      result += delta * delta;
+    }
+    return result;
+  }
+  for (; d < dimensions; ++d) result += a[d] * b[d];
+  return -result;
+}
+
+bool cpu_has_avx2_fma() {
+  return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+}
+#endif
 
 struct NodeDistance {
   float distance = 0.0f;
@@ -72,6 +140,9 @@ class CompactHNSW {
       m_(std::max(2, std::min(m, std::max(2, n - 1)))),
       ef_construction_(std::max(1, ef_construction)),
       ef_search_(std::max(1, ef_search)),
+#ifdef KODAMA_NATIVE_AVX2_DISPATCH
+      use_avx2_(cpu_has_avx2_fma()),
+#endif
       node_mutexes_(std::make_unique<std::mutex[]>(static_cast<std::size_t>(std::max(0, n)))) {
     generate_levels();
     allocate_graph();
@@ -197,6 +268,88 @@ class CompactHNSW {
     return output;
   }
 
+  NativeKNNResult search_filtered(
+    const std::vector<float>& queries,
+    int query_rows,
+    int requested_k,
+    int n_threads,
+    const std::vector<int>& query_train_indices,
+    const std::vector<int>& allowed_local_ids
+  ) const {
+    if (queries.size() != static_cast<std::size_t>(query_rows) * p_ ||
+        static_cast<int>(query_train_indices.size()) != query_rows ||
+        static_cast<int>(allowed_local_ids.size()) != n_) {
+      throw std::invalid_argument("native HNSW filtered-query size mismatch.");
+    }
+    const int allowed = static_cast<int>(std::count_if(
+      allowed_local_ids.begin(), allowed_local_ids.end(), [](int id) { return id >= 0; }
+    ));
+    const int k = std::min(requested_k, std::max(0, allowed - 1));
+    NativeKNNResult output;
+    output.queries = query_rows;
+    output.neighbors = k;
+    output.indices.assign(static_cast<std::size_t>(query_rows) * k, -1);
+    output.distances.assign(
+      static_cast<std::size_t>(query_rows) * k,
+      std::numeric_limits<float>::infinity()
+    );
+    if (query_rows == 0 || k == 0) return output;
+
+    std::atomic<int> next{0};
+    n_threads = std::max(1, std::min(n_threads, query_rows));
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<std::size_t>(n_threads));
+    for (int worker = 0; worker < n_threads; ++worker) {
+      workers.emplace_back([&]() {
+        SearchScratch scratch(n_, std::max(k + 1, ef_search_), 2 * m_);
+        std::vector<NodeDistance> exact_candidates;
+        exact_candidates.reserve(static_cast<std::size_t>(allowed));
+        for (;;) {
+          const int query_id = next.fetch_add(1, std::memory_order_relaxed);
+          if (query_id >= query_rows) break;
+          const float* query = queries.data() + static_cast<std::size_t>(query_id) * p_;
+          const int excluded = query_train_indices[static_cast<std::size_t>(query_id)];
+          int ef = std::max(k + 1, ef_search_);
+          int used = 0;
+          for (;;) {
+            search_query(query, ef, scratch);
+            used = 0;
+            for (const NodeDistance& candidate : scratch.layer_candidates) {
+              if (candidate.id == excluded) continue;
+              const int local = allowed_local_ids[static_cast<std::size_t>(candidate.id)];
+              if (local < 0) continue;
+              const std::size_t pos = static_cast<std::size_t>(query_id) * k + used;
+              output.indices[pos] = local;
+              output.distances[pos] = candidate.distance;
+              if (++used == k) break;
+            }
+            if (used == k || ef >= n_) break;
+            ef = std::min(n_, std::max(ef + 1, 2 * ef));
+          }
+          if (used == k) continue;
+
+          exact_candidates.clear();
+          for (int global = 0; global < n_; ++global) {
+            const int local = allowed_local_ids[static_cast<std::size_t>(global)];
+            if (local < 0 || global == excluded) continue;
+            exact_candidates.push_back({distance(query, point(global)), local});
+          }
+          std::partial_sort(
+            exact_candidates.begin(), exact_candidates.begin() + k,
+            exact_candidates.end(), closer
+          );
+          for (int rank = 0; rank < k; ++rank) {
+            const std::size_t pos = static_cast<std::size_t>(query_id) * k + rank;
+            output.indices[pos] = exact_candidates[static_cast<std::size_t>(rank)].id;
+            output.distances[pos] = exact_candidates[static_cast<std::size_t>(rank)].distance;
+          }
+        }
+      });
+    }
+    for (std::thread& worker : workers) worker.join();
+    return output;
+  }
+
  private:
   struct VisitTable {
     explicit VisitTable(int n) : marks(static_cast<std::size_t>(n), 0), generation(1) {}
@@ -283,12 +436,20 @@ class CompactHNSW {
   mutable std::unique_ptr<std::mutex[]> node_mutexes_;
   mutable std::mutex entry_mutex_;
   bool parallel_build_ = false;
+#ifdef KODAMA_NATIVE_AVX2_DISPATCH
+  bool use_avx2_ = false;
+#endif
 
   const float* point(int id) const {
     return data_ + static_cast<std::size_t>(id) * static_cast<std::size_t>(p_);
   }
 
   float distance(const float* a, const float* b) const {
+#ifdef KODAMA_NATIVE_AVX2_DISPATCH
+    if (use_avx2_) {
+      return avx2_distance(a, b, p_, metric_ == DistanceMetric::Euclidean);
+    }
+#endif
     float sum0 = 0.0f;
     float sum1 = 0.0f;
     float sum2 = 0.0f;
@@ -821,6 +982,26 @@ class CompactHNSW {
 
 }  // namespace
 
+struct NativeHNSWIndex::Impl {
+  std::vector<float> train;
+  int rows = 0;
+  int dimensions = 0;
+  DistanceMetric metric = DistanceMetric::Euclidean;
+  std::unique_ptr<CompactHNSW> index;
+};
+
+NativeHNSWIndex::NativeHNSWIndex() = default;
+NativeHNSWIndex::~NativeHNSWIndex() = default;
+NativeHNSWIndex::NativeHNSWIndex(NativeHNSWIndex&&) noexcept = default;
+NativeHNSWIndex& NativeHNSWIndex::operator=(NativeHNSWIndex&&) noexcept = default;
+NativeHNSWIndex::NativeHNSWIndex(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+bool NativeHNSWIndex::valid() const noexcept { return impl_ != nullptr && impl_->index != nullptr; }
+int NativeHNSWIndex::rows() const noexcept { return impl_ == nullptr ? 0 : impl_->rows; }
+int NativeHNSWIndex::dimensions() const noexcept { return impl_ == nullptr ? 0 : impl_->dimensions; }
+DistanceMetric NativeHNSWIndex::metric() const noexcept {
+  return impl_ == nullptr ? DistanceMetric::Euclidean : impl_->metric;
+}
+
 std::vector<float> prepare_native_matrix(
   MatrixView x,
   const std::vector<int>& rows,
@@ -857,6 +1038,60 @@ std::vector<float> prepare_native_matrix(MatrixView x, DistanceMetric metric) {
   std::vector<int> rows(x.rows);
   std::iota(rows.begin(), rows.end(), 0);
   return prepare_native_matrix(x, rows, metric);
+}
+
+NativeHNSWIndex native_build_hnsw_index(
+  std::vector<float> train,
+  int train_rows,
+  int dimensions,
+  DistanceMetric metric,
+  const NativeHNSWParameters& parameters,
+  int n_threads
+) {
+  if (train_rows < 1 || dimensions < 1 ||
+      train.size() != static_cast<std::size_t>(train_rows) * dimensions) {
+    throw std::invalid_argument("invalid native HNSW index matrix.");
+  }
+  auto impl = std::make_unique<NativeHNSWIndex::Impl>();
+  impl->train = std::move(train);
+  impl->rows = train_rows;
+  impl->dimensions = dimensions;
+  impl->metric = metric;
+  impl->index = std::make_unique<CompactHNSW>(
+    impl->train, train_rows, dimensions, metric,
+    parameters.m, parameters.ef_construction, parameters.ef_search
+  );
+  impl->index->build(n_threads);
+  return NativeHNSWIndex(std::move(impl));
+}
+
+NativeKNNResult native_hnsw_index_search(
+  const NativeHNSWIndex& index,
+  const std::vector<float>& query,
+  int query_rows,
+  int k,
+  int n_threads,
+  const std::vector<int>& query_train_indices
+) {
+  if (!index.valid()) throw std::invalid_argument("native HNSW index is empty.");
+  return index.impl_->index->search(
+    query, query_rows, k, n_threads, query_train_indices
+  );
+}
+
+NativeKNNResult native_hnsw_index_filtered_search(
+  const NativeHNSWIndex& index,
+  const std::vector<float>& query,
+  int query_rows,
+  int k,
+  int n_threads,
+  const std::vector<int>& query_train_indices,
+  const std::vector<int>& allowed_local_ids
+) {
+  if (!index.valid()) throw std::invalid_argument("native HNSW index is empty.");
+  return index.impl_->index->search_filtered(
+    query, query_rows, k, n_threads, query_train_indices, allowed_local_ids
+  );
 }
 
 NativeKNNResult native_hnsw_search(

@@ -1,6 +1,6 @@
 # Licensing and Provenance Audit
 
-Audit date: 2026-07-16
+Audit date: 2026-08-07
 
 Repository baseline inspected: `0eb2261ec10c62082950acb6f7b1c9f98c4617a4`
 
@@ -57,11 +57,21 @@ terms**, not “every byte is MIT.” The complete license texts are distributed
 | --- | --- | --- | --- |
 | [KODAMA](https://github.com/tkcaccia/KODAMA) | `d2dbe30ee66509b82c084616d6961c5b292cd059` | GPL (>= 2) | Public origin of the KODAMA objective, label evolution, matrix construction, and R-facing behavior. Code history is attributed to Stefano Cacciatore; the local adaptations are separately relicensed under MIT by him. |
 | [fastPLS](https://github.com/tkcaccia/fastPLS) | `ef4aa0e4ea663a097fb3c10f6a4ce9f2884a278f` | GPL-3 | Source strategy for SIMPLS, label-aware cross-products, latent LDA, randomized PCA, and accelerator organization. Code history is attributed to Stefano Cacciatore; local adaptations are separately relicensed under MIT by him. |
-| [fastEmbedR](https://github.com/tkcaccia/fastEmbedR) | `c98b9ecd124d442f20f849ce1be7f5bd4c13d0db` | MIT | Direct source lineage for native CPU HNSW, Metal KNN, randomized-PCA backend policy, UMAP/openTSNE, and accelerator embedding code. |
+| [fastEmbedR](https://github.com/tkcaccia/fastEmbedR) | `814350a5ca69b0c26e6df40377636f109055f84b` | MIT | Direct source lineage for native CPU HNSW, Metal KNN, randomized-PCA backend policy, UMAP/openTSNE, and accelerator embedding code. |
 | [faissR](https://github.com/tkcaccia/faissR) | `b317a9715dd33ad3a49cf7989a83b4f7f9f7b389` | MIT | Direct source lineage for 2D/3D exact grid KNN and its selection rules. |
 | [FAISS](https://github.com/facebookresearch/faiss) | `0ca9df4792b173d573044ee14ca0704780176e82` (1.14.3) | MIT | Direct structural source for compact HNSW through fastEmbedR; algorithmic reference for native exact/IVF CUDA and Metal paths. Meta notice retained. |
 | [Faiss-mlx](https://github.com/MLXPorts/faiss-mlx) | `d092af559375144fc719cd88a10e414f92c625fa` | Apache-2.0 | Fused Metal IVF list-scan/top-k organization adapted through fastEmbedR. Apache terms and upstream notice retained. |
 | [RAPIDS cuVS](https://github.com/rapidsai/cuvs) | `ad9e2d2a617c8d51e3eebc920e5a60ad8dc59bcd` | Apache-2.0 | Algorithmic organization/reference only in the package-owned CUDA search path; no cuVS source or binary is distributed or linked. |
+
+The pinned fastEmbedR row is the snapshot used by the retained parity
+experiments. A 2026-08-08 audit also inspected current `main` at
+`5248ee02376c01bd6e1be788280db4e978623eed`. No native UMAP optimizer file
+changed, and the exported float32 openTSNE function was byte-identical to the
+pinned snapshot (function-text SHA-256
+`7fc28f97762cc9a0163a0702a2c03159244a5f0cb1899238d7e0e1a22d688887`). The
+newer revision's native PCA/R-control and graph-clustering additions were not
+copied because KODAMA already has standalone PCA and graph contracts and the
+validated visualization mathematics did not change.
 
 The official cuVS license file at the pinned snapshot has SHA-256
 `756005f963846334943e8bfc08ef98cd254257d8467ac7a7ffd42a1be262f442`.
@@ -82,7 +92,7 @@ at `licenses/CUVS-LICENSE`.
 | Native CUDA KNN/k-means | `src/native_cuda_backend.*` | Package-owned KNN informed by FAISS, cuVS, fastEmbedR, and faissR; k-means initialization, seed/Lloyd semantics, and empty-cluster repair adapted from FAISS 1.14.3 `faiss/Clustering.cpp` and random utilities | MIT; retain Meta Platforms and Stefano Cacciatore notices plus `licenses/FAISS-LICENSE`. No FAISS/cuVS binary is distributed or linked, and no cuVS source is included. |
 | Metal KNN and PLS-LDA | `src/metal_backend.mm` | Adapted from fastEmbedR and fastPLS; contains Faiss-mlx-derived organization | `MIT AND Apache-2.0`; retain Meta, Sydney Bach/The Solace Project, and Stefano Cacciatore notices, the modified-file statement, and both full licenses. |
 | Metal stubs/interfaces | `src/metal_backend.hpp`, `src/metal_backend_stub.cpp` | Original kodama-cpp work | MIT. |
-| UMAP/openTSNE CPU/CUDA | `src/visualization.cpp`, `src/embedding_cuda_kernels.cu` | Direct adaptation of fastEmbedR's MIT implementation, including direct binary/fuzzy CSR construction, smooth-kNN bandwidths, epoch scheduling, float32 openTSNE, and CUDA workspaces | MIT; retain the algorithmic-reference record below. |
+| UMAP and openTSNE CPU/CUDA/Metal | `src/visualization.cpp`, `src/embedding_cuda_kernels.cu`, `src/metal_backend.mm` | Direct adaptation of fastEmbedR's MIT implementation, including direct binary/fuzzy CSR construction, smooth-kNN bandwidths, epoch scheduling, float32 openTSNE, CUDA workspaces, fixed-point atomic Metal UMAP, and native Metal FFT-grid openTSNE | MIT for the visualization contribution; `src/metal_backend.mm` remains `MIT AND Apache-2.0` because it also contains separately identified Faiss-mlx-derived search organization. Retain the algorithmic-reference record below. |
 | Randomized PCA CPU/CUDA/Metal | `src/pca.cpp`, `src/pca_cuda.cu`, `src/pca_cuda_backend.hpp`, public wrappers | Standalone float32 adaptation of the current fastEmbedR/fastPLS randomized-PCA strategy; uses package-owned QR/eigensolver code and existing native accelerator matrix multiplication | MIT under Stefano Cacciatore's fastPLS relicensing declaration and fastEmbedR MIT terms; cite both projects. No Armadillo, Eigen, RAFT, fastPLS, or fastEmbedR link is present. |
 | Graph and random-walk utilities | `src/graph_cluster.cpp` | Original kodama-cpp implementation | MIT. Louvain, Leiden, and cuGraph code are absent from the audited baseline. |
 | Build, examples, tests, benchmarks | `CMakeLists.txt`, `cmake/`, `examples/`, `tests/`, `benchmarks/`, tracked `tools/` scripts | Repository-authored support code | MIT. |
@@ -109,6 +119,21 @@ No source from GPL-licensed `uwot` is permitted in the core. It may be used
 only as an external benchmark/reference package. If future changes copy or
 closely adapt any referenced implementation, its copyright notice, exact
 snapshot, and license must be added here and to the affected file.
+
+For the 2026-08-08 visualization audit, a clean clone of the canonical GitHub
+repository at commit `814350a5ca69b0c26e6df40377636f109055f84b` produced these
+upstream source hashes:
+
+- `embedding_metal_impl.mm`: `95a9c63d6f96603b24e7e5b0b6d4733638b76f844eb48f17a3ebb9f7c8e1f3f9`;
+- `embedding_cuda_kernels.cpp`: `669cd19ed72e86e2a858ac36098799221f448c36a1e16147a0e6717d86301f72`;
+- `fast_knn_umap.cpp`: `afb865137004af2b5f2b034c307c8afbb7eb36e94c094770e47e098f43f05f65`; and
+- `tsne_neighbors.cpp`: `d3bb871a0a7811e6b20433127c29e4cc8fe858e5363d01c37e06635608b0b4f3`.
+
+The CPU CSR, CUDA COO/CSR atomic, and Metal clean-row UMAP execution paths and
+the Metal openTSNE shader and host schedule were ported from that snapshot.
+KODAMA replaces unsupported Metal `atomic_float` grid storage with float-bit
+compare-and-swap accumulation over `atomic_uint`; this portability change is
+documented and tested against fastEmbedR on three datasets.
 
 ## Per-file policy
 

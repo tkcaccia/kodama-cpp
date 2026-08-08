@@ -19,7 +19,7 @@ copyright he owns; package and publication coauthors remain credited.
 
 The native visualization, CPU HNSW, and Metal implementation were adapted
 from the MIT-licensed `fastEmbedR` snapshot
-`c98b9ecd124d442f20f849ce1be7f5bd4c13d0db`. The exact 2D/3D grid search was
+`814350a5ca69b0c26e6df40377636f109055f84b`. The exact 2D/3D grid search was
 adapted from the MIT-licensed `faissR` snapshot
 `b317a9715dd33ad3a49cf7989a83b4f7f9f7b389`. Both repositories were developed
 and committed by Stefano Cacciatore under the Git identities documented above.
@@ -62,16 +62,22 @@ are retained in `licenses/FAISS-LICENSE` and `licenses/CUVS-LICENSE`.
 
 ## UMAP and openTSNE
 
-`src/visualization.cpp` and `src/embedding_cuda_kernels.cu` are adapted from
-fastEmbedR's MIT implementation. Its documented mathematical and architectural
+`src/visualization.cpp`, `src/embedding_cuda_kernels.cu`, and the Metal UMAP
+and openTSNE optimizers in `src/metal_backend.mm` are adapted from fastEmbedR's MIT
+implementation. Its documented mathematical and architectural
 references include the BSD-licensed UMAP reference implementation, openTSNE,
 t-SNE-CUDA, Rtsne behavior, opt-SNE/Multicore-opt-SNE, umappp, and ensmallen;
 AppleSiliconFFT (MIT); and mlx-vis (Apache-2.0). No source from the GPL-licensed
 `uwot` package is included in the core. See `PROVENANCE.md` for the complete
 classification and the rule governing future adaptations. The current port
 includes fastEmbedR's direct binary/fuzzy CSR construction, smooth-kNN
-bandwidth calculation, epoch scheduler, CPU float32 openTSNE optimizer, and
-CUDA embedding kernels.
+bandwidth calculation, backend-specific CPU CSR/CUDA COO-CSR/Metal clean-row
+UMAP schedules, CPU float32 openTSNE optimizer, CUDA embedding kernels,
+fixed-point atomic Metal UMAP updates, and native
+Metal FFT-grid openTSNE. The Metal
+port remains part of the mixed-license `src/metal_backend.mm` file because that
+file also contains separately identified Apache-2.0 Faiss-mlx-derived search
+organization.
 
 ## PCA
 

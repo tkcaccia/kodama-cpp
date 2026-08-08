@@ -210,6 +210,12 @@ Rcpp::List kodama_matrix_cpp_temp(
     Rcpp::Named("gpu_auto_workers") = result.gpu_auto_workers,
     Rcpp::Named("gpu_scheduler_enabled") = result.gpu_scheduler_enabled,
     Rcpp::Named("gpu_scheduler_lanes") = result.gpu_scheduler_lanes,
+    Rcpp::Named("kmeans_input_uploads") =
+      static_cast<double>(result.kmeans_input_uploads),
+    Rcpp::Named("projection_sparse_uploads") = static_cast<double>(result.projection_sparse_uploads),
+    Rcpp::Named("projection_full_downloads") = static_cast<double>(result.projection_full_downloads),
+    Rcpp::Named("result_row_uploads") = static_cast<double>(result.result_row_uploads),
+    Rcpp::Named("result_matrix_downloads") = static_cast<double>(result.result_matrix_downloads),
     Rcpp::Named("gpu_sm_count") = result.gpu_sm_count,
     Rcpp::Named("gpu_free_memory_mb") = result.gpu_free_memory_mb,
     Rcpp::Named("gpu_total_memory_mb") = result.gpu_total_memory_mb,

@@ -32,7 +32,8 @@ kodama_matrix_graph(
   seed = 1234L,
   visual.init = TRUE,
   progress = TRUE,
-  apply.kodama.dissimilarity = TRUE
+  apply.kodama.dissimilarity = TRUE,
+  return.graph = FALSE
 )
 }
 \arguments{
@@ -65,7 +66,8 @@ constrained grouping when supplied.}
 
 \item{splitting}{Initial number of classes.}
 
-\item{n.cores}{CPU workers or CUDA automatic lanes when backend permits.}
+\item{n.cores}{CPU workers. For CUDA or Metal, \code{0} enables backend-specific
+automatic independent-run lane selection.}
 
 \item{graph.neighbors}{Number of neighbors retained in the returned graph.}
 
@@ -100,6 +102,9 @@ graph-only initialization. The standard path is
 
 \item{apply.kodama.dissimilarity}{Whether to return the KODAMA-corrected
 graph.}
+
+\item{return.graph}{\code{FALSE} omits the graph, \code{TRUE} materializes matrices,
+and \code{"handle"} returns a reusable external C++ graph pointer.}
 }
 \description{
 KODAMA matrix from a precomputed KNN graph

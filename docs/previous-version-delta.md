@@ -1,10 +1,12 @@
-# Improvements over the historical KODAMA R implementation
+# Improvements over KODAMA R 2.4.1/2.4
 
 The KODAMA mathematical principle was introduced in 2014 and its R package was
-described in 2017. This document records why kodama-cpp is a distinct software
-submission while preserving that prior work.
+described in 2017. KODAMA R 2.4.1/2.4 is the sole previous-version performance
+comparator in this work. This document records why kodama-cpp is a distinct
+software submission while preserving that prior work. Later KODAMA releases,
+including 3.3, are excluded from timing and quality comparisons.
 
-| Area | Historical R implementation | kodama-cpp 0.1.0 |
+| Area | KODAMA R 2.4.1/2.4 | kodama-cpp 0.1.0 |
 | --- | --- | --- |
 | Core architecture | R-package workflow with R-facing compiled helpers | Standalone C++17 library with no R or Python runtime dependency |
 | Search dynamics | Historical stochastic label evolution driven by cross-validated prediction | Grouped adaptive proposals, transition-driven coarsening, and a disclosed label-only degeneracy guard; raw CV accuracy remains separately reported |
@@ -28,6 +30,10 @@ software contribution is the typed, heterogeneous, reusable execution of this
 procedure and its consistent exposure to multiple host languages.
 
 Runtime comparisons are interpreted by scope. Kernel, core-optimizer, and
-end-to-end `KODAMA.matrix` timings are reported separately. Historical PLS-DA
-and current PLS-LDA are related but different classifiers, so their results are
-reported as a predecessor comparison rather than mathematical parity.
+end-to-end `KODAMA.matrix` timings are reported separately. The manuscript
+quantifies both historical MetRef routes. KNN is a classifier-matched predecessor
+comparison. Historical PLS-DA is retained as a contextual predecessor baseline,
+but it is not used to claim a classifier-matched speedup because current KODAMA
+introduces label-aware SIMPLS followed by LDA in the requested-component latent
+space. That PLS-LDA route is a novelty of kodama-cpp rather than an assertion of
+numerical equivalence to the 2.4.1 PLS-DA decoder.

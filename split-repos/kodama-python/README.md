@@ -35,6 +35,12 @@ For `backend="cpu"`, `n_cores` controls both native HNSW construction and
 graph querying. Parallel builds are approximate; regression tests require at
 least 0.99 recall against exact neighbors rather than bitwise equality with a
 one-thread graph.
+For `backend="cuda"` or `backend="metal"`, `n_cores=0` enables automatic
+independent-`M` lane selection from available device resources and the
+backend-specific workspace estimate. Positive values remain explicit. Matrix
+results mirror R with `n_cores`, `gpu_auto_workers`,
+`gpu_scheduler_enabled`, `gpu_scheduler_lanes`, and
+`gpu_worker_memory_estimate_mb`.
 
 ## Development Install
 
@@ -52,6 +58,18 @@ python -m pip install -v . \
   --config-settings=cmake.define.KODAMA_CPP_ROOT=/path/to/kodama-cpp \
   --config-settings=cmake.define.KODAMA_CPP_BUILD_DIR=/path/to/kodama-cpp/build
 ```
+
+To build a release wheel against an installed core, point CMake at the core's
+package directory without replacing scikit-build's complete prefix path:
+
+```sh
+cmake --install /path/to/kodama-cpp/build --prefix /path/to/kodama-install
+CMAKE_ARGS='-Dkodama-cpp_DIR=/path/to/kodama-install/lib/cmake/kodama-cpp' \
+  python -m pip wheel . --no-deps --wheel-dir dist
+```
+
+Using `kodama-cpp_DIR` is intentional. Replacing `CMAKE_PREFIX_PATH` can hide
+the isolated build environment's `pybind11` CMake package.
 
 When linking a static `kodama-cpp`, pass any required external libraries through
 `KODAMA_CPP_EXTRA_LIBS` or prefer a conda-forge installation of `kodama-cpp`.
@@ -75,38 +93,46 @@ kodama.diagnostics()
 ## Recommended Workflow
 
 ```python
+import numpy as np
 import kodama
 
-pc = kodama.PCA(x, ncomp=20, backend="cpu")
+rng = np.random.default_rng(4)
+x = np.vstack([
+    rng.normal(1.0, 0.20, size=(250, 20)),
+    rng.normal(3.0, 0.20, size=(250, 20)),
+]).astype(np.float32)
+labels = np.repeat(np.arange(2), 250)
 
 normalized = kodama.normalization(x, method="pqn", backend="cpu", n_cores=4)
 scaled = kodama.scaling(
     normalized["newXtrain"], method="autoscaling", backend="cpu", n_cores=4
 )
-pc["scores"].shape
+analysis_x = scaled["newXtrain"]
+pc = kodama.PCA(analysis_x, ncomp=20, backend="cpu")
+assert pc["scores"].shape == (500, 20)
 
-prepared = kodama.graph(x, k=30, backend="cuda")
+prepared = kodama.graph(analysis_x, k=30, backend="cpu")
 assert "data" not in prepared
 
 kk = kodama.matrix(
-    data=x,
+    data=analysis_x,
     graph=prepared,
-    spatial=spatial,
     classifier="knn",
-    backend="cuda",
-    M=100,
+    backend="cpu",
+    M=10,
     Tcycle=20,
     knn_k=30,
     n_cores=4,
+    return_graph=True,
 )
 
 kodama.timing(kk)
-labels = kk.best_labels
+kodama_labels = kk.best_labels
 um = kodama.visualization(
     kk,
     "UMAP",
     k=30,
-    backend="cuda",
+    backend="cpu",
 )
 clu = kodama.clustering(um, n_iterations=10, random_walk_steps=4)
 ```
@@ -131,9 +157,18 @@ reuses the returned graph and start without another graph or PCA calculation.
 Only `knn` is serialized; the former duplicate `base_knn` payload has been
 removed. Inspect `graph_builds`, `knn_is_kodama_corrected`,
 `graph_storage_bytes`, and `timing["visual_init_seconds"]` when profiling.
+`KODAMA.graph()` returns a native capsule by default. Call
+`kodama.graph_materialize(graph)` only when NumPy index and distance arrays are
+needed; the capsule can be passed directly to `KODAMA.matrix()` and does not
+retain the raw input matrix. The resident result graph is not materialized by
+default. Set `return_graph=True`
+when graph matrices or a later visualization call are required.
+With `return_graph=False`, the labels-only path omits the otherwise-unused
+final graph-distance correction.
 Visualization prefers explicit `init`, then a stored initialization whose
-backend matches the selected CPU/CUDA backend, then explicit `raw_data`. Pass
-the raw matrix when changing backend:
+backend matches the selected CPU/CUDA/Metal backend, then explicit `raw_data`.
+UMAP and openTSNE support CPU, CUDA, and Metal. Pass the raw matrix when
+changing backend:
 
 ```python
 tsne_cpu = kodama.visualization(
@@ -145,19 +180,28 @@ tsne_cpu = kodama.visualization(
 )
 ```
 
-The returned NumPy-compatible embedding exposes `initialization` and
-`initialization_backend` attributes reporting the selected path.
+The returned NumPy-compatible embedding exposes `initialization`,
+`initialization_backend`, `backend`, `optimizer`, `runtime_seconds`,
+`graph_edges`, and `graph_max_weight`. The graph fields describe the fuzzy
+UMAP graph; they are zero for openTSNE because its sparse probabilities are a
+different object.
 
 ## Benchmark
 
-First export RData datasets to CSV:
+The maintained benchmark accepts a non-spatial NPZ file containing a float32
+`data` matrix. Additional arrays such as `labels` are ignored by the timing
+driver and are never passed to KODAMA:
 
-```sh
-Rscript scripts/export_spatial_rdata.R
+```python
+np.savez_compressed("MetRef.npz", data=x.astype(np.float32), labels=labels)
 ```
 
 Then run:
 
 ```sh
-python benchmarks/run_br8100_merfish.py --input-dir exported-spatial
+python benchmarks/run_nonspatial.py MetRef.npz \
+  --name MetRef --backends cpu,cuda --M 100 --Tcycle 100
 ```
+
+The CSV reports `KODAMA.graph`, KNN/PLS-LDA `KODAMA.matrix`, UMAP, openTSNE,
+and complete pipeline wall times separately for every requested backend.
