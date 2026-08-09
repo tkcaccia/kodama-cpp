@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 #include <utility>
 
 #include "kodama/kodama.hpp"
@@ -339,6 +340,11 @@ Rcpp::List core_to_r(const kodama::CoreResult& result) {
     Rcpp::Named("scorebest") = result.scorebest,
     Rcpp::Named("vect_acc") = Rcpp::NumericVector(result.vect_acc.begin(), result.vect_acc.end()),
     Rcpp::Named("vect_score") = Rcpp::NumericVector(result.vect_score.begin(), result.vect_score.end()),
+    Rcpp::Named("proposal_size") = Rcpp::IntegerVector(result.proposal_size.begin(), result.proposal_size.end()),
+    Rcpp::Named("active_classes") = Rcpp::IntegerVector(result.active_classes.begin(), result.active_classes.end()),
+    Rcpp::Named("accepted") = Rcpp::LogicalVector(result.accepted.begin(), result.accepted.end()),
+    Rcpp::Named("improving_acceptance") = Rcpp::LogicalVector(result.improving_acceptance.begin(), result.improving_acceptance.end()),
+    Rcpp::Named("temperature_acceptance") = Rcpp::LogicalVector(result.temperature_acceptance.begin(), result.temperature_acceptance.end()),
     Rcpp::Named("cycles_completed") = result.cycles_completed,
     Rcpp::Named("proposals_evaluated") = result.proposals_evaluated,
     Rcpp::Named("best_state_updates") = result.best_state_updates,
@@ -348,6 +354,13 @@ Rcpp::List core_to_r(const kodama::CoreResult& result) {
     Rcpp::Named("current_state_rejections") = result.current_state_rejections,
     Rcpp::Named("coarsening_moves") = result.coarsening_moves,
     Rcpp::Named("absorption_moves") = result.absorption_moves,
+    Rcpp::Named("transition_attempted") = result.transition_attempted,
+    Rcpp::Named("transition_accepted") = result.transition_accepted,
+    Rcpp::Named("many_to_one_attempted") = result.many_to_one_attempted,
+    Rcpp::Named("many_to_one_accepted") = result.many_to_one_accepted,
+    Rcpp::Named("pls_coarsening_attempted") = result.pls_coarsening_attempted,
+    Rcpp::Named("pls_coarsening_accepted") = result.pls_coarsening_accepted,
+    Rcpp::Named("cv_evaluations") = result.cv_evaluations,
     Rcpp::Named("success") = result.success,
     Rcpp::Named("runtime_seconds") = result.runtime_seconds,
     Rcpp::Named("peak_memory_mb") = result.peak_memory_mb
@@ -538,6 +551,80 @@ Rcpp::List kodama_matrix_result_to_r(
     std::chrono::steady_clock::now() - graph_conversion_start
   ).count();
 
+  Rcpp::IntegerVector diagnostic_run(result.run_diagnostics.size());
+  Rcpp::IntegerVector diagnostic_cycles(result.run_diagnostics.size());
+  Rcpp::IntegerVector transition_attempted(result.run_diagnostics.size());
+  Rcpp::IntegerVector transition_accepted(result.run_diagnostics.size());
+  Rcpp::IntegerVector many_to_one_attempted(result.run_diagnostics.size());
+  Rcpp::IntegerVector many_to_one_accepted(result.run_diagnostics.size());
+  Rcpp::IntegerVector pls_coarsening_attempted(result.run_diagnostics.size());
+  Rcpp::IntegerVector pls_coarsening_accepted(result.run_diagnostics.size());
+  Rcpp::IntegerVector cv_evaluations(result.run_diagnostics.size());
+  Rcpp::CharacterVector landmark_rows_hash(result.run_diagnostics.size());
+  Rcpp::CharacterVector initial_labels_hash(result.run_diagnostics.size());
+  Rcpp::CharacterVector fold_assignments_hash(result.run_diagnostics.size());
+  for (std::size_t i = 0; i < result.run_diagnostics.size(); ++i) {
+    const auto& diagnostic = result.run_diagnostics[i];
+    diagnostic_run[i] = diagnostic.run;
+    diagnostic_cycles[i] = diagnostic.cycles_completed;
+    transition_attempted[i] = diagnostic.transition_attempted;
+    transition_accepted[i] = diagnostic.transition_accepted;
+    many_to_one_attempted[i] = diagnostic.many_to_one_attempted;
+    many_to_one_accepted[i] = diagnostic.many_to_one_accepted;
+    pls_coarsening_attempted[i] = diagnostic.pls_coarsening_attempted;
+    pls_coarsening_accepted[i] = diagnostic.pls_coarsening_accepted;
+    cv_evaluations[i] = diagnostic.cv_evaluations;
+    std::ostringstream landmark_stream;
+    std::ostringstream label_stream;
+    std::ostringstream fold_stream;
+    landmark_stream << std::hex << diagnostic.landmark_rows_hash;
+    label_stream << std::hex << diagnostic.initial_labels_hash;
+    fold_stream << std::hex << diagnostic.fold_assignments_hash;
+    landmark_rows_hash[i] = landmark_stream.str();
+    initial_labels_hash[i] = label_stream.str();
+    fold_assignments_hash[i] = fold_stream.str();
+  }
+  const Rcpp::DataFrame run_diagnostics = Rcpp::DataFrame::create(
+    Rcpp::Named("run") = diagnostic_run,
+    Rcpp::Named("cycles_completed") = diagnostic_cycles,
+    Rcpp::Named("transition_attempted") = transition_attempted,
+    Rcpp::Named("transition_accepted") = transition_accepted,
+    Rcpp::Named("many_to_one_attempted") = many_to_one_attempted,
+    Rcpp::Named("many_to_one_accepted") = many_to_one_accepted,
+    Rcpp::Named("pls_coarsening_attempted") = pls_coarsening_attempted,
+    Rcpp::Named("pls_coarsening_accepted") = pls_coarsening_accepted,
+    Rcpp::Named("cv_evaluations") = cv_evaluations,
+    Rcpp::Named("landmark_rows_hash") = landmark_rows_hash,
+    Rcpp::Named("initial_labels_hash") = initial_labels_hash,
+    Rcpp::Named("fold_assignments_hash") = fold_assignments_hash
+  );
+  Rcpp::IntegerVector cycle_run(result.cycle_diagnostics.size());
+  Rcpp::IntegerVector cycle_number(result.cycle_diagnostics.size());
+  Rcpp::IntegerVector proposal_size(result.cycle_diagnostics.size());
+  Rcpp::IntegerVector active_classes(result.cycle_diagnostics.size());
+  Rcpp::LogicalVector accepted(result.cycle_diagnostics.size());
+  Rcpp::LogicalVector improving_acceptance(result.cycle_diagnostics.size());
+  Rcpp::LogicalVector temperature_acceptance(result.cycle_diagnostics.size());
+  for (std::size_t i = 0; i < result.cycle_diagnostics.size(); ++i) {
+    const auto& diagnostic = result.cycle_diagnostics[i];
+    cycle_run[i] = diagnostic.run;
+    cycle_number[i] = diagnostic.cycle;
+    proposal_size[i] = diagnostic.proposal_size;
+    active_classes[i] = diagnostic.active_classes;
+    accepted[i] = diagnostic.accepted != 0;
+    improving_acceptance[i] = diagnostic.improving_acceptance != 0;
+    temperature_acceptance[i] = diagnostic.temperature_acceptance != 0;
+  }
+  const Rcpp::DataFrame cycle_diagnostics = Rcpp::DataFrame::create(
+    Rcpp::Named("run") = cycle_run,
+    Rcpp::Named("cycle") = cycle_number,
+    Rcpp::Named("proposal_size") = proposal_size,
+    Rcpp::Named("active_classes") = active_classes,
+    Rcpp::Named("accepted") = accepted,
+    Rcpp::Named("improving_acceptance") = improving_acceptance,
+    Rcpp::Named("temperature_acceptance") = temperature_acceptance
+  );
+
   return Rcpp::List::create(
     Rcpp::Named("acc") = acc,
     Rcpp::Named("v") = v,
@@ -548,8 +635,14 @@ Rcpp::List kodama_matrix_result_to_r(
       static_cast<double>(result.graph_storage_bytes),
     Rcpp::Named("visual_init") = visual_init,
     Rcpp::Named("res_constrain") = res_constrain,
+    Rcpp::Named("run_diagnostics") = run_diagnostics,
+    Rcpp::Named("cycle_diagnostics") = cycle_diagnostics,
     Rcpp::Named("graph_builds") = result.graph_builds,
     Rcpp::Named("spatial_graph_builds") = result.spatial_graph_builds,
+    Rcpp::Named("shared_landmark_partition_used") =
+      result.shared_landmark_partition_used,
+    Rcpp::Named("shared_landmark_partition_strata") =
+      result.shared_landmark_partition_strata,
     Rcpp::Named("graph_index_type") = kodama::to_string(result.graph_index_type),
     Rcpp::Named("graph_ivf_nlist") = result.graph_ivf_nlist,
     Rcpp::Named("graph_ivf_nprobe") = result.graph_ivf_nprobe,
@@ -635,7 +728,9 @@ Rcpp::List kodama_matrix_cpp(
   bool progress = false,
   bool apply_kodama_dissimilarity = true,
   bool compute_visual_init = false,
-  int graph_output = 0
+  int graph_output = 0,
+  int folds = 5,
+  std::string evolution_policy = "full"
 ) {
   const int n = data.nrow();
   const int p = data.ncol();
@@ -654,6 +749,8 @@ Rcpp::List kodama_matrix_cpp(
   options.landmarks = landmarks;
   options.splitting = splitting;
   options.graph_neighbors = graph_neighbors;
+  options.folds = folds;
+  options.evolution = kodama::EvolutionPolicy::from_name(evolution_policy);
   options.n_threads = n_cores;
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
@@ -729,7 +826,9 @@ Rcpp::List kodama_matrix_graph_cpp(
   int seed = 1234,
   bool progress = false,
   bool apply_kodama_dissimilarity = true,
-  int graph_output = 0
+  int graph_output = 0,
+  int folds = 5,
+  std::string evolution_policy = "full"
 ) {
   const int n = indices.nrow();
   kodama::NeighborGraph graph = graph_from_r(indices, distances);
@@ -758,6 +857,8 @@ Rcpp::List kodama_matrix_graph_cpp(
   options.landmarks = landmarks;
   options.splitting = splitting;
   options.graph_neighbors = graph_neighbors;
+  options.folds = folds;
+  options.evolution = kodama::EvolutionPolicy::from_name(evolution_policy);
   options.n_threads = n_cores;
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
@@ -836,7 +937,9 @@ Rcpp::List kodama_matrix_graph_handle_cpp(
   int seed = 1234,
   bool progress = false,
   bool apply_kodama_dissimilarity = true,
-  int graph_output = 0
+  int graph_output = 0,
+  int folds = 5,
+  std::string evolution_policy = "full"
 ) {
   Rcpp::XPtr<RGraphHandle> handle = graph_handle_from_sexp(graph_handle);
   const int n = handle->prepared.samples;
@@ -847,6 +950,8 @@ Rcpp::List kodama_matrix_graph_handle_cpp(
   options.landmarks = landmarks;
   options.splitting = splitting;
   options.graph_neighbors = graph_neighbors;
+  options.folds = folds;
+  options.evolution = kodama::EvolutionPolicy::from_name(evolution_policy);
   options.n_threads = n_cores;
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
@@ -1108,6 +1213,7 @@ Rcpp::List kodama_knn_graph_cpp(
     result = kodama::KODAMAGraph(view, options);
   }
   Rcpp::RObject visual_init = visualization_init_to_r(result.visual_init, seed);
+  const Rcpp::DataFrame timings = stage_timings_to_r(result.timings);
   const auto conversion_start = std::chrono::steady_clock::now();
   Rcpp::List out;
   if (storage == "handle") {
@@ -1146,6 +1252,7 @@ Rcpp::List kodama_knn_graph_cpp(
     Rcpp::Named("r_graph_conversion_seconds") = conversion_seconds,
     Rcpp::Named("runtime_seconds") = result.runtime_seconds
   );
+  out["timings"] = timings;
   return out;
 }
 

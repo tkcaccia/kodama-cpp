@@ -208,12 +208,19 @@ KODAMA.matrix.cpp <- local({
            classifier = c("pls_lda", "knn"),
            backend = c("cpu", "cuda", "metal"),
            seed = 1234L,
+           folds = 5L,
            progress = TRUE,
            apply.kodama.dissimilarity = TRUE,
-           visual.init = TRUE) {
+           visual.init = TRUE,
+           .evolution.policy = "full") {
     classifier <- match.arg(classifier)
     backend <- match.arg(backend)
     spatial.constraint.mode <- match.arg(spatial.constraint.mode)
+    .evolution.policy <- match.arg(.evolution.policy, c(
+      "full", "no_prediction_guidance", "fixed_proposal_budget",
+      "no_transition_proposal", "greedy_acceptance", "raw_cv_score",
+      "no_pls_transition_coarsening", "no_pls_fragmentation_penalty"
+    ))
     data <- .kodama_as_numeric_matrix(data)
     visual_init <- if (isTRUE(visual.init)) .kodama_make_visual_init(data, seed = seed, backend = backend) else NULL
 
@@ -310,7 +317,9 @@ KODAMA.matrix.cpp <- local({
       backend = backend,
       seed = as.integer(seed),
       progress = isTRUE(progress),
-      apply_kodama_dissimilarity = isTRUE(apply.kodama.dissimilarity)
+      apply_kodama_dissimilarity = isTRUE(apply.kodama.dissimilarity),
+      folds = as.integer(folds),
+      evolution_policy = .evolution.policy
     )
     if (!is.null(visual_init)) out$visual_init <- visual_init
     out

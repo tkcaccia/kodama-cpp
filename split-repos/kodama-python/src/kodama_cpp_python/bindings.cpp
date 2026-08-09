@@ -122,11 +122,34 @@ py::array_t<int> vector_to_int_array(const std::vector<int>& values) {
   return out;
 }
 
+py::array_t<bool> vector_to_bool_array(const std::vector<unsigned char>& values) {
+  py::array_t<bool> out(static_cast<py::ssize_t>(values.size()));
+  auto view = out.mutable_unchecked<1>();
+  for (py::ssize_t i = 0; i < view.shape(0); ++i) {
+    view(i) = values[static_cast<std::size_t>(i)] != 0;
+  }
+  return out;
+}
+
 py::array_t<float> vector_to_float_array(const std::vector<float>& values) {
   py::array_t<float> out(static_cast<py::ssize_t>(values.size()));
   auto view = out.mutable_unchecked<1>();
   for (py::ssize_t i = 0; i < view.shape(0); ++i) {
     view(i) = values[static_cast<std::size_t>(i)];
+  }
+  return out;
+}
+
+py::list stage_timings_to_python(
+  const std::vector<kodama::KODAMAStageTiming>& timings
+) {
+  py::list out;
+  for (const auto& timing : timings) {
+    py::dict item;
+    item["step"] = timing.step;
+    item["wall_seconds"] = timing.wall_seconds;
+    item["accumulated_seconds"] = timing.accumulated_seconds;
+    out.append(std::move(item));
   }
   return out;
 }
@@ -301,6 +324,11 @@ py::dict core_to_python(const kodama::CoreResult& result) {
   out["scorebest"] = result.scorebest;
   out["vect_acc"] = vector_to_double_array(result.vect_acc);
   out["vect_score"] = vector_to_double_array(result.vect_score);
+  out["proposal_size"] = vector_to_int_array(result.proposal_size);
+  out["active_classes"] = vector_to_int_array(result.active_classes);
+  out["accepted"] = vector_to_bool_array(result.accepted);
+  out["improving_acceptance"] = vector_to_bool_array(result.improving_acceptance);
+  out["temperature_acceptance"] = vector_to_bool_array(result.temperature_acceptance);
   out["cycles_completed"] = result.cycles_completed;
   out["proposals_evaluated"] = result.proposals_evaluated;
   out["best_state_updates"] = result.best_state_updates;
@@ -310,6 +338,13 @@ py::dict core_to_python(const kodama::CoreResult& result) {
   out["current_state_rejections"] = result.current_state_rejections;
   out["coarsening_moves"] = result.coarsening_moves;
   out["absorption_moves"] = result.absorption_moves;
+  out["transition_attempted"] = result.transition_attempted;
+  out["transition_accepted"] = result.transition_accepted;
+  out["many_to_one_attempted"] = result.many_to_one_attempted;
+  out["many_to_one_accepted"] = result.many_to_one_accepted;
+  out["pls_coarsening_attempted"] = result.pls_coarsening_attempted;
+  out["pls_coarsening_accepted"] = result.pls_coarsening_accepted;
+  out["cv_evaluations"] = result.cv_evaluations;
   out["success"] = result.success;
   out["runtime_seconds"] = result.runtime_seconds;
   out["peak_memory_mb"] = result.peak_memory_mb;
@@ -327,6 +362,37 @@ py::dict kodama_matrix_to_python(const kodama::KODAMAMatrixResult& result, const
   out["v"] = matrix_to_double_array(result.v, result.runs, result.cycles);
   out["res"] = matrix_to_int_array(result.res, result.runs, result.samples);
   out["res_constrain"] = constraint_matrix_to_int_array(result);
+  py::list run_diagnostics;
+  for (const auto& diagnostic : result.run_diagnostics) {
+    py::dict item;
+    item["run"] = diagnostic.run;
+    item["cycles_completed"] = diagnostic.cycles_completed;
+    item["transition_attempted"] = diagnostic.transition_attempted;
+    item["transition_accepted"] = diagnostic.transition_accepted;
+    item["many_to_one_attempted"] = diagnostic.many_to_one_attempted;
+    item["many_to_one_accepted"] = diagnostic.many_to_one_accepted;
+    item["pls_coarsening_attempted"] = diagnostic.pls_coarsening_attempted;
+    item["pls_coarsening_accepted"] = diagnostic.pls_coarsening_accepted;
+    item["cv_evaluations"] = diagnostic.cv_evaluations;
+    item["landmark_rows_hash"] = diagnostic.landmark_rows_hash;
+    item["initial_labels_hash"] = diagnostic.initial_labels_hash;
+    item["fold_assignments_hash"] = diagnostic.fold_assignments_hash;
+    run_diagnostics.append(std::move(item));
+  }
+  py::list cycle_diagnostics;
+  for (const auto& diagnostic : result.cycle_diagnostics) {
+    py::dict item;
+    item["run"] = diagnostic.run;
+    item["cycle"] = diagnostic.cycle;
+    item["proposal_size"] = diagnostic.proposal_size;
+    item["active_classes"] = diagnostic.active_classes;
+    item["accepted"] = diagnostic.accepted != 0;
+    item["improving_acceptance"] = diagnostic.improving_acceptance != 0;
+    item["temperature_acceptance"] = diagnostic.temperature_acceptance != 0;
+    cycle_diagnostics.append(std::move(item));
+  }
+  out["run_diagnostics"] = std::move(run_diagnostics);
+  out["cycle_diagnostics"] = std::move(cycle_diagnostics);
   if (options.materialize_graph) {
     out["knn"] = graph_to_python(result.knn, result.samples);
   } else {
@@ -523,7 +589,9 @@ py::dict matrix(
   bool progress,
   bool apply_kodama_dissimilarity,
   bool compute_visual_init,
-  bool return_graph
+  bool return_graph,
+  int folds,
+  const std::string& evolution_policy
 ) {
   auto x_view = data.unchecked<2>();
   const int n = static_cast<int>(x_view.shape(0));
@@ -536,6 +604,8 @@ py::dict matrix(
   options.landmarks = landmarks;
   options.splitting = splitting;
   options.graph_neighbors = graph_neighbors;
+  options.folds = folds;
+  options.evolution = kodama::EvolutionPolicy::from_name(evolution_policy);
   options.n_threads = n_threads;
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
@@ -611,7 +681,9 @@ py::dict matrix_graph(
   int seed,
   bool progress,
   bool apply_kodama_dissimilarity,
-  bool return_graph
+  bool return_graph,
+  int folds,
+  const std::string& evolution_policy
 ) {
   auto idx = indices.unchecked<2>();
   auto dst = distances.unchecked<2>();
@@ -626,6 +698,8 @@ py::dict matrix_graph(
   options.landmarks = landmarks;
   options.splitting = splitting;
   options.graph_neighbors = graph_neighbors;
+  options.folds = folds;
+  options.evolution = kodama::EvolutionPolicy::from_name(evolution_policy);
   options.n_threads = n_threads;
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
@@ -689,7 +763,8 @@ py::dict matrix_graph_handle(
   const std::string& classifier, const std::string& backend,
   const std::string& graph_feature_mode, int graph_feature_components,
   int graph_feature_steps, int seed, bool progress,
-  bool apply_kodama_dissimilarity, bool return_graph
+  bool apply_kodama_dissimilarity, bool return_graph, int folds,
+  const std::string& evolution_policy
 ) {
   kodama::KODAMAGraphResult& prepared = graph_from_capsule(capsule);
   kodama::KODAMAMatrixOptions options;
@@ -700,6 +775,8 @@ py::dict matrix_graph_handle(
   options.splitting = splitting;
   options.n_threads = n_threads;
   options.graph_neighbors = graph_neighbors;
+  options.folds = folds;
+  options.evolution = kodama::EvolutionPolicy::from_name(evolution_policy);
   options.knn.k = knn_k;
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
@@ -1379,7 +1456,9 @@ PYBIND11_MODULE(_core, m) {
     py::arg("progress") = true,
     py::arg("apply_kodama_dissimilarity") = true,
     py::arg("compute_visual_init") = false,
-    py::arg("return_graph") = false
+    py::arg("return_graph") = false,
+    py::arg("folds") = 5,
+    py::arg("evolution_policy") = "full"
   );
   m.def(
     "matrix_graph",
@@ -1410,7 +1489,9 @@ PYBIND11_MODULE(_core, m) {
     py::arg("seed") = 1234,
     py::arg("progress") = true,
     py::arg("apply_kodama_dissimilarity") = true,
-    py::arg("return_graph") = false
+    py::arg("return_graph") = false,
+    py::arg("folds") = 5,
+    py::arg("evolution_policy") = "full"
   );
   m.def(
     "matrix_graph_handle", &matrix_graph_handle,
@@ -1429,7 +1510,9 @@ PYBIND11_MODULE(_core, m) {
     py::arg("graph_feature_steps") = 3, py::arg("seed") = 1234,
     py::arg("progress") = true,
     py::arg("apply_kodama_dissimilarity") = true,
-    py::arg("return_graph") = false
+    py::arg("return_graph") = false,
+    py::arg("folds") = 5,
+    py::arg("evolution_policy") = "full"
   );
   m.def(
     "graph",

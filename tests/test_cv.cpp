@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -70,6 +71,19 @@ void check_constrained_folds(const std::vector<int>& constrain, const std::vecto
 
 void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
+}
+
+const std::vector<std::string>& evolution_policy_ablation_names() {
+  static const std::vector<std::string> names = {
+    "no_prediction_guidance",
+    "fixed_proposal_budget",
+    "no_transition_proposal",
+    "greedy_acceptance",
+    "raw_cv_score",
+    "no_pls_transition_coarsening",
+    "no_pls_fragmentation_penalty"
+  };
+  return names;
 }
 
 const kodama::KODAMAStageTiming* find_timing(
@@ -520,6 +534,75 @@ void test_public_error_contracts() {
           grouped_repeat.vect_score == grouped_result.vect_score &&
           grouped_repeat.cycles_completed == grouped_result.cycles_completed,
           "Core stochastic evolution is not reproducible for a fixed seed.");
+
+  const auto policy_fields = [](const kodama::EvolutionPolicy& policy) {
+    return std::array<bool, 8>{
+      policy.prediction_guidance,
+      policy.adaptive_proposal_size,
+      policy.transition_proposal,
+      policy.stochastic_acceptance,
+      policy.diversity_multiplier,
+      policy.pls_transition_coarsening,
+      policy.pls_fragmentation_penalty,
+      policy.reject_single_class
+    };
+  };
+  const kodama::EvolutionPolicy full_policy =
+    kodama::EvolutionPolicy::from_name("full");
+  require(policy_fields(full_policy) == policy_fields(kodama::EvolutionPolicy::standard()),
+          "Explicit full evolution policy differs from the standard policy.");
+  for (const std::string& name : evolution_policy_ablation_names()) {
+    const auto fields = policy_fields(kodama::EvolutionPolicy::from_name(name));
+    const auto full_fields = policy_fields(full_policy);
+    int differences = 0;
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+      differences += fields[i] != full_fields[i] ? 1 : 0;
+    }
+    require(differences == 1,
+            "An evolution ablation does not change exactly one policy field.");
+  }
+  require_throws<std::invalid_argument>([] {
+    (void)kodama::EvolutionPolicy::from_name("not_a_policy");
+  }, "Unknown evolution policy name was accepted.");
+
+  kodama::CoreOptions explicit_full_core = grouped_core;
+  explicit_full_core.evolution = kodama::EvolutionPolicy::from_name("full");
+  const kodama::CoreResult explicit_full_result = kodama::CoreKNNGraph_CPU(
+    graph, 4, grouped_labels, grouped_constrain, {}, explicit_full_core
+  );
+  require(explicit_full_result.clbest == grouped_result.clbest &&
+          explicit_full_result.cvpredbest == grouped_result.cvpredbest &&
+          explicit_full_result.vect_acc == grouped_result.vect_acc &&
+          explicit_full_result.vect_score == grouped_result.vect_score,
+          "Explicit full policy differs from the ordinary default call.");
+  require(explicit_full_result.cv_evaluations == explicit_full_core.cycles + 1,
+          "Core did not perform exactly one initial CV plus one CV per cycle.");
+
+  for (const std::string& name : evolution_policy_ablation_names()) {
+    kodama::CoreOptions ablation = grouped_core;
+    ablation.evolution = kodama::EvolutionPolicy::from_name(name);
+    const kodama::CoreResult ablated = kodama::CoreKNNGraph_CPU(
+      graph, 4, grouped_labels, grouped_constrain, {}, ablation
+    );
+    require(ablated.fold_assignments == grouped_result.fold_assignments,
+            "Evolution policy changed fixed fold assignments.");
+    require(ablated.cv_evaluations == ablation.cycles + 1,
+            "Evolution ablation did not perform one CV evaluation per cycle.");
+  }
+
+  for (const std::string& name : {
+         std::string("no_pls_transition_coarsening"),
+         std::string("no_pls_fragmentation_penalty")}) {
+    kodama::CoreOptions knn_specificity = grouped_core;
+    knn_specificity.evolution = kodama::EvolutionPolicy::from_name(name);
+    const kodama::CoreResult specificity_result = kodama::CoreKNNGraph_CPU(
+      graph, 4, grouped_labels, grouped_constrain, {}, knn_specificity
+    );
+    require(specificity_result.clbest == grouped_result.clbest &&
+            specificity_result.vect_acc == grouped_result.vect_acc &&
+            specificity_result.vect_score == grouped_result.vect_score,
+            "A PLS-specific evolution ablation changed KNN evolution.");
+  }
   for (int cycle = 0; cycle < grouped_result.cycles_completed; ++cycle) {
     require(grouped_result.vect_acc[static_cast<std::size_t>(cycle)] >= 0.0 &&
             grouped_result.vect_score[static_cast<std::size_t>(cycle)] >= 0.0,
@@ -541,16 +624,22 @@ void test_public_error_contracts() {
   const kodama::CoreResult single_class_result = kodama::CoreKNNGraph_CPU(
     graph, 4, single_class, {}, {}, guarded_single_class
   );
-  require(single_class_result.success && single_class_result.cycles_completed == 1,
-          "A perfectly predictable guarded single-class state did not stop cleanly.");
-  require(std::isfinite(single_class_result.scorebest) &&
-          std::abs(single_class_result.scorebest) < 1e-12,
-          "Guarded single-class objective is not finite zero.");
-  for (std::size_t cycle = 1; cycle < single_class_result.vect_acc.size(); ++cycle) {
-    require(single_class_result.vect_acc[cycle] == -1.0 &&
-            single_class_result.vect_score[cycle] == -1.0,
-            "Core early-stop trace did not retain trailing sentinels.");
-  }
+  require(!single_class_result.success &&
+          single_class_result.cycles_completed == guarded_single_class.cycles,
+          "The single-class guard did not retain the complete experimental trace.");
+  require(std::isinf(single_class_result.scorebest) &&
+          single_class_result.scorebest < 0.0,
+          "The single-class state was not explicitly rejected.");
+  require(single_class_result.cv_evaluations == guarded_single_class.cycles + 1,
+          "The guarded single-class run did not perform one CV per cycle.");
+  kodama::CoreOptions raw_single_class = guarded_single_class;
+  raw_single_class.evolution = kodama::EvolutionPolicy::from_name("raw_cv_score");
+  const kodama::CoreResult raw_single_class_result = kodama::CoreKNNGraph_CPU(
+    graph, 4, single_class, {}, {}, raw_single_class
+  );
+  require(std::isinf(raw_single_class_result.scorebest) &&
+          raw_single_class_result.scorebest < 0.0,
+          "raw_cv_score disabled the independent single-class rejection guard.");
 
   const std::vector<int> fragmented_labels = {1, 2, 3, 4};
   for (const bool absorption : {false, true}) {
@@ -1849,6 +1938,54 @@ int main() {
     "KODAMAMatrix rebuilt prepared spatial graph state."
   );
   kodama::KODAMAMatrixResult km_res = kodama::KODAMAMatrix_CPU(fview, std::vector<int>(), std::vector<int>(), fixed, km_options);
+  kodama::KODAMAMatrixOptions explicit_full_matrix_options = km_options;
+  explicit_full_matrix_options.evolution =
+    kodama::EvolutionPolicy::from_name("full");
+  const kodama::KODAMAMatrixResult default_policy_matrix =
+    kodama::KODAMAMatrix(
+      fview, prepared_graph, std::vector<int>(), std::vector<int>(), fixed,
+      km_options
+    );
+  const kodama::KODAMAMatrixResult explicit_full_matrix =
+    kodama::KODAMAMatrix(
+      fview, prepared_graph, std::vector<int>(), std::vector<int>(), fixed,
+      explicit_full_matrix_options
+    );
+  require(explicit_full_matrix.acc == default_policy_matrix.acc &&
+          explicit_full_matrix.v == default_policy_matrix.v &&
+          explicit_full_matrix.res == default_policy_matrix.res,
+          "Explicit full KODAMA.matrix policy differs from the default call.");
+  for (const std::string& name : evolution_policy_ablation_names()) {
+    kodama::KODAMAMatrixOptions ablation_options = km_options;
+    ablation_options.evolution = kodama::EvolutionPolicy::from_name(name);
+    const kodama::KODAMAMatrixResult ablation_result =
+      kodama::KODAMAMatrix(
+        fview, prepared_graph, std::vector<int>(), std::vector<int>(), fixed,
+        ablation_options
+      );
+    require(ablation_result.run_diagnostics.size() ==
+              default_policy_matrix.run_diagnostics.size(),
+            "KODAMA.matrix ablation run diagnostics size mismatch.");
+    require(ablation_result.cycle_diagnostics.size() ==
+              static_cast<std::size_t>(km_options.runs * km_options.cycles),
+            "KODAMA.matrix ablation cycle diagnostics size mismatch.");
+    for (std::size_t run = 0; run < default_policy_matrix.run_diagnostics.size(); ++run) {
+      const auto& baseline = default_policy_matrix.run_diagnostics[run];
+      const auto& ablated = ablation_result.run_diagnostics[run];
+      require(ablated.landmark_rows_hash == baseline.landmark_rows_hash &&
+              ablated.initial_labels_hash == baseline.initial_labels_hash &&
+              ablated.fold_assignments_hash == baseline.fold_assignments_hash,
+              "Evolution policy changed landmarks, initial labels, or folds.");
+      require(ablated.cv_evaluations == km_options.cycles + 1,
+              "KODAMA.matrix ablation failed the Tcycle + 1 CV invariant.");
+      if (name == "no_transition_proposal") {
+        require(ablated.transition_attempted == 0 &&
+                ablated.many_to_one_attempted == 0 &&
+                ablated.pls_coarsening_attempted == 0,
+                "no_transition_proposal attempted a transition move.");
+      }
+    }
+  }
   const kodama::KODAMAMatrixResult km_prepared_data_res = kodama::KODAMAMatrix(
     fview,
     prepared_graph,

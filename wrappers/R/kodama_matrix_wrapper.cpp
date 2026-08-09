@@ -132,7 +132,9 @@ Rcpp::List kodama_matrix_cpp_temp(
   std::string backend = "cpu",
   int seed = 1234,
   bool progress = false,
-  bool apply_kodama_dissimilarity = true
+  bool apply_kodama_dissimilarity = true,
+  int folds = 5,
+  std::string evolution_policy = "full"
 ) {
   const int n = data.nrow();
   const int p = data.ncol();
@@ -148,6 +150,8 @@ Rcpp::List kodama_matrix_cpp_temp(
   options.landmarks = landmarks;
   options.splitting = splitting;
   options.graph_neighbors = graph_neighbors;
+  options.folds = folds;
+  options.evolution = kodama::EvolutionPolicy::from_name(evolution_policy);
   options.n_threads = n_cores;
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;

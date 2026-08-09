@@ -127,6 +127,55 @@ def test_matrix_knn_and_pls_lda_cpu(monkeypatch):
     assert umap_with_raw.initialization == "raw_pca"
 
 
+def test_reviewer_evolution_policies_are_reproducible_but_hidden():
+    rng = np.random.default_rng(53)
+    x = rng.normal(size=(150, 6)).astype(np.float32)
+    prepared = kodama.graph(
+        x, k=12, backend="cpu", n_cores=2, seed=19, storage="handle"
+    )
+    common = dict(
+        data=x,
+        graph=prepared,
+        M=1,
+        Tcycle=3,
+        landmarks=100,
+        splitting=8,
+        graph_neighbors=12,
+        knn_k=5,
+        folds=4,
+        backend="cpu",
+        seed=19,
+        progress=False,
+        visual_init=False,
+    )
+
+    ordinary = kodama.matrix(**common)
+    explicit_full = kodama.matrix(**common, _evolution_policy="full")
+    no_transition = kodama.matrix(
+        **common, _evolution_policy="no_transition_proposal"
+    )
+
+    np.testing.assert_array_equal(ordinary["res"], explicit_full["res"])
+    np.testing.assert_array_equal(
+        ordinary["best_labels"], explicit_full["best_labels"]
+    )
+    assert len(ordinary["run_diagnostics"]) == 1
+    assert len(ordinary["cycle_diagnostics"]) == 3
+    assert ordinary["run_diagnostics"][0]["cv_evaluations"] == 4
+    for key in (
+        "landmark_rows_hash",
+        "initial_labels_hash",
+        "fold_assignments_hash",
+    ):
+        assert ordinary["run_diagnostics"][0][key] == no_transition[
+            "run_diagnostics"
+        ][0][key]
+    assert no_transition["run_diagnostics"][0]["transition_attempted"] == 0
+    assert "_evolution_policy" not in inspect.signature(kodama.matrix).parameters
+    with pytest.raises(ValueError, match="must be one of"):
+        kodama.matrix(**common, _evolution_policy="not_a_policy")
+
+
 def test_public_api_cpu():
     rng = np.random.default_rng(2)
     x = rng.normal(size=(60, 5)).astype(np.float32)
@@ -408,11 +457,13 @@ def test_python_signatures_mirror_r_api():
         "classifier",
         "backend",
         "seed",
+        "folds",
         "visual_init",
         "progress",
         "apply_kodama_dissimilarity",
         "return_graph",
-    ]
+        ]
+    assert "_evolution_policy" not in matrix_signature.parameters
     assert matrix_signature.parameters["spatial_resolution"].default == 0.4
     assert matrix_signature.parameters["spatial_constraint_mode"].default == "kmeans"
     assert matrix_signature.parameters["return_graph"].default is False
@@ -445,11 +496,13 @@ def test_python_signatures_mirror_r_api():
         "graph_feature_components",
         "graph_feature_steps",
         "seed",
+        "folds",
         "visual_init",
         "progress",
         "apply_kodama_dissimilarity",
         "return_graph",
     ]
+    assert "_evolution_policy" not in graph_signature.parameters
     assert graph_signature.parameters["spatial_resolution"].default == 0.4
     assert graph_signature.parameters["spatial_constraint_mode"].default == "kmeans"
     assert graph_signature.parameters["return_graph"].default is False

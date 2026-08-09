@@ -49,6 +49,20 @@ enum class CoreClassifier {
   KNN
 };
 
+struct EvolutionPolicy {
+  bool prediction_guidance = true;
+  bool adaptive_proposal_size = true;
+  bool transition_proposal = true;
+  bool stochastic_acceptance = true;
+  bool diversity_multiplier = true;
+  bool pls_transition_coarsening = true;
+  bool pls_fragmentation_penalty = true;
+  bool reject_single_class = true;
+
+  static EvolutionPolicy standard();
+  static EvolutionPolicy from_name(const std::string& name);
+};
+
 enum class GraphWeightType {
   SNN,
   Distance,
@@ -282,6 +296,7 @@ struct CoreOptions {
   bool evolutionary_search = false;
   bool guarded_diversity = false;
   bool adaptive_proposal_size = true;
+  EvolutionPolicy evolution = EvolutionPolicy::standard();
   CorePLSLDAOptions pls;
   KNNOptions knn;
 };
@@ -294,6 +309,12 @@ struct CoreResult {
   double scorebest = 0.0;
   std::vector<double> vect_acc;
   std::vector<double> vect_score;
+  std::vector<int> proposal_size;
+  std::vector<int> active_classes;
+  std::vector<unsigned char> accepted;
+  std::vector<unsigned char> improving_acceptance;
+  std::vector<unsigned char> temperature_acceptance;
+  std::vector<int> fold_assignments;
   int cycles_completed = 0;
   int proposals_evaluated = 0;
   int best_state_updates = 0;
@@ -303,6 +324,13 @@ struct CoreResult {
   int current_state_rejections = 0;
   int coarsening_moves = 0;
   int absorption_moves = 0;
+  int transition_attempted = 0;
+  int transition_accepted = 0;
+  int many_to_one_attempted = 0;
+  int many_to_one_accepted = 0;
+  int pls_coarsening_attempted = 0;
+  int pls_coarsening_accepted = 0;
+  int cv_evaluations = 0;
   bool success = false;
   double runtime_seconds = 0.0;
   double peak_memory_mb = 0.0;
@@ -495,6 +523,7 @@ struct KODAMAMatrixOptions {
   int landmarks = 10000;
   int splitting = 0;
   int graph_neighbors = 100;
+  int folds = 5;
   int n_threads = 1;
   int spatial_cols = 0;
   double spatial_resolution = 0.4;
@@ -504,6 +533,7 @@ struct KODAMAMatrixOptions {
   DistanceMetric metric = DistanceMetric::Euclidean;
   Backend backend = Backend::CPU;
   CoreClassifier classifier = CoreClassifier::KNN;
+  EvolutionPolicy evolution = EvolutionPolicy::standard();
   bool progress = false;
   bool apply_kodama_dissimilarity = true;
   bool compute_visual_init = true;
@@ -514,6 +544,31 @@ struct KODAMAMatrixOptions {
   std::vector<float> spatial;
   KNNOptions knn;
   CorePLSLDAOptions pls;
+};
+
+struct CoreCycleDiagnostic {
+  int run = 0;
+  int cycle = 0;
+  int proposal_size = 0;
+  int active_classes = 0;
+  unsigned char accepted = 0;
+  unsigned char improving_acceptance = 0;
+  unsigned char temperature_acceptance = 0;
+};
+
+struct CoreRunDiagnostic {
+  int run = 0;
+  int cycles_completed = 0;
+  int transition_attempted = 0;
+  int transition_accepted = 0;
+  int many_to_one_attempted = 0;
+  int many_to_one_accepted = 0;
+  int pls_coarsening_attempted = 0;
+  int pls_coarsening_accepted = 0;
+  int cv_evaluations = 0;
+  std::uint64_t landmark_rows_hash = 0;
+  std::uint64_t initial_labels_hash = 0;
+  std::uint64_t fold_assignments_hash = 0;
 };
 
 struct KODAMAMatrixResult {
@@ -534,6 +589,8 @@ struct KODAMAMatrixResult {
   std::vector<double> landmark_graph_seconds;
   std::vector<double> core_evolution_seconds;
   std::vector<double> projection_seconds;
+  std::vector<CoreRunDiagnostic> run_diagnostics;
+  std::vector<CoreCycleDiagnostic> cycle_diagnostics;
   NeighborGraph knn;
   VisualizationInitResult visual_init;
   int runs = 0;

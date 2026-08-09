@@ -256,6 +256,7 @@ struct CudaPLSLDAFloatWorkspace {
   DeviceFloatBuffer x_train;
   DeviceFloatBuffer x_val;
   DeviceFloatBuffer weights;
+  DeviceFloatBuffer train_gram;
   DeviceFloatBuffer train_scores;
   DeviceFloatBuffer val_scores;
   DeviceFloatBuffer class_feature_sums;
@@ -2242,107 +2243,44 @@ std::vector<int> train_predict_pls_lda_projected_cuda_float(
   check_cuda(cudaMemcpyAsync(workspace.labels.data(), workspace.encoded.data(), workspace.encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA labels");
   check_cuda(cudaMemcpyAsync(workspace.counts.data(), workspace.class_counts.data(), workspace.class_counts.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA counts");
 
-  const bool use_train_gram = p <= n;
-  if (use_train_gram) {
-    workspace.train_gram.ensure(static_cast<std::size_t>(p) * static_cast<std::size_t>(p));
-    const float one = 1.0f;
-    const float zero = 0.0f;
-    check_cublas(
-      cublasSgemm(
-        blas, CUBLAS_OP_N, CUBLAS_OP_T, p, p, n, &one,
-        workspace.x_train.data(), p, workspace.x_train.data(), p,
-        &zero, workspace.train_gram.data(), p
-      ),
-      "cublasSgemm float32 PLS-LDA X'X"
-    );
-    check_cublas(
-      cublasSgemm(
-        blas,
-        CUBLAS_OP_N,
-        CUBLAS_OP_N,
-        k,
-        n_val,
-        p,
-        &one,
-        workspace.weights.data(),
-        k,
-        workspace.x_val.data(),
-        p,
-        &zero,
-        workspace.val_scores.data(),
-        k
-      ),
-      "cublasSgemm float32 PLS-LDA validation scores"
-    );
-
-    kodama_cuda_lda_label_sums_row_float(workspace.train_scores.data(), workspace.labels.data(), n, k, cnum, workspace.means.data(), stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_label_sums_row_float");
-    kodama_cuda_lda_means_row_float(workspace.means.data(), workspace.counts.data(), k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_row_float");
-    check_cublas(
-      cublasSsyrk(
-        blas,
-        CUBLAS_FILL_MODE_LOWER,
-        CUBLAS_OP_N,
-        k,
-        n,
-        &one,
-        workspace.train_scores.data(),
-        k,
-        &zero,
-        workspace.pooled.data(),
-        k
-      ),
-      "cublasSsyrk float32 CUDA LDA TtT"
-    );
-    kodama_cuda_symmetrize_lower_float(workspace.pooled.data(), k, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_symmetrize_lower_float");
-    kodama_cuda_lda_pooled_col_float(workspace.pooled.data(), workspace.means.data(), workspace.counts.data(), n, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_pooled_col_float");
-    kodama_cuda_lda_means_to_rhs_float(workspace.means.data(), workspace.rhs.data(), k, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_means_to_rhs_float");
-
-    int lwork = 0;
-    check_cusolver(cusolverDnSpotrf_bufferSize(solver, CUBLAS_FILL_MODE_LOWER, k, workspace.cov.data(), k, &lwork), "cusolverDnSpotrf_bufferSize float32 PLS-LDA");
-    workspace.solver_work.ensure(static_cast<std::size_t>(std::max(lwork, 1)));
-    int info = 0;
-    bool factorized = false;
-    const float ridge_grid[] = {1e-8f, 1e-6f, 1e-5f, 1e-4f, 1e-3f, 1e-2f};
-    for (float ridge : ridge_grid) {
-      kodama_cuda_lda_copy_cov_float(workspace.pooled.data(), workspace.cov.data(), k, k, stream);
-      check_cuda(cudaGetLastError(), "kodama_cuda_lda_copy_cov_float");
-      kodama_cuda_lda_add_ridge_float(workspace.cov.data(), k, ridge, workspace.lambda.data(), stream);
-      check_cuda(cudaGetLastError(), "kodama_cuda_lda_add_ridge_float");
-      check_cusolver(cusolverDnSpotrf(solver, CUBLAS_FILL_MODE_LOWER, k, workspace.cov.data(), k, workspace.solver_work.data(), lwork, workspace.info.data()), "cusolverDnSpotrf float32 PLS-LDA");
-      check_cuda(cudaMemcpyAsync(&info, workspace.info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync float32 PLS-LDA potrf info");
-      check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize float32 PLS-LDA potrf");
-      if (info == 0) {
-        factorized = true;
-        break;
-      }
-    }
-    if (!factorized) throw std::runtime_error("cusolverDnSpotrf float32 PLS-LDA returned non-zero info.");
-    check_cusolver(cusolverDnSpotrs(solver, CUBLAS_FILL_MODE_LOWER, k, cnum, workspace.cov.data(), k, workspace.rhs.data(), k, workspace.info.data()), "cusolverDnSpotrs float32 PLS-LDA");
-    check_cuda(cudaMemcpyAsync(&info, workspace.info.data(), sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync float32 PLS-LDA potrs info");
-    kodama_cuda_lda_finalize_linear_row_float(workspace.rhs.data(), workspace.means.data(), workspace.counts.data(), workspace.linear.data(), workspace.constants.data(), n, k, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_finalize_linear_row_float");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize float32 PLS-LDA solve");
-    if (info != 0) throw std::runtime_error("cusolverDnSpotrs float32 PLS-LDA returned non-zero info.");
-    kodama_cuda_lda_score_argmax_row_float(workspace.val_scores.data(), workspace.linear.data(), workspace.constants.data(), workspace.pred.data(), n_val, k, cnum, stream);
-    check_cuda(cudaGetLastError(), "kodama_cuda_lda_score_argmax_row_float");
-    workspace.pred_codes.assign(static_cast<std::size_t>(n_val), 1);
-    check_cuda(cudaMemcpyAsync(workspace.pred_codes.data(), workspace.pred.data(), workspace.pred_codes.size() * sizeof(int), cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync float32 PLS-LDA labels");
-    check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize float32 PLS-LDA predict");
-
-    std::vector<int> pred(static_cast<std::size_t>(n_val), classes.front());
-    for (int i = 0; i < n_val; ++i) {
-      const int cls = std::max(1, std::min(cnum, workspace.pred_codes[static_cast<std::size_t>(i)])) - 1;
-      pred[static_cast<std::size_t>(i)] = classes[static_cast<std::size_t>(cls)];
-    }
-    return pred;
-  } catch (...) {
-    throw;
-  }
+  workspace.train_gram.ensure(
+    static_cast<std::size_t>(p) * static_cast<std::size_t>(p)
+  );
+  const float one = 1.0f;
+  const float zero = 0.0f;
+  // Row-major X is a column-major view of X'. Therefore A A' below is X'X.
+  check_cublas(
+    cublasSgemm(
+      blas,
+      CUBLAS_OP_N,
+      CUBLAS_OP_T,
+      p,
+      p,
+      n,
+      &one,
+      workspace.x_train.data(),
+      p,
+      workspace.x_train.data(),
+      p,
+      &zero,
+      workspace.train_gram.data(),
+      p
+    ),
+    "cublasSgemm float32 PLS-LDA X'X"
+  );
+  return predict_pls_lda_device_float(
+    workspace.x_train.data(),
+    workspace.x_val.data(),
+    workspace.train_gram.data(),
+    workspace.weights.data(),
+    n,
+    p,
+    n_val,
+    k,
+    classes,
+    workspace,
+    context
+  );
 }
 
 #endif
@@ -2395,8 +2333,12 @@ PLSCVResult run_plscv_host(
   std::vector<int> fold_evaluated_components(fold_ids.size(), evaluated_component);
   auto process_fold = [&](std::size_t fold_pos) {
     if (backend == Backend::Metal) {
-      const std::uint64_t fold_epoch = metal_residency_epoch ^
-        (0x9e3779b97f4a7c15ULL + static_cast<std::uint64_t>(fold_pos));
+      // Keep invocation and fold identity in disjoint bit ranges. XOR-based
+      // mixing allowed adjacent invocations to alias different folds, which
+      // could reuse a stale resident matrix when host allocations matched.
+      const std::uint64_t fold_epoch =
+        ((metal_residency_epoch & 0xffffffffULL) << 32U) |
+        (static_cast<std::uint64_t>(fold_pos) & 0xffffffffULL);
       detail::metal_set_pls_residency_epoch(fold_epoch);
     }
     const int fold = fold_ids[fold_pos];

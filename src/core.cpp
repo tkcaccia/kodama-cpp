@@ -21,6 +21,39 @@
 #include <vector>
 
 namespace kodama {
+
+EvolutionPolicy EvolutionPolicy::standard() {
+  return EvolutionPolicy{};
+}
+
+EvolutionPolicy EvolutionPolicy::from_name(const std::string& name) {
+  EvolutionPolicy policy = standard();
+  if (name == "full") return policy;
+  if (name == "no_prediction_guidance") {
+    policy.prediction_guidance = false;
+  } else if (name == "fixed_proposal_budget") {
+    policy.adaptive_proposal_size = false;
+  } else if (name == "no_transition_proposal") {
+    policy.transition_proposal = false;
+  } else if (name == "greedy_acceptance") {
+    policy.stochastic_acceptance = false;
+  } else if (name == "raw_cv_score") {
+    policy.diversity_multiplier = false;
+  } else if (name == "no_pls_transition_coarsening") {
+    policy.pls_transition_coarsening = false;
+  } else if (name == "no_pls_fragmentation_penalty") {
+    policy.pls_fragmentation_penalty = false;
+  } else {
+    throw std::invalid_argument(
+      "Unknown evolution policy '" + name +
+      "'. Expected full, no_prediction_guidance, fixed_proposal_budget, "
+      "no_transition_proposal, greedy_acceptance, raw_cv_score, "
+      "no_pls_transition_coarsening, or no_pls_fragmentation_penalty."
+    );
+  }
+  return policy;
+}
+
 namespace {
 
 struct CVPrediction {
@@ -836,8 +869,14 @@ double core_objective_score(
   double accuracy,
   const CoreOptions& options
 ) {
-  if (!options.guarded_diversity &&
-      !options.auto_class_coarsening) {
+  const bool use_diversity = options.guarded_diversity &&
+    options.evolution.diversity_multiplier;
+  const bool use_fragmentation = options.auto_class_coarsening &&
+    options.classifier == CoreClassifier::PLS_LDA &&
+    options.evolution.pls_fragmentation_penalty;
+  const bool reject_single_class = options.guarded_diversity &&
+    options.evolution.reject_single_class;
+  if (!use_diversity && !use_fragmentation && !reject_single_class) {
     return accuracy;
   }
 
@@ -847,10 +886,13 @@ double core_objective_score(
   for (int label : labels) counts[label]++;
   const int n_classes = static_cast<int>(counts.size());
   if (n_classes < 1) return accuracy;
+  if (reject_single_class && n_classes == 1) {
+    return -std::numeric_limits<double>::infinity();
+  }
 
   const double n = static_cast<double>(labels.size());
   double score = accuracy;
-  if (options.guarded_diversity) {
+  if (use_diversity) {
     double same_label_probability = 0.0;
     for (const auto& kv : counts) {
       const double p = static_cast<double>(kv.second) / n;
@@ -860,7 +902,7 @@ double core_objective_score(
     score *= std::sqrt(different_label_probability);
   }
 
-  if (options.auto_class_coarsening && n_classes > 1) {
+  if (use_fragmentation && n_classes > 1) {
     double entropy = 0.0;
     for (const auto& kv : counts) {
       const double p = static_cast<double>(kv.second) / n;
@@ -1192,6 +1234,11 @@ CoreResult maximize_core(
   result.clbest_dirty = initial_clbest;
   result.vect_acc.assign(static_cast<std::size_t>(options.cycles), -1.0);
   result.vect_score.assign(static_cast<std::size_t>(options.cycles), -1.0);
+  result.proposal_size.assign(static_cast<std::size_t>(options.cycles), 0);
+  result.active_classes.assign(static_cast<std::size_t>(options.cycles), 0);
+  result.accepted.assign(static_cast<std::size_t>(options.cycles), 0);
+  result.improving_acceptance.assign(static_cast<std::size_t>(options.cycles), 0);
+  result.temperature_acceptance.assign(static_cast<std::size_t>(options.cycles), 0);
 
   const std::vector<int> group_id = normalized_constrain(constrain, x.rows);
   const std::vector<int> fixed_flags = normalized_fixed(fixed, x.rows);
@@ -1218,6 +1265,7 @@ CoreResult maximize_core(
   }
   std::mt19937_64 rng(options.seed);
   CVPrediction best_cv = predictor(result.clbest);
+  result.cv_evaluations = 1;
   result.cvpredbest = best_cv.predicted;
   result.accbest = options.shake ? 0.0 : detail::accuracy(result.clbest, result.cvpredbest);
   result.scorebest = options.shake
@@ -1239,7 +1287,7 @@ CoreResult maximize_core(
   candidate_labels.reserve(x.rows);
   candidate_counts.reserve(x.rows);
 
-  for (int cycle = 0; cycle < options.cycles && !result.success; ++cycle) {
+  for (int cycle = 0; cycle < options.cycles; ++cycle) {
     std::vector<int> cl = options.evolutionary_search ? current_cl : result.clbest;
     std::vector<int> cl_dirty = cl;
     const std::vector<int>& proposal_predictions = options.evolutionary_search ? current_cvpred : result.cvpredbest;
@@ -1249,12 +1297,30 @@ CoreResult maximize_core(
         static_cast<int>(groups.size()),
         cycle,
         options.cycles,
-        options.adaptive_proposal_size,
+        options.adaptive_proposal_size && options.evolution.adaptive_proposal_size,
         rng
       );
+      result.proposal_size[static_cast<std::size_t>(cycle)] = n_to_sample;
       sampled_groups = groups;
       std::shuffle(sampled_groups.begin(), sampled_groups.end(), rng);
       sampled_groups.resize(static_cast<std::size_t>(n_to_sample));
+
+      std::vector<int> empirical_labels;
+      std::vector<int> empirical_counts;
+      if (!options.evolution.prediction_guidance) {
+        empirical_labels = cl;
+        std::sort(empirical_labels.begin(), empirical_labels.end());
+        for (std::size_t i = 0; i < empirical_labels.size();) {
+          std::size_t j = i + 1;
+          while (j < empirical_labels.size() && empirical_labels[j] == empirical_labels[i]) ++j;
+          empirical_counts.push_back(static_cast<int>(j - i));
+          i = j;
+        }
+        empirical_labels.erase(
+          std::unique(empirical_labels.begin(), empirical_labels.end()),
+          empirical_labels.end()
+        );
+      }
 
       for (int group : sampled_groups) {
         eligible.clear();
@@ -1270,17 +1336,22 @@ CoreResult maximize_core(
 
         candidate_labels.clear();
         candidate_counts.clear();
-        for (int idx : eligible) {
-          candidate_labels.push_back(proposal_predictions[static_cast<std::size_t>(idx)]);
+        if (options.evolution.prediction_guidance) {
+          for (int idx : eligible) {
+            candidate_labels.push_back(proposal_predictions[static_cast<std::size_t>(idx)]);
+          }
+          std::sort(candidate_labels.begin(), candidate_labels.end());
+          for (std::size_t i = 0; i < candidate_labels.size();) {
+            std::size_t j = i + 1;
+            while (j < candidate_labels.size() && candidate_labels[j] == candidate_labels[i]) ++j;
+            candidate_counts.push_back(static_cast<int>(j - i));
+            i = j;
+          }
+          candidate_labels.erase(std::unique(candidate_labels.begin(), candidate_labels.end()), candidate_labels.end());
+        } else {
+          candidate_labels = empirical_labels;
+          candidate_counts = empirical_counts;
         }
-        std::sort(candidate_labels.begin(), candidate_labels.end());
-        for (std::size_t i = 0; i < candidate_labels.size();) {
-          std::size_t j = i + 1;
-          while (j < candidate_labels.size() && candidate_labels[j] == candidate_labels[i]) ++j;
-          candidate_counts.push_back(static_cast<int>(j - i));
-          i = j;
-        }
-        candidate_labels.erase(std::unique(candidate_labels.begin(), candidate_labels.end()), candidate_labels.end());
         if (candidate_labels.empty()) continue;
 
         std::discrete_distribution<int> label_dist(candidate_counts.begin(), candidate_counts.end());
@@ -1291,10 +1362,17 @@ CoreResult maximize_core(
 
     ClassTransitionStats transition_stats;
     bool auto_changed = false;
-    if (options.auto_class_coarsening || options.many_to_one_absorption) {
+    bool absorption_changed = false;
+    const bool allow_transition = options.evolution.transition_proposal;
+    const bool attempt_pls_coarsening = allow_transition &&
+      options.auto_class_coarsening && options.evolution.pls_transition_coarsening;
+    const bool attempt_absorption = allow_transition && options.many_to_one_absorption;
+    if (attempt_pls_coarsening || attempt_absorption) {
+      ++result.transition_attempted;
       transition_stats = build_class_transition_stats(cl, proposal_predictions, fixed_flags);
     }
-    if (options.auto_class_coarsening) {
+    if (attempt_pls_coarsening) {
+      ++result.pls_coarsening_attempted;
       auto_changed = propose_auto_class_coarsening(
         cl,
         proposal_predictions,
@@ -1303,31 +1381,36 @@ CoreResult maximize_core(
         options,
         rng
       );
+      if (auto_changed) ++result.coarsening_moves;
     }
-    if (options.many_to_one_absorption) {
+    if (attempt_absorption) {
+      ++result.many_to_one_attempted;
       if (auto_changed) {
         const ClassTransitionStats absorption_stats = build_class_transition_stats(
           cl,
           proposal_predictions,
           fixed_flags
         );
-        propose_many_to_one_absorption(
+        absorption_changed = propose_many_to_one_absorption(
           cl, proposal_predictions, fixed_flags, absorption_stats, rng
         );
       } else {
-        propose_many_to_one_absorption(
+        absorption_changed = propose_many_to_one_absorption(
           cl, proposal_predictions, fixed_flags, transition_stats, rng
         );
       }
+      if (absorption_changed) ++result.absorption_moves;
     }
 
     CVPrediction cv = predictor(cl);
+    ++result.cv_evaluations;
     ++result.proposals_evaluated;
     const double acc = detail::accuracy(cl, cv.predicted);
     const double score = core_objective_score(cl, acc, options);
     result.peak_memory_mb = std::max(result.peak_memory_mb, cv.peak_memory_mb);
 
-    if (score > result.scorebest) {
+    const bool improves_best = score > result.scorebest;
+    if (improves_best) {
       result.cvpredbest = cv.predicted;
       result.clbest = cl;
       result.clbest_dirty = cl_dirty;
@@ -1336,13 +1419,17 @@ CoreResult maximize_core(
       ++result.best_state_updates;
     }
 
+    bool accepted_current = improves_best;
+    bool improving_accept = improves_best;
+    bool stochastic_accept = false;
     if (options.evolutionary_search) {
       const double cooling = 1.0 - static_cast<double>(cycle + 1) /
         static_cast<double>(std::max(1, options.cycles));
       const double temperature = std::max(1.0e-9, 0.10 * std::max(0.0, 1.0 - current_acc) * cooling);
       bool accept_current = score >= current_score;
-      bool stochastic_accept = false;
-      if (!accept_current && temperature > 1.0e-9) {
+      improving_accept = accept_current;
+      if (!accept_current && options.evolution.stochastic_acceptance &&
+          temperature > 1.0e-9) {
         ++result.stochastic_state_attempts;
         std::uniform_real_distribution<double> accept_dist(0.0, 1.0);
         accept_current = accept_dist(rng) < std::exp((score - current_score) / temperature);
@@ -1358,12 +1445,34 @@ CoreResult maximize_core(
       } else {
         ++result.current_state_rejections;
       }
+      accepted_current = accept_current;
+    }
+
+    result.accepted[static_cast<std::size_t>(cycle)] = accepted_current ? 1 : 0;
+    result.improving_acceptance[static_cast<std::size_t>(cycle)] =
+      accepted_current && improving_accept ? 1 : 0;
+    result.temperature_acceptance[static_cast<std::size_t>(cycle)] =
+      stochastic_accept ? 1 : 0;
+    if (accepted_current && (auto_changed || absorption_changed)) {
+      ++result.transition_accepted;
+      if (auto_changed) ++result.pls_coarsening_accepted;
+      if (absorption_changed) ++result.many_to_one_accepted;
+    }
+
+    {
+      const std::vector<int>& diagnostic_labels = options.evolutionary_search
+        ? current_cl : result.clbest;
+      std::unordered_map<int, int> active;
+      active.reserve(diagnostic_labels.size());
+      for (int label : diagnostic_labels) ++active[label];
+      result.active_classes[static_cast<std::size_t>(cycle)] =
+        static_cast<int>(active.size());
     }
 
     result.vect_acc[static_cast<std::size_t>(cycle)] = result.accbest;
     result.vect_score[static_cast<std::size_t>(cycle)] = result.scorebest;
     result.cycles_completed = cycle + 1;
-    if (acc == 1.0 && (!options.guarded_diversity || score >= result.scorebest)) result.success = true;
+    if (acc == 1.0 && std::isfinite(score)) result.success = true;
   }
 
   result.runtime_seconds = timer.seconds();
@@ -1439,6 +1548,7 @@ CoreResult core_knn_graph_backend(
       return predict_precomputed_knn(precomputed, labels, scratch);
     }
   );
+  result.fold_assignments = precomputed.folds;
   result.runtime_seconds = total_timer.seconds();
   return result;
 }
@@ -1462,6 +1572,7 @@ CoreResult CorePLSLDA_CPU(
     PLSCVResult cv = PLSLDACV_CPU(x, labels, constrain, cv_options);
     return CVPrediction{cv.predicted_labels, cv.runtime_seconds, cv.peak_memory_mb};
   });
+  result.fold_assignments = detail::make_folds(initial_clbest, constrain, cv_options.cv);
   result.runtime_seconds = total_timer.seconds();
   return result;
 }
@@ -1484,6 +1595,7 @@ CoreResult CoreKNN_CPU(
   CoreResult result = maximize_core(x, initial_clbest, constrain, fixed, knn_options, [&](const std::vector<int>& labels) {
     return predict_precomputed_knn(precomputed, labels, scratch);
   });
+  result.fold_assignments = precomputed.folds;
   result.runtime_seconds = total_timer.seconds();
   return result;
 }
@@ -1555,6 +1667,7 @@ CoreResult CorePLSLDA_CUDA(
     PLSCVResult cv = PLSLDACV_CUDA(x, labels, constrain, cv_options);
     return CVPrediction{cv.predicted_labels, cv.runtime_seconds, cv.peak_memory_mb};
   });
+  result.fold_assignments = detail::make_folds(initial_clbest, constrain, cv_options.cv);
   result.runtime_seconds = total_timer.seconds();
   return result;
 #else
@@ -1585,6 +1698,7 @@ CoreResult CorePLSLDA_METAL(
     PLSCVResult cv = PLSLDACV_METAL(x, labels, constrain, cv_options);
     return CVPrediction{cv.predicted_labels, cv.runtime_seconds, cv.peak_memory_mb};
   });
+  result.fold_assignments = detail::make_folds(initial_clbest, constrain, cv_options.cv);
   result.runtime_seconds = total_timer.seconds();
   return result;
 #else
@@ -1616,6 +1730,7 @@ CoreResult CoreKNN_CUDA(
   CoreResult result = maximize_core(x, initial_clbest, constrain, fixed, knn_options, [&](const std::vector<int>& labels) {
     return predict_precomputed_knn(precomputed, labels, scratch);
   });
+  result.fold_assignments = precomputed.folds;
   result.runtime_seconds = total_timer.seconds();
   return result;
 #else
@@ -1655,6 +1770,7 @@ CoreResult CoreKNN_METAL(
   CoreResult result = maximize_core(x, initial_clbest, constrain, fixed, metal_options, [&](const std::vector<int>& labels) {
     return predict_precomputed_knn(precomputed, labels, scratch);
   });
+  result.fold_assignments = precomputed.folds;
   result.runtime_seconds = total_timer.seconds();
   return result;
 #else

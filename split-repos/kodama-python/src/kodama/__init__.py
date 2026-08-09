@@ -5,6 +5,7 @@ import os
 import platform
 import subprocess
 import warnings
+import inspect as _inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,16 @@ _CLASSIFIERS = ("knn", "pls_lda")
 _SPATIAL_CONSTRAINT_MODES = ("kmeans", "graph", "auto")
 _GRAPH_FEATURE_MODES = ("laplacian_self_tuning",)
 _GRAPH_WEIGHTS = ("distance", "snn", "adaptive", "binary")
+_EVOLUTION_POLICIES = (
+    "full",
+    "no_prediction_guidance",
+    "fixed_proposal_budget",
+    "no_transition_proposal",
+    "greedy_acceptance",
+    "raw_cv_score",
+    "no_pls_transition_coarsening",
+    "no_pls_fragmentation_penalty",
+)
 
 
 def _labels(labels):
@@ -435,10 +446,12 @@ def matrix(
     classifier="knn",
     backend=None,
     seed=1234,
+    folds=5,
     visual_init=True,
     progress=True,
     apply_kodama_dissimilarity=True,
     return_graph=False,
+    _evolution_policy="full",
 ):
     """Run KODAMA matrix optimization, mirroring ``kodamaR::kodama_matrix``.
 
@@ -496,10 +509,12 @@ def matrix(
             classifier=classifier,
             backend=backend,
             seed=seed,
+            folds=folds,
             visual_init=visual_init,
             progress=progress,
             apply_kodama_dissimilarity=apply_kodama_dissimilarity,
             return_graph=return_graph,
+            _evolution_policy=_evolution_policy,
         )
 
     if data is None:
@@ -518,6 +533,9 @@ def matrix(
     classifier = _choice(classifier, "classifier", _CLASSIFIERS)
     backend = _choice("cpu" if backend is None else backend, "backend", _BACKENDS)
     metric = _choice(metric, "metric", _METRICS)
+    _evolution_policy = _choice(
+        _evolution_policy, "_evolution_policy", _EVOLUTION_POLICIES
+    )
     spatial_constraint_code = _spatial_constraint_code(spatial_constraint_mode)
     spatial_array = None if spatial is None else _matrix32(spatial, "spatial")
     result = _matrix(
@@ -545,6 +563,8 @@ def matrix(
         apply_kodama_dissimilarity=bool(apply_kodama_dissimilarity),
         compute_visual_init=bool(visual_init),
         return_graph=bool(return_graph),
+        folds=int(folds),
+        evolution_policy=str(_evolution_policy),
     )
     result = KodamaMatrixResult(result)
     result["parameters"] = {
@@ -563,6 +583,8 @@ def matrix(
         "classifier": classifier,
         "backend": backend,
         "seed": int(seed),
+        "folds": int(folds),
+        "evolution_policy": str(_evolution_policy),
         "visual_init": bool(visual_init),
         "apply_kodama_dissimilarity": bool(apply_kodama_dissimilarity),
         "return_graph": bool(return_graph),
@@ -598,10 +620,12 @@ def matrix_graph(
     graph_feature_components=0,
     graph_feature_steps=3,
     seed=1234,
+    folds=5,
     visual_init=True,
     progress=True,
     apply_kodama_dissimilarity=True,
     return_graph=False,
+    _evolution_policy="full",
 ):
     """Run KODAMA from a KNN matrix, mirroring ``kodamaR::kodama_matrix_graph``."""
     graph_object = indices if isinstance(indices, dict) else None
@@ -628,6 +652,9 @@ def matrix_graph(
     backend = _choice(backend, "backend", _BACKENDS)
     graph_feature_mode = _choice(
         graph_feature_mode, "graph_feature_mode", _GRAPH_FEATURE_MODES
+    )
+    _evolution_policy = _choice(
+        _evolution_policy, "_evolution_policy", _EVOLUTION_POLICIES
     )
     spatial_constraint_code = _spatial_constraint_code(spatial_constraint_mode)
     native = _matrix_graph_handle if graph_handle is not None else _matrix_graph
@@ -659,6 +686,8 @@ def matrix_graph(
         progress=bool(progress),
         apply_kodama_dissimilarity=bool(apply_kodama_dissimilarity),
         return_graph=bool(return_graph),
+        folds=int(folds),
+        evolution_policy=str(_evolution_policy),
     )
     result = KodamaMatrixResult(result)
     if visual_init and isinstance(graph_object, dict):
@@ -691,6 +720,8 @@ def matrix_graph(
         "graph_feature_steps": int(graph_feature_steps),
         "graph_uses_data_geometry": data is not None,
         "seed": int(seed),
+        "folds": int(folds),
+        "evolution_policy": str(_evolution_policy),
         "visual_init": bool(visual_init),
         "apply_kodama_dissimilarity": bool(apply_kodama_dissimilarity),
         "return_graph": bool(return_graph),
@@ -979,6 +1010,18 @@ def clustering(
         n_clusters=int(n_clusters),
         gpu_device=int(gpu_device),
     )
+
+
+def _hide_experimental_signature(function):
+    signature = _inspect.signature(function)
+    function.__signature__ = signature.replace(parameters=[
+        parameter for parameter in signature.parameters.values()
+        if parameter.name != "_evolution_policy"
+    ])
+
+
+_hide_experimental_signature(matrix)
+_hide_experimental_signature(matrix_graph)
 
 
 KODAMA = SimpleNamespace(

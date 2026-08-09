@@ -27,10 +27,12 @@ kodama_matrix(
   classifier = c("knn", "pls_lda"),
   backend = c("cpu", "cuda", "metal"),
   seed = 1234L,
+  folds = 5L,
   visual.init = TRUE,
   progress = TRUE,
   apply.kodama.dissimilarity = TRUE,
-  return.graph = FALSE
+  return.graph = FALSE,
+  ...
 )
 }
 \arguments{
@@ -80,6 +82,8 @@ optional coordinate constraints are supplied.}
 
 \item{seed}{Integer random seed.}
 
+\item{folds}{Number of cross-validation folds used by the classifier.}
+
 \item{visual.init}{Whether the same native matrix call performs one float32
 PCA and stores both UMAP and openTSNE initializations for reuse by
 \code{KODAMA.visualization}.}
@@ -92,6 +96,8 @@ neighbor graph rather than only the base graph.}
 \item{return.graph}{\code{FALSE} omits the result graph, \code{TRUE} materializes R
 index and distance matrices, and \code{"handle"} retains one float32 graph in
 an external C++ pointer for reuse without two large R matrices.}
+
+\item{...}{Reserved internal controls for reproducibility experiments.}
 }
 \value{
 A list returned by the kodama-cpp core. The full-data graph is built

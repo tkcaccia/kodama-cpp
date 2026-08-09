@@ -30,10 +30,12 @@ kodama_matrix_graph(
   graph.feature.components = 0L,
   graph.feature.steps = 3L,
   seed = 1234L,
+  folds = 5L,
   visual.init = TRUE,
   progress = TRUE,
   apply.kodama.dissimilarity = TRUE,
-  return.graph = FALSE
+  return.graph = FALSE,
+  ...
 )
 }
 \arguments{
@@ -95,6 +97,8 @@ graph-only initialization. The standard path is
 
 \item{seed}{Integer random seed.}
 
+\item{folds}{Number of cross-validation folds used by the classifier.}
+
 \item{visual.init}{Whether to propagate the PCA starts stored in a
 \code{KODAMA.graph} object.}
 
@@ -105,6 +109,8 @@ graph.}
 
 \item{return.graph}{\code{FALSE} omits the graph, \code{TRUE} materializes matrices,
 and \code{"handle"} returns a reusable external C++ graph pointer.}
+
+\item{...}{Reserved internal controls for reproducibility experiments.}
 }
 \description{
 KODAMA matrix from a precomputed KNN graph

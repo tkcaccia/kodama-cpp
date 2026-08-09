@@ -21,9 +21,9 @@ KODAMA.graph(
 \arguments{
 \item{data}{Numeric matrix with samples in rows and variables in columns.}
 
-\item{spatial}{Optional coordinate matrix. Its invariant nearest-neighbor graph
-and jitter scale are computed once and retained for reuse by
-\code{KODAMA.matrix}; raw coordinates are not retained.}
+\item{spatial}{Optional spatial coordinates. When supplied, their invariant
+nearest-neighbor graph and jitter scale are prepared once here and reused
+by every classifier passed to \code{KODAMA.matrix}.}
 
 \item{k}{Number of nearest neighbors to retain.}
 
@@ -38,10 +38,9 @@ construction and graph querying.}
 
 \item{seed}{Integer seed used by the backend-specific PCA initialization.}
 
-\item{storage}{Graph representation. The default \code{"handle"} keeps the
-native CPU/CUDA/Metal graph behind a process-local external pointer without
-materializing R matrices. Use \code{"matrix"} to request conventional R
-matrices explicitly. Materialize a handle before saving it for another R
+\item{storage}{Graph representation. \code{"matrix"} returns conventional R
+matrices; \code{"handle"} keeps one float32 graph behind a process-local
+external pointer. Materialize a handle before saving it for another R
 session.}
 }
 \value{

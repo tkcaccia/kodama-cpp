@@ -1613,6 +1613,8 @@ struct IterationResult {
   std::vector<int> res;
   std::vector<int> constrain;
   std::vector<double> acc;
+  CoreRunDiagnostic run_diagnostic;
+  std::vector<CoreCycleDiagnostic> cycle_diagnostics;
   int landmarks_used = 0;
   int landmark_occupied_strata = 0;
   int landmark_represented_strata = 0;
@@ -1634,6 +1636,18 @@ struct IterationResult {
   bool full_projection_download = false;
   int resident_row_uploads = 0;
 };
+
+std::uint64_t hash_integer_vector(const std::vector<int>& values) {
+  std::uint64_t hash = 1469598103934665603ull;
+  for (int value : values) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(value);
+    for (int shift = 0; shift < 32; shift += 8) {
+      hash ^= static_cast<std::uint8_t>((bits >> shift) & 0xffu);
+      hash *= 1099511628211ull;
+    }
+  }
+  return hash;
+}
 
 struct IterationScratch {
   std::vector<int> cluster_counts;
@@ -2823,6 +2837,7 @@ IterationResult run_iteration(
   core.cycles = options.cycles;
   core.seed = options.seed + static_cast<std::uint64_t>(run_id);
   core.classifier = options.classifier;
+  core.evolution = options.evolution;
   core.evolutionary_search = starting_labels.empty();
   core.guarded_diversity = true;
   core.auto_class_coarsening = options.classifier == CoreClassifier::PLS_LDA;
@@ -2831,6 +2846,7 @@ IterationResult run_iteration(
   core.knn.backend = options.backend;
   core.knn.metric = options.metric;
   core.knn.cv.stratified = false;
+  core.knn.cv.folds = options.folds;
   core.knn.cv.seed = options.seed + static_cast<std::uint64_t>(run_id);
   core.knn.k = std::max(core.knn.k, 1);
   core.knn.hnsw_tune_k = 50;
@@ -2840,6 +2856,7 @@ IterationResult run_iteration(
   core.pls = options.pls;
   core.pls.backend = options.backend;
   core.pls.cv.stratified = false;
+  core.pls.cv.folds = options.folds;
   core.pls.cv.seed = options.seed + static_cast<std::uint64_t>(run_id);
   core.pls.max_components = options.components;
   core.pls.fixed_components = options.components;
@@ -2998,6 +3015,31 @@ IterationResult run_iteration(
     ++out.resident_row_uploads;
   }
   out.acc = core_result.vect_acc;
+  out.run_diagnostic.run = run_id;
+  out.run_diagnostic.cycles_completed = core_result.cycles_completed;
+  out.run_diagnostic.transition_attempted = core_result.transition_attempted;
+  out.run_diagnostic.transition_accepted = core_result.transition_accepted;
+  out.run_diagnostic.many_to_one_attempted = core_result.many_to_one_attempted;
+  out.run_diagnostic.many_to_one_accepted = core_result.many_to_one_accepted;
+  out.run_diagnostic.pls_coarsening_attempted = core_result.pls_coarsening_attempted;
+  out.run_diagnostic.pls_coarsening_accepted = core_result.pls_coarsening_accepted;
+  out.run_diagnostic.cv_evaluations = core_result.cv_evaluations;
+  out.run_diagnostic.landmark_rows_hash = hash_integer_vector(landpoints);
+  out.run_diagnostic.initial_labels_hash = hash_integer_vector(scratch.xw);
+  out.run_diagnostic.fold_assignments_hash = hash_integer_vector(core_result.fold_assignments);
+  out.cycle_diagnostics.resize(static_cast<std::size_t>(core_result.cycles_completed));
+  for (int cycle = 0; cycle < core_result.cycles_completed; ++cycle) {
+    CoreCycleDiagnostic& diagnostic = out.cycle_diagnostics[static_cast<std::size_t>(cycle)];
+    diagnostic.run = run_id;
+    diagnostic.cycle = cycle + 1;
+    diagnostic.proposal_size = core_result.proposal_size[static_cast<std::size_t>(cycle)];
+    diagnostic.active_classes = core_result.active_classes[static_cast<std::size_t>(cycle)];
+    diagnostic.accepted = core_result.accepted[static_cast<std::size_t>(cycle)];
+    diagnostic.improving_acceptance =
+      core_result.improving_acceptance[static_cast<std::size_t>(cycle)];
+    diagnostic.temperature_acceptance =
+      core_result.temperature_acceptance[static_cast<std::size_t>(cycle)];
+  }
   out.accbest = core_result.accbest;
   out.runtime = core_result.runtime_seconds;
   out.memory = core_result.peak_memory_mb;
@@ -3018,6 +3060,7 @@ KODAMAMatrixResult run_kodama_matrix(
   if (x.rows < 3) throw std::invalid_argument("KODAMAMatrix requires at least 3 rows.");
   if (options.runs < 1) throw std::invalid_argument("KODAMAMatrixOptions::runs must be positive.");
   if (options.cycles < 0) throw std::invalid_argument("KODAMAMatrixOptions::cycles must be non-negative.");
+  if (options.folds < 2) throw std::invalid_argument("KODAMAMatrixOptions::folds must be at least two.");
   detail::Timer timer;
   if (options.landmarks <= 0) options.landmarks = 10000;
   if (static_cast<std::size_t>(options.landmarks) >= x.rows) {
@@ -3142,6 +3185,10 @@ KODAMAMatrixResult run_kodama_matrix(
   result.landmark_graph_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
   result.core_evolution_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
   result.projection_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.run_diagnostics.assign(static_cast<std::size_t>(options.runs), {});
+  result.cycle_diagnostics.assign(
+    static_cast<std::size_t>(options.runs) * static_cast<std::size_t>(options.cycles), {}
+  );
   result.v.assign(static_cast<std::size_t>(options.runs) * options.cycles, std::numeric_limits<double>::quiet_NaN());
   result.res.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
   result.res_constrain.assign(static_cast<std::size_t>(result.res_constrain_rows) * x.rows, 0);
@@ -3450,6 +3497,12 @@ KODAMAMatrixResult run_kodama_matrix(
     }
     const std::size_t row = static_cast<std::size_t>(run_id - 1);
     result.acc[row] = iter.accbest;
+    result.run_diagnostics[row] = iter.run_diagnostic;
+    for (std::size_t cycle = 0; cycle < iter.cycle_diagnostics.size(); ++cycle) {
+      result.cycle_diagnostics[
+        row * static_cast<std::size_t>(options.cycles) + cycle
+      ] = iter.cycle_diagnostics[cycle];
+    }
     result.landmark_occupied_strata[row] = iter.landmark_occupied_strata;
     result.landmark_represented_strata[row] = iter.landmark_represented_strata;
     result.landmark_grid_bins[row] = iter.landmark_grid_bins;

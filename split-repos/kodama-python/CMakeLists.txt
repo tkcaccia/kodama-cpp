@@ -12,6 +12,7 @@ set(KODAMA_CPP_ROOT "" CACHE PATH "Path to a kodama-cpp source checkout")
 set(KODAMA_CPP_BUILD_DIR "" CACHE PATH "Path to a built kodama-cpp build directory")
 set(KODAMA_CPP_EXTRA_LIBS "" CACHE STRING "Extra libraries needed when linking a static kodama-cpp")
 set(KODAMA_CPP_RESOLVED_EXTRA_LIBS "")
+set(KODAMA_CPP_WITH_CUDA OFF)
 
 if(KODAMA_CPP_ROOT)
   if(NOT KODAMA_CPP_BUILD_DIR)
@@ -32,8 +33,32 @@ if(KODAMA_CPP_ROOT)
     IMPORTED_LOCATION "${KODAMA_CPP_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${KODAMA_CPP_ROOT}/include"
   )
+  if(EXISTS "${KODAMA_CPP_BUILD_DIR}/CMakeCache.txt")
+    file(STRINGS "${KODAMA_CPP_BUILD_DIR}/CMakeCache.txt"
+      KODAMA_CPP_CUDA_CACHE_LINE
+      REGEX "^KODAMA_ENABLE_CUDA:BOOL=ON$")
+    if(KODAMA_CPP_CUDA_CACHE_LINE)
+      set(KODAMA_CPP_WITH_CUDA ON)
+    endif()
+  endif()
 else()
   find_package(kodama-cpp CONFIG REQUIRED)
+endif()
+
+if(KODAMA_CPP_WITH_CUDA)
+  if(DEFINED ENV{CONDA_PREFIX} AND EXISTS "$ENV{CONDA_PREFIX}/bin/nvcc")
+    set(CUDAToolkit_ROOT "$ENV{CONDA_PREFIX}")
+  endif()
+  find_package(CUDAToolkit REQUIRED)
+  list(APPEND KODAMA_CPP_RESOLVED_EXTRA_LIBS
+    CUDA::cudart
+    CUDA::cublas
+    CUDA::cublasLt
+    CUDA::cusolver
+    CUDA::cusparse
+    CUDA::curand
+    CUDA::cufft
+  )
 endif()
 
 if(APPLE)

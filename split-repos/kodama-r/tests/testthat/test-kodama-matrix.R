@@ -215,10 +215,11 @@ test_that("public API wrappers are exposed", {
   expect_true(all(is.finite(emb_raw)))
   expect_true(all(is.finite(tsne_raw)))
   expect_length(clu$membership, nrow(x))
+  metal_graph <- KODAMA.graph.materialize(graph)
   metal_umap <- tryCatch(
     kodamaR:::kodama_umap_cpp(
-      graph$indices,
-      graph$distances,
+      metal_graph$indices,
+      metal_graph$distances,
       n_neighbors = 5L,
       n_epochs = 3L,
       backend = "metal"
@@ -241,8 +242,8 @@ test_that("public API wrappers are exposed", {
   expect_equal(attr(metal_umap, "graph_max_weight"), 1)
   expect_true(all(is.finite(metal_umap)))
   metal_tsne <- kodamaR:::kodama_opentsne_cpp(
-      graph$indices,
-      graph$distances,
+      metal_graph$indices,
+      metal_graph$distances,
       perplexity = 3,
       early_exaggeration_iter = 2L,
       n_iter = 3L,
@@ -401,4 +402,58 @@ test_that("shared k-means landmark atlas is reported", {
   )
   expect_true(result$shared_landmark_partition_used)
   expect_identical(result$shared_landmark_partition_strata, 8L)
+})
+
+test_that("reviewer evolution policies are reproducible but hidden", {
+  set.seed(53)
+  x <- matrix(rnorm(150 * 6), 150, 6)
+  prepared <- KODAMA.graph(
+    x, k = 12L, backend = "cpu", n.cores = 2L, seed = 19L,
+    storage = "handle"
+  )
+  common <- list(
+    data = x, graph = prepared, M = 1L, Tcycle = 3L,
+    landmarks = 100L, splitting = 8L, graph.neighbors = 12L,
+    knn.k = 5L, folds = 4L, backend = "cpu", seed = 19L,
+    progress = FALSE, visual.init = FALSE
+  )
+
+  ordinary <- do.call(KODAMA.matrix, common)
+  explicit_full <- do.call(
+    KODAMA.matrix,
+    c(common, list(.evolution.policy = "full"))
+  )
+  no_transition <- do.call(
+    KODAMA.matrix,
+    c(common, list(.evolution.policy = "no_transition_proposal"))
+  )
+
+  expect_identical(ordinary$res, explicit_full$res)
+  expect_identical(ordinary$best_labels, explicit_full$best_labels)
+  expect_equal(nrow(ordinary$run_diagnostics), 1L)
+  expect_equal(nrow(ordinary$cycle_diagnostics), 3L)
+  expect_identical(ordinary$run_diagnostics$cv_evaluations, 4L)
+  expect_identical(
+    ordinary$run_diagnostics$landmark_rows_hash,
+    no_transition$run_diagnostics$landmark_rows_hash
+  )
+  expect_identical(
+    ordinary$run_diagnostics$initial_labels_hash,
+    no_transition$run_diagnostics$initial_labels_hash
+  )
+  expect_identical(
+    ordinary$run_diagnostics$fold_assignments_hash,
+    no_transition$run_diagnostics$fold_assignments_hash
+  )
+  expect_identical(no_transition$run_diagnostics$transition_attempted, 0L)
+  expect_false(".evolution.policy" %in% names(formals(KODAMA.matrix)))
+  expect_true("..." %in% names(formals(KODAMA.matrix)))
+  expect_error(
+    do.call(KODAMA.matrix, c(common, list(.evolution.policy = "not_a_policy"))),
+    "should be one of"
+  )
+  expect_error(
+    do.call(KODAMA.matrix, c(common, list(.unknown.control = TRUE))),
+    "Unknown reserved KODAMA.matrix control"
+  )
 })

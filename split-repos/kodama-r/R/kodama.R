@@ -320,6 +320,8 @@ CorePLSLDA <- function(data,
 #'   PCA and stores both UMAP and openTSNE initializations for reuse by
 #'   `KODAMA.visualization`.
 #' @param progress Whether the C++ core prints run/cycle progress.
+#' @param folds Number of cross-validation folds used by the classifier.
+#' @param ... Reserved internal controls for reproducibility experiments.
 #' @param apply.kodama.dissimilarity Whether to return the KODAMA-corrected
 #'   neighbor graph rather than only the base graph.
 #' @param return.graph `FALSE` omits the result graph, `TRUE` materializes R
@@ -355,14 +357,31 @@ kodama_matrix <- function(data = NULL,
                           classifier = c("knn", "pls_lda"),
                           backend = c("cpu", "cuda", "metal"),
                           seed = 1234L,
+                          folds = 5L,
                           visual.init = TRUE,
                           progress = TRUE,
                           apply.kodama.dissimilarity = TRUE,
-                          return.graph = FALSE) {
+                          return.graph = FALSE,
+                          ...) {
+  experimental <- list(...)
+  unknown_experimental <- setdiff(names(experimental), ".evolution.policy")
+  if (length(unknown_experimental)) {
+    stop("Unknown reserved KODAMA.matrix control: ", unknown_experimental[[1L]])
+  }
+  .evolution.policy <- if (is.null(experimental$.evolution.policy)) {
+    "full"
+  } else {
+    experimental$.evolution.policy
+  }
   backend_was_missing <- missing(backend)
   classifier <- match.arg(classifier)
   backend <- match.arg(backend)
   spatial.constraint.mode <- match.arg(spatial.constraint.mode)
+  .evolution.policy <- match.arg(.evolution.policy, c(
+    "full", "no_prediction_guidance", "fixed_proposal_budget",
+    "no_transition_proposal", "greedy_acceptance", "raw_cv_score",
+    "no_pls_transition_coarsening", "no_pls_fragmentation_penalty"
+  ))
   graph_output <- kodama_graph_output_mode(return.graph)
   if (!is.null(graph)) {
     graph_input <- extract_kodama_graph(graph)
@@ -406,10 +425,12 @@ kodama_matrix <- function(data = NULL,
       classifier = classifier,
       backend = backend,
       seed = seed,
+      folds = folds,
       visual.init = visual.init,
       progress = progress,
       apply.kodama.dissimilarity = apply.kodama.dissimilarity,
-      return.graph = return.graph
+      return.graph = return.graph,
+      .evolution.policy = .evolution.policy
     ))
   }
 
@@ -441,6 +462,8 @@ kodama_matrix <- function(data = NULL,
     classifier = classifier,
     backend = backend,
     seed = as.integer(seed),
+    folds = as.integer(folds),
+    evolution.policy = .evolution.policy,
     visual.init = isTRUE(visual.init),
     apply.kodama.dissimilarity = isTRUE(apply.kodama.dissimilarity),
     return.graph = if (graph_output == 2L) "handle" else graph_output == 1L
@@ -469,7 +492,9 @@ kodama_matrix <- function(data = NULL,
     progress = isTRUE(progress),
     apply_kodama_dissimilarity = isTRUE(apply.kodama.dissimilarity),
     compute_visual_init = isTRUE(visual.init),
-    graph_output = graph_output
+    graph_output = graph_output,
+    folds = as.integer(folds),
+    evolution_policy = .evolution.policy
   )
   as_kodama_matrix_result(result, parameters)
 }
@@ -513,6 +538,7 @@ KODAMA.matrix <- kodama_matrix
 #' @param graph.feature.components Feature count; `0` uses `ncomp`.
 #' @param graph.feature.steps Power iterations used by graph feature extraction.
 #' @param seed Integer random seed.
+#' @param folds Number of cross-validation folds used by the classifier.
 #' @param visual.init Whether to propagate the PCA starts stored in a
 #'   `KODAMA.graph` object.
 #' @param progress Whether the C++ core prints progress.
@@ -520,6 +546,7 @@ KODAMA.matrix <- kodama_matrix
 #'   graph.
 #' @param return.graph `FALSE` omits the graph, `TRUE` materializes matrices,
 #'   and `"handle"` returns a reusable external C++ graph pointer.
+#' @param ... Reserved internal controls for reproducibility experiments.
 #' @aliases KODAMA.matrix.graph
 #' @export
 kodama_matrix_graph <- function(indices,
@@ -546,10 +573,22 @@ kodama_matrix_graph <- function(indices,
                                 graph.feature.components = 0L,
                                 graph.feature.steps = 3L,
                                 seed = 1234L,
+                                folds = 5L,
                                 visual.init = TRUE,
                                 progress = TRUE,
                                 apply.kodama.dissimilarity = TRUE,
-                                return.graph = FALSE) {
+                                return.graph = FALSE,
+                                ...) {
+  experimental <- list(...)
+  unknown_experimental <- setdiff(names(experimental), ".evolution.policy")
+  if (length(unknown_experimental)) {
+    stop("Unknown reserved KODAMA.matrix control: ", unknown_experimental[[1L]])
+  }
+  .evolution.policy <- if (is.null(experimental$.evolution.policy)) {
+    "full"
+  } else {
+    experimental$.evolution.policy
+  }
   graph_object <- if (is.list(indices)) indices else NULL
   supplied_graph <- extract_kodama_graph(indices)
   graph_handle <- NULL
@@ -580,6 +619,11 @@ kodama_matrix_graph <- function(indices,
   if (is.null(graph.neighbors)) graph.neighbors <- neighbors
   spatial.constraint.mode <- match.arg(spatial.constraint.mode)
   graph.feature.mode <- match.arg(graph.feature.mode)
+  .evolution.policy <- match.arg(.evolution.policy, c(
+    "full", "no_prediction_guidance", "fixed_proposal_budget",
+    "no_transition_proposal", "greedy_acceptance", "raw_cv_score",
+    "no_pls_transition_coarsening", "no_pls_fragmentation_penalty"
+  ))
   visual_init <- NULL
   if (isTRUE(visual.init) && !is.null(graph_object$visual_init)) {
     if (identical(as.character(graph_object$visual_init$backend), backend)) {
@@ -612,6 +656,8 @@ kodama_matrix_graph <- function(indices,
     graph.feature.steps = as.integer(graph.feature.steps),
     graph.uses.data.geometry = !is.null(data),
     seed = as.integer(seed),
+    folds = as.integer(folds),
+    evolution.policy = .evolution.policy,
     visual.init = isTRUE(visual.init),
     apply.kodama.dissimilarity = isTRUE(apply.kodama.dissimilarity),
     return.graph = if (graph_output == 2L) "handle" else graph_output == 1L
@@ -641,7 +687,9 @@ kodama_matrix_graph <- function(indices,
     seed = as.integer(seed),
     progress = isTRUE(progress),
     apply_kodama_dissimilarity = isTRUE(apply.kodama.dissimilarity),
-    graph_output = graph_output
+    graph_output = graph_output,
+    folds = as.integer(folds),
+    evolution_policy = .evolution.policy
   )
   result <- if (is.null(graph_handle)) {
     do.call(kodama_matrix_graph_cpp, c(list(
