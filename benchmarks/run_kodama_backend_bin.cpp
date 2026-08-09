@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
 #if defined(KODAMA_ENABLE_CUDA)
   if (method_enabled("KODAMA_KNN_CUDA")) {
     options.backend = kodama::Backend::CUDA;
-    print_result("KODAMA_KNN", "cuda", kodama::KODAMAMatrix_CUDA(view, {}, {}, {}, options), labels);
+    print_result("KODAMA_KNN", "cuda", kodama::KODAMAMatrix_CUDA(view, {}, {}, {}, options), labels, view);
   }
 #endif
 
@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
 #if defined(KODAMA_ENABLE_CUDA)
   if (method_enabled("KODAMA_PLSLDA_CUDA")) {
     options.backend = kodama::Backend::CUDA;
-    print_result("KODAMA_PLSLDA", "cuda", kodama::KODAMAMatrix_CUDA(view, {}, {}, {}, options), labels);
+    print_result("KODAMA_PLSLDA", "cuda", kodama::KODAMAMatrix_CUDA(view, {}, {}, {}, options), labels, view);
   }
 #endif
   return 0;
