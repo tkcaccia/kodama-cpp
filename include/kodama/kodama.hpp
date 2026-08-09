@@ -295,6 +295,14 @@ struct CoreResult {
   std::vector<double> vect_acc;
   std::vector<double> vect_score;
   int cycles_completed = 0;
+  int proposals_evaluated = 0;
+  int best_state_updates = 0;
+  int current_state_accepts = 0;
+  int stochastic_state_attempts = 0;
+  int stochastic_state_accepts = 0;
+  int current_state_rejections = 0;
+  int coarsening_moves = 0;
+  int absorption_moves = 0;
   bool success = false;
   double runtime_seconds = 0.0;
   double peak_memory_mb = 0.0;
@@ -408,6 +416,12 @@ struct VisualizationInitResult {
   double runtime_seconds = 0.0;
 };
 
+struct KODAMAStageTiming {
+  std::string step;
+  double wall_seconds = 0.0;
+  double accumulated_seconds = 0.0;
+};
+
 struct KODAMAGraphOptions {
   int neighbors = 100;
   int n_threads = 1;
@@ -449,6 +463,7 @@ class KODAMAGraphHandle {
 };
 
 struct KODAMAGraphResult {
+  std::vector<KODAMAStageTiming> timings;
   std::shared_ptr<KODAMAGraphHandle> handle;
   NeighborGraph knn;
   NeighborGraph spatial_knn;
@@ -502,6 +517,7 @@ struct KODAMAMatrixOptions {
 };
 
 struct KODAMAMatrixResult {
+  std::vector<KODAMAStageTiming> timings;
   std::vector<double> acc;
   std::vector<double> v;
   std::vector<int> res;
@@ -510,6 +526,14 @@ struct KODAMAMatrixResult {
   std::vector<int> landmark_represented_strata;
   std::vector<int> landmark_grid_bins;
   std::vector<double> landmark_seconds;
+  std::vector<double> coarse_partition_seconds;
+  std::vector<double> landmark_sampling_seconds;
+  std::vector<double> constraint_seconds;
+  std::vector<double> landmark_prepare_seconds;
+  std::vector<double> landmark_initialization_seconds;
+  std::vector<double> landmark_graph_seconds;
+  std::vector<double> core_evolution_seconds;
+  std::vector<double> projection_seconds;
   NeighborGraph knn;
   VisualizationInitResult visual_init;
   int runs = 0;
@@ -527,11 +551,13 @@ struct KODAMAMatrixResult {
   KNNIndexType graph_index_type = KNNIndexType::NativeHNSW;
   int graph_ivf_nlist = 0;
   int graph_ivf_nprobe = 0;
+  int shared_landmark_partition_strata = 0;
   double graph_ivf_pilot_recall = 0.0;
   bool has_visual_init = false;
   bool knn_is_kodama_corrected = false;
   bool gpu_auto_workers = false;
   bool gpu_scheduler_enabled = false;
+  bool shared_landmark_partition_used = false;
   int gpu_scheduler_lanes = 0;
   std::uint64_t kmeans_input_uploads = 0;
   std::uint64_t projection_sparse_uploads = 0;
@@ -548,6 +574,7 @@ struct KODAMAMatrixResult {
   double graph_feature_seconds = 0.0;
   double spatial_precompute_seconds = 0.0;
   double graph_seconds = 0.0;
+  double shared_landmark_partition_seconds = 0.0;
   double spatial_graph_seconds = 0.0;
   double optimization_wall_seconds = 0.0;
   double optimization_sum_seconds = 0.0;

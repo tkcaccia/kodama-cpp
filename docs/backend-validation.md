@@ -396,6 +396,43 @@ queries at this size.
 
 ## Rejected As Default
 
+### Fully resident proposal evolution (2026-08-09)
+
+A CUDA/Metal candidate kept KNN proposal generation, prediction transitions,
+class counts, guarded-diversity scoring, many-to-one absorption, Metropolis
+acceptance, and label updates on the accelerator for a complete M run. The
+candidate used one persistent cooperative workgroup so that no sample-level
+prediction vector crossed the device boundary during `Tcycle`.
+
+The candidate was tested with the same evolution formulas on physical Metal
+and CUDA. MetRef used `M=100`, `Tcycle=100`; Br8100, MERFISH, and flow18 used
+`M=20`, `Tcycle=100` as a broader screen after the disposable Metal build hit
+memory pressure at `M=100` on the larger inputs. All runs used seed 1234,
+splitting 100 (300 for flow18), graph k 100, and predictor k 30.
+
+The resident candidate was slower in all seven matched comparisons. Slowdown
+was 7.39x (Metal) and 3.34x (CUDA) on MetRef, 2.84x and 7.93x on Br8100, and
+2.56x and 6.48x on MERFISH. On flow18 CUDA it was 1.10x slower end to end;
+excluding the approximately 26-second graph build, evolution was 1.40x
+slower. Class-count summaries were generally stable, but ARI changes were not
+consistently favorable. The transfer savings did not compensate for serial
+proposal bookkeeping and loss of accelerator occupancy.
+
+Following the common-method requirement for CUDA and Metal, the candidate was
+removed from both backends rather than retained as a hidden path. Spatial
+datasets in this engineering screen are internal regression tests and are not
+part of the non-spatial manuscript. Evidence is in
+`benchmarks/resident_proposal_evolution_20260809.csv`.
+
+- Fusing PLS projection directly into LDA sufficient statistics was rejected
+  for every backend. Although isolated CPU and CUDA kernels were competitive,
+  the first full matched MetRef runs did not improve the accepted CPU/CUDA
+  timings, and the Metal tiled implementation produced a seed-specific
+  accuracy failure (`0.787` versus approximately `0.99`). Restoring full Metal
+  latent scores recovered accuracy but serialized the automatic worker lanes
+  and increased the `M=100`, `Tcycle=100` run to 2,518 seconds. Because CPU,
+  CUDA, and Metal must retain one common PLS-LDA methodology, no backend keeps
+  the experimental fusion path.
 - Recall-tuned Metal IVF at a 0.99 target: MNIST10k accuracy was 0.9482 versus
   0.9490 exact, despite a larger speedup. The automatic target was raised to
   0.999.

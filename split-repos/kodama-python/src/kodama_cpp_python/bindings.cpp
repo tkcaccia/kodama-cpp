@@ -302,6 +302,14 @@ py::dict core_to_python(const kodama::CoreResult& result) {
   out["vect_acc"] = vector_to_double_array(result.vect_acc);
   out["vect_score"] = vector_to_double_array(result.vect_score);
   out["cycles_completed"] = result.cycles_completed;
+  out["proposals_evaluated"] = result.proposals_evaluated;
+  out["best_state_updates"] = result.best_state_updates;
+  out["current_state_accepts"] = result.current_state_accepts;
+  out["stochastic_state_attempts"] = result.stochastic_state_attempts;
+  out["stochastic_state_accepts"] = result.stochastic_state_accepts;
+  out["current_state_rejections"] = result.current_state_rejections;
+  out["coarsening_moves"] = result.coarsening_moves;
+  out["absorption_moves"] = result.absorption_moves;
   out["success"] = result.success;
   out["runtime_seconds"] = result.runtime_seconds;
   out["peak_memory_mb"] = result.peak_memory_mb;
@@ -364,12 +372,15 @@ py::dict kodama_matrix_to_python(const kodama::KODAMAMatrixResult& result, const
   timing["graph_feature_seconds"] = result.graph_feature_seconds;
   timing["spatial_precompute_seconds"] = result.spatial_precompute_seconds;
   timing["graph_seconds"] = result.graph_seconds;
+  timing["shared_landmark_partition_seconds"] =
+    result.shared_landmark_partition_seconds;
   timing["spatial_graph_seconds"] = result.spatial_graph_seconds;
   timing["optimization_wall_seconds"] = result.optimization_wall_seconds;
   timing["optimization_sum_seconds"] = result.optimization_sum_seconds;
   timing["dissimilarity_seconds"] = result.dissimilarity_seconds;
   timing["runtime_seconds"] = result.runtime_seconds;
   out["timing"] = timing;
+  out["timings"] = stage_timings_to_python(result.timings);
   return out;
 }
 

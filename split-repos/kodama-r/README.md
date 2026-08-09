@@ -84,7 +84,7 @@ On Linux/CUDA machines, use the same CUDA environment used to build the core.
 The important rule is that `R CMD INSTALL` and later R sessions must see the
 same CUDA Toolkit libraries used by `kodama-cpp`.
 
-## Build `kodama-cpp`
+## Detailed installation
 
 From a checkout where `kodama-cpp` and `kodama-r` are siblings:
 
@@ -292,24 +292,35 @@ implementation is used.
 `paretoscaling`. Their signatures and returned fields match the KODAMA R
 package.
 
-## Run `R CMD Check`
+## Preprocessing and example manifolds
 
-Build a source tarball first, then check the tarball. This matches CRAN-style
-source-package validation more closely than checking the raw source directory:
+The wrapper includes the dependency-free preprocessing and synthetic-data
+utilities from KODAMA:
 
-```sh
-cd split-repos
-KODAMA_CPP_ROOT="$(cd .. && pwd)" \
-KODAMA_CPP_BUILD_DIR="$(cd ../build && pwd)" \
-R CMD build kodama-r
+```r
+x_normalized <- normalization(x, method = "pqn")$newXtrain
+x_scaled <- scaling(x_normalized, method = "autoscaling", backend = "cpu",
+                    n.cores = 4)$newXtrain
 
-KODAMA_CPP_ROOT="$(cd .. && pwd)" \
-KODAMA_CPP_BUILD_DIR="$(cd ../build && pwd)" \
-R CMD check --as-cran kodamaR_0.1.0.tar.gz
+dini <- dinisurface(1000)
+helix <- helicoid(1000)
+spiral_clusters <- spirals(c(100, 100, 100), c(0.1, 0.1, 0.1))
+roll <- swissroll(1000)
 ```
 
-The check compiles the Rcpp bridge, links to `libkodama_cpp`, loads the package,
-runs the testthat suite, and builds the manual.
+`normalization()` supports `pqn`, `sum`, `median`, `sqrt`, and `none`.
+`scaling()` supports `none`, `centering`, `autoscaling`, `rangescaling`, and
+`paretoscaling`. Both are thin calls to the standalone float32 C++ core and
+accept `backend = "cpu"`, `"cuda"`, `"metal"`, or `"auto"`; no R numerical
+implementation is used, and their signatures and returned fields match the
+KODAMA R package.
+
+## Run `R CMD check`
+
+The CRAN-style source-tarball procedure is documented once in
+[`inst/INSTALL.md`](inst/INSTALL.md#cran-style-local-check). It compiles the
+Rcpp bridge, links `libkodama_cpp`, loads the package, runs the testthat suite,
+and builds the manual.
 
 ## Recommended Workflow
 

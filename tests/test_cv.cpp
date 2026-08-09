@@ -72,6 +72,18 @@ void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
 }
 
+const kodama::KODAMAStageTiming* find_timing(
+  const std::vector<kodama::KODAMAStageTiming>& timings,
+  const char* step
+) {
+  const auto it = std::find_if(
+    timings.begin(), timings.end(), [step](const kodama::KODAMAStageTiming& timing) {
+      return timing.step == step;
+    }
+  );
+  return it == timings.end() ? nullptr : &*it;
+}
+
 void require_close(
   const std::vector<float>& left,
   const std::vector<float>& right,
@@ -1883,6 +1895,34 @@ int main() {
   require(km_res.visual_init.opentsne.size() == static_cast<std::size_t>(d.n * 2), "KODAMAMatrix openTSNE initialization size mismatch.");
   require(km_res.effective_landmarks == km_options.landmarks, "KODAMAMatrix effective landmark count mismatch.");
   require(km_res.landmark_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix landmark timing size mismatch.");
+  require(km_res.coarse_partition_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix coarse-partition timing size mismatch.");
+  require(km_res.landmark_sampling_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix landmark-sampling timing size mismatch.");
+  require(km_res.constraint_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix constraint timing size mismatch.");
+  require(km_res.landmark_prepare_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix landmark-preparation timing size mismatch.");
+  require(km_res.landmark_initialization_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix landmark-initialization timing size mismatch.");
+  require(km_res.landmark_graph_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix landmark-graph timing size mismatch.");
+  require(km_res.core_evolution_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix core-evolution timing size mismatch.");
+  require(km_res.projection_seconds.size() == static_cast<std::size_t>(km_options.runs), "KODAMAMatrix projection timing size mismatch.");
+  require(km_res.shared_landmark_partition_used,
+          "Nonspatial KODAMAMatrix did not use the shared landmark partition.");
+  require(km_res.shared_landmark_partition_strata == km_options.splitting,
+          "Shared landmark partition stratum count mismatch.");
+  require(km_res.shared_landmark_partition_seconds >= 0.0,
+          "Shared landmark partition timing is invalid.");
+  require(std::all_of(
+            km_res.coarse_partition_seconds.begin(),
+            km_res.coarse_partition_seconds.end(),
+            [](double seconds) { return seconds == 0.0; }),
+          "Shared landmark partition unexpectedly repeated coarse k-means per M run.");
+  require(find_timing(km_res.timings, "shared_landmark_partition") != nullptr,
+          "KODAMAMatrix did not report shared-partition timing.");
+  require(find_timing(km_res.timings, "core_evolution") != nullptr,
+          "KODAMAMatrix did not report accumulated evolution timing.");
+  const kodama::KODAMAStageTiming* matrix_total =
+    find_timing(km_res.timings, "total");
+  require(matrix_total != nullptr &&
+            std::abs(matrix_total->wall_seconds - km_res.runtime_seconds) < 1e-9,
+          "KODAMAMatrix total timing differs from runtime.");
   require(km_res.landmark_grid_bins == std::vector<int>(static_cast<std::size_t>(km_options.runs), 0), "Nonspatial KODAMAMatrix unexpectedly used a spatial grid.");
   for (int run = 0; run < km_options.runs; ++run) {
     require(km_res.landmark_occupied_strata[static_cast<std::size_t>(run)] == km_options.splitting, "Nonspatial landmark stratum count mismatch.");
@@ -1910,8 +1950,9 @@ int main() {
   kodama::KODAMAMatrixOptions km_labels_only_options = km_options;
   km_labels_only_options.materialize_graph = false;
   km_labels_only_options.compute_visual_init = false;
-  const kodama::KODAMAMatrixResult km_labels_only = kodama::KODAMAMatrix_CPU(
+  const kodama::KODAMAMatrixResult km_labels_only = kodama::KODAMAMatrix(
     fview,
+    prepared_graph,
     std::vector<int>(),
     std::vector<int>(),
     fixed,
@@ -1924,7 +1965,7 @@ int main() {
   require(!km_labels_only.knn_is_kodama_corrected &&
           km_labels_only.dissimilarity_seconds == 0.0,
           "Labels-only KODAMAMatrix performed an unobservable graph correction.");
-  require(km_labels_only.res == km_res.res,
+  require(km_labels_only.res == km_prepared_data_res.res,
           "Disabling graph materialization changed optimized labels.");
 
   kodama::KODAMAMatrixOptions km_base_options = km_options;

@@ -1322,6 +1322,7 @@ CoreResult maximize_core(
     }
 
     CVPrediction cv = predictor(cl);
+    ++result.proposals_evaluated;
     const double acc = detail::accuracy(cl, cv.predicted);
     const double score = core_objective_score(cl, acc, options);
     result.peak_memory_mb = std::max(result.peak_memory_mb, cv.peak_memory_mb);
@@ -1332,6 +1333,7 @@ CoreResult maximize_core(
       result.clbest_dirty = cl_dirty;
       result.accbest = acc;
       result.scorebest = score;
+      ++result.best_state_updates;
     }
 
     if (options.evolutionary_search) {
@@ -1339,15 +1341,22 @@ CoreResult maximize_core(
         static_cast<double>(std::max(1, options.cycles));
       const double temperature = std::max(1.0e-9, 0.10 * std::max(0.0, 1.0 - current_acc) * cooling);
       bool accept_current = score >= current_score;
+      bool stochastic_accept = false;
       if (!accept_current && temperature > 1.0e-9) {
+        ++result.stochastic_state_attempts;
         std::uniform_real_distribution<double> accept_dist(0.0, 1.0);
         accept_current = accept_dist(rng) < std::exp((score - current_score) / temperature);
+        stochastic_accept = accept_current;
       }
       if (accept_current) {
         current_cl = cl;
         current_cvpred = cv.predicted;
         current_acc = acc;
         current_score = score;
+        ++result.current_state_accepts;
+        if (stochastic_accept) ++result.stochastic_state_accepts;
+      } else {
+        ++result.current_state_rejections;
       }
     }
 

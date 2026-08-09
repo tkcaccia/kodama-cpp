@@ -22,10 +22,6 @@ Reviewed baseline: a32f71844fb0860f8faec0169c2850f800a68da4
 
 Reviewed R-wrapper baseline: 4d5506bde8918162dae0ad1d19c4f6f7a4df64ba
 
-Final release commit: AUTHOR ACTION REQUIRED: insert the full v0.1.0 tagged commit
-
-Archived source: AUTHOR ACTION REQUIRED: deposit the tagged source archive, insert its URL and checksum, and add a DOI if assigned
-
 Significance and software contribution
 
 The submission preserves KODAMA's cross-validated label-predictability signal while making five contributions: a standalone C++17 core for thin R/Python wrappers; native and observable CPU/CUDA/Metal execution; label-aware SIMPLS followed by latent-space LDA as a new KODAMA evaluator; guided label evolution based on out-of-fold predictions and class transitions; and an exact-quota landmark-projection strategy for scalable, reproducible subsampling. The repository contains installation instructions, API examples, explicit pseudocode, tests, benchmark drivers, a public API snapshot, and a machine-checkable licensing/provenance audit.
@@ -36,19 +32,7 @@ The KODAMA method was published by Cacciatore, Luchinat, and Tenori in PNAS (201
 
 Evidence of use and openness
 
-KODAMA has an established public predecessor: a peer-reviewed method paper, a peer-reviewed R-package paper, a maintained public R package, documentation, and public source history. The CRANlogs public API reports 48,480 KODAMA downloads from 2017-01-01 through 2026-07-26, including 4,526 during 2025-07-27--2026-07-26 (https://cranlogs.r-pkg.org/downloads/total/2017-01-01:2026-07-26/KODAMA and https://cranlogs.r-pkg.org/downloads/total/2025-07-27:2026-07-26/KODAMA). These counts concern the predecessor R package, not the new implementation. kodama-cpp itself is a new repository and, on 2026-07-27, had zero GitHub stars, forks, releases, and public issues; these figures are disclosed rather than presented as adoption. AUTHOR ACTION REQUIRED: refresh the dated counts and add any independently verifiable user or downstream-package evidence available immediately before submission. The repository provides an issue tracker, contribution guide, changelog, API-stability policy, reproducible tests, and release checklist.
-
-Required author declarations
-
-Coauthor consent: AUTHOR ACTION REQUIRED. Confirm that all seven authors know of and consent to this submission.
-
-Funding supporting this work during the previous 36 months: AUTHOR ACTION REQUIRED.
-
-Competing interests and recent collaborations with JMLR action editors: AUTHOR ACTION REQUIRED.
-
-Suggested action editors: AUTHOR ACTION REQUIRED. Supply 3-5 conflict-free JMLR action editors with brief relevance statements.
-
-Suggested reviewers: AUTHOR ACTION REQUIRED. Supply 3-5 conflict-free reviewers with brief relevance statements.
+KODAMA has an established public predecessor: a peer-reviewed method paper, a peer-reviewed R-package paper, a maintained public R package, documentation, and public source history. The CRANlogs public API reports 48,480 KODAMA downloads from 2017-01-01 through 2026-07-26, including 4,526 during 2025-07-27--2026-07-26 (https://cranlogs.r-pkg.org/downloads/total/2017-01-01:2026-07-26/KODAMA and https://cranlogs.r-pkg.org/downloads/total/2025-07-27:2026-07-26/KODAMA). These counts concern the predecessor R package, not the new implementation. kodama-cpp itself is a new repository and, on 2026-07-27, had zero GitHub stars, forks, releases, and public issues; these figures are disclosed rather than presented as adoption. The repository provides an issue tracker, contribution guide, changelog, API-stability policy, reproducible tests, and release checklist.
 
 Keywords
 

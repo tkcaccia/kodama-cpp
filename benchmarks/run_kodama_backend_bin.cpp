@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -25,6 +26,17 @@ std::vector<T> read_binary(const std::string& path, std::size_t size) {
   input.read(reinterpret_cast<char*>(values.data()), static_cast<std::streamsize>(values.size() * sizeof(T)));
   if (!input) throw std::runtime_error("Cannot read " + path);
   return values;
+}
+
+template<class T>
+void write_binary(const std::string& path, const std::vector<T>& values) {
+  std::ofstream output(path, std::ios::binary);
+  if (!output) throw std::runtime_error("Cannot create " + path);
+  output.write(
+    reinterpret_cast<const char*>(values.data()),
+    static_cast<std::streamsize>(values.size() * sizeof(T))
+  );
+  if (!output) throw std::runtime_error("Cannot write " + path);
 }
 
 double choose_two(long long value) {
@@ -80,11 +92,24 @@ bool method_enabled(const std::string& name) {
   return filter == nullptr || std::string(filter).empty() || std::string(filter).find(name) != std::string::npos;
 }
 
+double sum_seconds(const std::vector<double>& values) {
+  return std::accumulate(values.begin(), values.end(), 0.0);
+}
+
+double median_seconds(std::vector<double> values) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const std::size_t middle = values.size() / 2;
+  return values.size() % 2 == 0 ?
+    0.5 * (values[middle - 1] + values[middle]) : values[middle];
+}
+
 void print_result(
   const char* method,
   const char* backend,
   const kodama::KODAMAMatrixResult& result,
-  const std::vector<int>& truth
+  const std::vector<int>& truth,
+  const kodama::MatrixView data
 ) {
   double best_ari = -1.0;
   int best_classes = 0;
@@ -177,11 +202,11 @@ int main(int argc, char** argv) {
   options.classifier = kodama::CoreClassifier::KNN;
   if (method_enabled("KODAMA_KNN_CPU")) {
     options.backend = kodama::Backend::CPU;
-    print_result("KODAMA_KNN", "cpu", kodama::KODAMAMatrix_CPU(view, {}, {}, {}, options), labels);
+    print_result("KODAMA_KNN", "cpu", kodama::KODAMAMatrix_CPU(view, {}, {}, {}, options), labels, view);
   }
   if (method_enabled("KODAMA_KNN_METAL") && kodama::MetalAvailable()) {
     options.backend = kodama::Backend::Metal;
-    print_result("KODAMA_KNN", "metal", kodama::KODAMAMatrix_METAL(view, {}, {}, {}, options), labels);
+    print_result("KODAMA_KNN", "metal", kodama::KODAMAMatrix_METAL(view, {}, {}, {}, options), labels, view);
   }
 #if defined(KODAMA_ENABLE_CUDA)
   if (method_enabled("KODAMA_KNN_CUDA")) {
@@ -193,11 +218,11 @@ int main(int argc, char** argv) {
   options.classifier = kodama::CoreClassifier::PLS_LDA;
   if (method_enabled("KODAMA_PLSLDA_CPU")) {
     options.backend = kodama::Backend::CPU;
-    print_result("KODAMA_PLSLDA", "cpu", kodama::KODAMAMatrix_CPU(view, {}, {}, {}, options), labels);
+    print_result("KODAMA_PLSLDA", "cpu", kodama::KODAMAMatrix_CPU(view, {}, {}, {}, options), labels, view);
   }
   if (method_enabled("KODAMA_PLSLDA_METAL") && kodama::MetalAvailable()) {
     options.backend = kodama::Backend::Metal;
-    print_result("KODAMA_PLSLDA", "metal", kodama::KODAMAMatrix_METAL(view, {}, {}, {}, options), labels);
+    print_result("KODAMA_PLSLDA", "metal", kodama::KODAMAMatrix_METAL(view, {}, {}, {}, options), labels, view);
   }
 #if defined(KODAMA_ENABLE_CUDA)
   if (method_enabled("KODAMA_PLSLDA_CUDA")) {

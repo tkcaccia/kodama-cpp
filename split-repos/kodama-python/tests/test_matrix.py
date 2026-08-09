@@ -184,6 +184,22 @@ def test_public_api_cpu():
     assert pls["predicted"].shape == (60,)
     assert core_knn["clbest"].shape == (60,)
     assert core_pls["clbest"].shape == (60,)
+    transition_fields = {
+        "proposals_evaluated",
+        "best_state_updates",
+        "current_state_accepts",
+        "stochastic_state_attempts",
+        "stochastic_state_accepts",
+        "current_state_rejections",
+        "coarsening_moves",
+        "absorption_moves",
+    }
+    assert transition_fields <= core_knn.keys()
+    assert transition_fields <= core_pls.keys()
+    for result in (core_knn, core_pls):
+        assert result["proposals_evaluated"] == result["cycles_completed"]
+        assert result["current_state_accepts"] + result["current_state_rejections"] == 0
+        assert result["stochastic_state_accepts"] <= result["stochastic_state_attempts"]
     assert pca["scores"].shape == (60, 3)
     assert pca["loadings"].shape == (5, 3)
     assert pca["scores"].dtype == np.float32

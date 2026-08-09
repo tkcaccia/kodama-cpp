@@ -1,17 +1,18 @@
 \documentclass[twoside,11pt]{article}
-\usepackage{jmlr2e}
+\usepackage[preprint]{jmlr2e}
 \usepackage{booktabs}
 \usepackage{tabularx}
+\usepackage{array}
 \usepackage{amsmath}
 \usepackage{graphicx}
 \usepackage{url}
 
-\jmlrheading{1}{2026}{1-XX}{1/26}{7/26}{26-0000}{Kassim et al.}
-\ShortHeadings{kodama-cpp}{Kassim et al.}
+\jmlrheading{}{2026}{}{}{}{}{Kassim et al.}
+\ShortHeadings{kodama-cpp supplement}{Kassim et al.}
 \firstpageno{1}
 
 \begin{document}
-\title{kodama-cpp: Cross-Validated Accuracy Maximization on CPU, CUDA, and Apple Metal}
+\title{Technical Supplement: kodama-cpp}
 \author{%
 \name Moussa Kassim$^{1,2,*}$ \email moussa.kassim@icgeb.org \\
 \name Martin Ocharo$^{1,2,*}$ \email martin.ocharo@icgeb.org \\
@@ -27,7 +28,6 @@
 \addr $^{*}$ Moussa Kassim and Martin Ocharo contributed equally. \\
 \addr $^{\dagger}$ Leonardo Tenori and Stefano Cacciatore are co-corresponding authors. \\
 }
-\editor{To be assigned}
 \maketitle
 \begin{abstract}
 KODAMA searches for latent structure by maximizing the cross-validated predictability of an evolving label vector. We present kodama-cpp and make five contributions. First, KODAMA is implemented as a standalone C++17 library with a typed, wrapper-independent API, allowing thin R and Python interfaces to share one numerical implementation. Second, native multicore CPU, NVIDIA CUDA, and Apple Metal backends implement float32 nearest-neighbor search, k-means, PCA, graph operations, and reusable workspaces without silent CPU fallback. Third, kodama-cpp introduces label-aware SIMPLS followed by LDA in the requested-component latent space as a new KODAMA evaluator, distinct from the historical PLS-DA decoder. Fourth, the current search uses a common prediction-guided proposal and evaluation scaffold, while PLS-LDA adds a disclosed transition-coarsening move and fragmentation term to its state score. Proposal size decreases smoothly, an error-scaled temperature permits early exploration, and each cycle performs exactly one new cross-validation pass. Fifth, the landmark-projection strategy is formalized for general matrix input through exact-quota stratified sampling, optimization on landmarks, and supervised projection to the remaining samples. These policies retain cross-validated predictability as the internal signal but need not reproduce historical stochastic trajectories. We validate backend identity, numerical behavior, runtime, memory, landmark-selection contracts, and external-label diagnostics separately so that systems acceleration is not conflated with the optimization objective. In an explicitly exploratory 10-dataset matched analysis, PLS-LDA KODAMA followed by UMAP improved truth-label silhouette on six datasets (median change +0.025, bootstrap 95\% interval [-0.067, +0.084]); KNN and openTSNE were less favorable, precluding a universal claim.
@@ -36,8 +36,8 @@ KODAMA searches for latent structure by maximizing the cross-validated predictab
 KODAMA, unsupervised learning, cross-validation, heterogeneous computing, CUDA, Metal, C++ library, nearest neighbors, PLS-LDA
 \end{keywords}
 
-\section{Introduction}
-High-dimensional data analysis often begins with clustering or dimensionality reduction, but neither operation directly asks whether the discovered groups are predictable from the data. KODAMA takes a different view: a useful labeling of samples should be reproducible by a classifier under cross-validation. The labels are not treated as ground truth; they are optimization variables whose quality is measured by held-out prediction.
+\section{Scope}
+This supplement contains the information needed to reproduce the mathematical and software claims in the four-page JMLR MLOSS description. It is organized by contract rather than development date: exact KODAMA mathematics, pseudocode, architecture and backend invariants, benchmark protocol, decisive current evidence, limitations, and provenance. Historical optimization attempts and rejected prototypes are retained as dated repository reports and are not reproduced here.
 
 The original KODAMA paper introduced this idea as knowledge discovery by accuracy maximization, and the subsequent R package made it available as an unsupervised and semi-supervised feature-extraction tool for noisy high-dimensional data. The Bioinformatics package paper describes the algorithm as repeated random label initialization, iterative maximization of cross-validated accuracy by label swapping, and construction of a dissimilarity matrix from the resulting label vectors. The R documentation exposes the same logic through M independent iterative processes, Tcycle optimization steps, KNN or PLS-DA classifiers, and separate KODAMA.matrix and KODAMA.visualization functions.
 
@@ -71,10 +71,14 @@ One KODAMA run starts from an initial partition. In the historical R interface, 
 
 The M runs are independent. This independence is important both statistically, because it averages over random initialization and proposal order, and computationally, because backend schedulers can process runs without changing the objective. The final KODAMA representation is obtained from the ensemble of optimized label vectors: pairs of samples that repeatedly receive compatible labels are pulled closer in the derived graph or dissimilarity, while unstable pairs are weakened.
 
+\section{Mathematical specification}
+\subsection{Cross-validated predictability}
+Let $X\in\mathbb{R}^{n\times p}$, candidate labels $y\in\{1,\ldots,K\}^{n}$, classifier family $F$, and fold assignment $\Pi$. Training excludes the fold containing validation sample $i$. The raw held-out accuracy is
 \begin{equation}
-c^\star = \arg\max_c \; A(c; X, F, \Pi),
+A(y;X,F,\Pi)=\frac{1}{n}\sum_{i=1}^{n}
+\mathbf{1}\!\left[y_i=\widehat y_i^{(-\Pi(i))}\right].
 \end{equation}
-where A is the held-out accuracy of classifier family F under fold assignment Pi.
+Folds remain fixed within one independent run. A supplied constraint vector assigns an entire group to one fold and makes that group the atomic relabeling unit. A supplied fixed mask prevents relabeling without removing the sample from CV.
 
 \subsection{Landmark-projection strategy}
 Landmark projection reduces the cost of repeated accuracy maximization by optimizing labels only on a selected subset, fitting a supervised model to each optimized landmark vector, and predicting labels for the remaining samples before constructing the ensemble dissimilarity. kodama-cpp implements this as a general algorithmic component for matrix inputs that does not depend on a wrapper language.
@@ -101,29 +105,49 @@ Quality evaluation & Landmark tests report downstream CV accuracy, ensemble stab
 \subsection{Label-vector search mechanics}
 The object optimized by KODAMA is the label vector itself. At any time the algorithm holds a candidate vector y on the landmark samples. A classifier is not used to predict an external truth; instead it is trained to reproduce y under cross-validation. A label vector is therefore good when the labels assigned to held-out samples are predictable from the measured variables. The raw accuracy attached to a candidate, acc(y), is the fraction of landmark samples for which the held-out prediction pred\_i(y) equals the candidate label y\_i.
 
-The first CV pass is run on the initial label vector. This gives both an initial accuracy and a prediction vector. The prediction vector is then used as a proposal guide. If a sample or constrained group repeatedly receives a different predicted label from the classifier, that predicted label is evidence that the current label vector is not aligned with the structure that the classifier can reproduce. KODAMA uses this information to propose a new label vector rather than drawing completely blind random swaps.
+The best state is updated only by a score improvement. In evolutionary-chain mode, a worse proposal may become the current state with probability
+\begin{equation}
+\min\left\{1,\exp\left[\frac{S_{\mathrm{new}}-S_{\mathrm{current}}}{\tau_t}\right]\right\},
+\qquad
+\tau_t=\max\left\{10^{-9},0.10(1-A_{\mathrm{current}})\left(1-\frac{t}{T}\right)\right\}.
+\end{equation}
+Every cycle performs exactly one new CV evaluation. Including the initial vector, a complete non-degenerate run performs $T+1$ CV evaluations.
 
-Within a cycle, the algorithm chooses a proposal base. In evolutionary mode this is the current accepted vector; otherwise it is the best vector found so far. For one-based cycle t, it sets p\_t = t/(Tcycle + 1), s\_t = p\_t\textasciicircum{}2(3 - 2p\_t), and q\_max = 1 + floor((G - 1)(1 - s\_t)), then samples q uniformly from 1,...,q\_max. Early cycles can therefore alter many groups and later cycles fewer. For each sampled group, the replacement label is drawn from the empirical distribution of the previous CV predictions among its non-fixed members.
+\subsection{Exact-quota landmarks and projection}
+For requested landmark count $L$, the historical rule uses $\lceil0.75n\rceil$ when the request is at least $n$, then validates the result in $[2,n-1]$. One coarse matrix partition is computed before the $M$ ensemble and retained as an immutable stratification atlas. It contains $n_c$ rows in stratum $c$. Its quota is
+\begin{equation}
+q_c=L\frac{n_c}{n}.
+\end{equation}
+For every $m$, the selector uses an independent random stream to sample $\lfloor q_c\rfloor$ rows without replacement from every shared stratum. Randomized systematic rounding of the fractional quotas fills the residual positions, producing exactly $L$ distinct landmarks with $\mathbb{E}[L_c]=Ln_c/n$. Sharing the read-only atlas does not couple the sampled rows, folds, label initialization, proposals, acceptance decisions, or final labels across runs. A separate landmark-space partition initializes the labels; sampling strata are not optimization targets.
 
-The class-transition step aggregates the same information at label level. It builds a transition matrix N\_ab counting samples whose current label is a and whose held-out prediction is b. Large off-diagonal counts indicate that the classifier consistently maps one candidate class into another. KODAMA may therefore propose merging unstable source labels into predicted destination labels, while rejecting moves that collapse the solution to a single class or do not reduce unstable fragmentation.
+The atlas is a shared k-means partition fixed before the $M$ loop. Each run retains independent exact-quota sampling from its strata.
 
-The many-to-one transition proposal uses the same matrix N. For a source class a and a destination b, the expected count under independence is n\_a n\_b / n. A candidate absorption is considered only when N\_ab exceeds this expectation and also exceeds the number of samples that remain in class a. Candidate destinations are sampled with probability proportional to their positive surplus, and the selected source classes are mapped to the destination only if the move reduces the number of active classes without collapsing all labels into one class.
+After optimization, the selected landmark vector is projected to all samples using the same classifier family. KNN assigns each non-landmark the majority label among retained landmark neighbors. PLS-LDA fits the final SIMPLS plus latent-LDA model on landmarks and predicts non-landmarks. Constraints are reapplied by within-group majority.
 
 Under the standard KODAMA.matrix policy, the PLS-LDA path applies an additional automatic coarsening proposal before the CV evaluation. It computes the class entropy H = -sum\_k p\_k log p\_k and the effective number of classes K\_eff = exp(H). Fragmentation is measured as max(0, log(K / max(1, K\_eff))). Classes with high transition instability and small movable size are proposed for merging into their strongest predicted destination; the merge budget is ceil(T\_frag max(0, K - K\_eff)), where T\_frag = fragmentation / (fragmentation + weighted\_transition\_entropy + 1). This keeps the proposal tied to CV confusion rather than external labels. The branch is PLS-LDA-specific because latent LDA estimates a q-dimensional mean for every active class and a pooled covariance from the remaining degrees of freedom; many small classes therefore affect a global fitted model. KNN voting has no analogous global per-class parameter fit. The lower-level CoreOptions interface exposes the coarsening and diversity switches for controlled studies.
 
 After these proposal moves, the proposed vector is evaluated by exactly one new CV pass. The classifier-common score is S\_0 = A sqrt(1 - sum\_k p\_k\textasciicircum{}2), where A is raw CV accuracy and p\_k is the class proportion. KNN uses S\_KNN = S\_0. PLS-LDA uses S\_PLS-LDA = S\_0 - (1 - A) max(H / log n, fragmentation / (1 + fragmentation)) when automatic coarsening is active. The labels stored in clbest maximize the applicable classifier-specific score, and accbest is the raw A evaluated for exactly those labels. Thus the CV objective and evaluation count are common, but the state-selection policy is not identical.
 
-The best vector is updated whenever the proposal score improves. In evolutionary mode, a separate current vector is also maintained. A worse proposal can become current with probability exp((score\_new - score\_current) / tau\_t), where, for one-based cycle t, tau\_t = max(1e-9, 0.10 max(0, 1 - current\_accuracy) (1 - t/Tcycle)). The 1e-9 floor makes the terminal cycle numerically defined and effectively greedy. Repeating this process for M independent seeds gives an ensemble of guarded high-predictability label vectors rather than relying on a single local optimum.
+PLS-LDA uses SIMPLS \citep{dejong1993simpls}, not a truncated-SVD substitute. Integer labels produce class feature sums directly, avoiding a dense one-hot response. The requested feasible component count is evaluated without an internal best-component search. LDA is fitted in latent component space with pooled covariance and a scale-normalized ridge that increases only if factorization requires it. CPU, CUDA, and Metal preserve the same recurrence, fold assignment, priors, and prediction rule under float32 arithmetic.
 
-\subsection{Raw accuracy, acceptance score, and diagnostics}
-It is useful to distinguish three quantities that appear in the implementation. The first is the raw held-out CV accuracy A(y), which is the classifier reproducibility score reported for a label vector. The second is the proposal acceptance score S(y), which is the stochastic-search objective actually used to choose moves when degeneracy guards are enabled. The third is an external diagnostic, such as ARI or embedding compactness, which is never optimized by KODAMA but is reported when reference labels are available.
+\section{Pseudocode}
+\begin{small}
+\begin{verbatim}
+Algorithm 1: One independent KODAMA run
 
 This distinction is necessary because a high raw CV accuracy alone can be achieved by a collapsed or overly coarse label vector. Such a vector may be easy for the classifier to reproduce but poor as a representation of latent structure. The diversity factor is common to KNN and PLS-LDA. Transition coarsening and the fragmentation subtraction are PLS-LDA-specific standard policies; they change which proposals are selected, while the reported accuracy remains the raw held-out classifier accuracy.
 
 The fixed-M = 100 sensitivity study provides empirical motivation, not a causal ablation. At Tcycle = 100, median active-class counts were 9 for KNN versus 24 for PLS-LDA on MetRef and 32 versus 71 on USPS, showing that the classifier paths occupy different fragmentation regimes despite high held-out accuracy. The archived experiment did not toggle only the PLS-LDA penalty, so the manuscript does not claim that this term universally improves ARI, silhouette, or runtime. It is reported as a classifier-specific implementation policy whose isolated benefit remains to be tested.
 
-\subsection{Reproducible KODAMA.matrix procedure}
-The public KODAMA.matrix routine is reproducible from the following option definitions and run-level procedure. The description names the C++ options because the R and Python wrappers should expose the same contract.
+for t = 1,...,T do
+  base <- current if evolutionary_chain else best
+  q <- UniformInteger(1, ProposalBudget(t, T, groups))
+  selected <- SampleGroupsWithoutReplacement(q)
+  yprop <- PredictionGuidedRelabel(base.labels, base.pred, selected)
+  yprop <- TransitionProposal(yprop, base.pred)
+  if F == PLS-LDA then
+    yprop <- PLSLDATransitionCoarsening(yprop, base.pred)
+  end if
 
 \begin{table}[h]
 \caption{KODAMA.matrix options that determine the optimization.}
@@ -163,7 +187,9 @@ The C++ implementation stores the final KODAMA representation as a sparse neighb
 
 For large CUDA and Metal inputs, graph preparation builds one resident IVF-Flat index and reuses it throughout KODAMA. Automatic nlist is bounded independently of nprobe and follows the matrix scale rather than the accelerator probe limit. Cosine inputs are normalized once in float32 before the resident upload, preserving the same metric contract as the nonresident path. A deterministic 128-query exact pilot increases nprobe until recall reaches 0.99 or the backend probe bound; retained candidates receive exact float32 distances. Self-search writes indices and distances directly into the resident graph buffers. KODAMA.matrix wrappers do not materialize those graph matrices by default. The R wrapper can retain one float32 graph behind an owning external pointer through optimization and visualization, or materialize conventional index and double-distance matrices with a cache-blocked row-major/column-major conversion. On flow18 (1,000,021 samples and 100 neighbors), the blocked conversion reduced matched median conversion time from 0.7359 to 0.5095 seconds; handle storage avoided the 1.20 GB R graph object until explicit materialization. Thus large graph arrays cross the wrapper boundary only when requested.
 
-Let c\_i\textasciicircum{}(r) be the final label of sample i from run r. For each retained edge (i,j) with original nonnegative distance d\_ij, compute V\_ij as the number of runs where both endpoint labels are nonzero, and S\_ij as the number of those valid runs where the two labels agree. If V\_ij = 0 or S\_ij = 0, the corrected edge distance is set to infinity. Otherwise a\_ij = S\_ij / V\_ij and d'\_ij = (1 + d\_ij) / a\_ij\textasciicircum{}2. Each neighbor row is then sorted by d'\_ij. This implementation contract is not invariant to an arbitrary rescaling of d, so matched comparisons fix preprocessing and metric. The resulting graph is the KODAMA-corrected graph used by KODAMA.visualization.
+Input: data X or prepared graph P, classifier F, runs M, cycles T,
+       landmarks L, splitting K0, seed s
+Output: corrected graph G, M projected vectors C, accuracies, PCA starts
 
 Agreement counting is backend-specific but mathematically identical. CPU transposes the M by n label ensemble once into sample-major contiguous storage before its parallel edge pass. At M = 100 and k = 100 this reduced matched four-thread correction time from 0.3170 to 0.1031 seconds at n = 20,000 and from 1.5520 to 0.6323 seconds at n = 100,000, with byte-identical output. Metal applies the same correction through a native compute kernel and is covered by CPU-distance parity tests. Host-transposed and warp-ballot CUDA variants were exact but slower in matched tests, and were therefore rejected in favor of the original run-major single-kernel CUDA path.
 
@@ -228,16 +254,17 @@ The graph-only PLS-LDA transform is deterministic conditional on the supplied se
 
 The implementation deliberately keeps classifier paths clean. KODAMA optimization is exposed as KNN or PLS-LDA; auxiliary cross-validation kernels exist for testing and benchmarking, but the KODAMA optimizer is not a collection of benchmark-specific branches. The graph, embedding, and clustering utilities are similarly separated from the label-evolution loop.
 
+\section{Software architecture and backend contracts}
 \begin{figure}[h]
 \centering
-\includegraphics[width=\linewidth]{kodama_cpp_architecture.png}
-\caption{Architecture of kodama-cpp. The C++17 core owns the numerical kernels, CPU, CUDA, and Apple Metal backends, graph utilities, and typed outputs; R and Python remain thin wrappers.}
+\includegraphics[width=0.92\linewidth]{kodama_cpp_architecture.png}
+\caption{The wrapper-independent C++17 core owns numerical state and dispatches to CPU, CUDA, and Metal. R and Python convert host objects but do not reimplement KODAMA mathematics.}
 \end{figure}
 
 \subsection{Implementation novelty}
 kodama-cpp preserves cross-validated predictability as the KODAMA signal but contributes both a systems redesign and an explicit current search policy. The original R implementation remains the historical reference for accuracy maximization and ensemble construction. In the new library, numerical state previously recreated across wrapper calls is represented once in typed C++ objects and reused across folds, proposal cycles, and independent runs.
 
-This distinction matters because the runtime of KODAMA is the product of several nested operations: M independent searches, Tcycle proposal steps, cross-validation folds, and a classifier fit or vote inside each fold. Accelerating only one matrix multiplication leaves allocation, format conversion, index construction, and host-device traffic in the dominant loop. The implementation therefore optimizes the lifecycle of the complete CV state while retaining one objective evaluation per proposal.
+Prepared accelerator graphs are represented by opaque shared owners: an R external pointer and a Python capsule. Host index and distance arrays are materialized only when requested. The final graph is corrected in place, so simultaneous base and corrected copies are not retained. Cross-session serialization materializes process-local external handles first.
 
 The backends share mathematical invariants but not source-level execution strategies. KNN uses the same metric and voting rules with different search engines. PLS-LDA uses the same SIMPLS deflation and latent LDA model while each accelerator maps the dominant operations to its own memory and matrix-compute model. This separation avoids benchmark-specific branches inside the classifier and makes CPU/accelerator parity an explicit test target.
 
@@ -265,11 +292,12 @@ Metal also exposes native fuzzy/binary UMAP and FFT-grid openTSNE while retainin
 
 \subsection{Shared accelerator contract}
 \begin{table}[h]
-\caption{Backend-specific execution under a shared KODAMA contract.}
-\small
-\begin{tabularx}{\linewidth}{p{0.18\linewidth}X X}
+\caption{Backend contracts retained by the release.}
+\footnotesize
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.18\linewidth}%
+  >{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
 \toprule
-Invariant & CUDA realization & Metal realization \\
+Contract & CPU & CUDA & Apple Metal \\
 \midrule
 Internal precision & Contiguous float32 host/device matrices and reusable CUDA buffers. & Float32 shared MTLBuffers and MPSMatrix objects. \\
 KNN & Exact or recall-tuned IVF-Flat with device-built lists, returned metadata, and an explicit resident-index owner. & Exact or recall-tuned IVF-Flat with device-built lists and the same resident-index lifetime. \\
@@ -297,7 +325,7 @@ Prepared P & Self-tuning graph features & Fixed supplied graph & Laplacian surro
 Prepared P + X & Raw float32 variables & Fixed supplied graph & Raw variables & Zero \\
 Bare G & Self-tuning graph features & Fixed supplied graph & Laplacian surrogate & Zero \\
 \bottomrule
-\end{tabularx}
+\end{tabular}
 \end{table}
 
 \begin{scriptsize}
@@ -323,7 +351,7 @@ MetRef CUDA smoke validation used n = 873, p = 375, k = 100, and M = T = 10. The
 
 \subsection{Computational scaling}
 \begin{table}[h]
-\caption{Dominant computational work in the KODAMA pipeline.}
+\caption{Isolated evolution ablations and their single controlled differences.}
 \small
 \begin{tabularx}{\linewidth}{p{0.18\linewidth}X X}
 \toprule
@@ -434,7 +462,7 @@ Accepted changes preserve the KODAMA objective while correcting fold isolation, 
 \caption{Benchmark protocol for the current evaluation.}
 \begin{tabularx}{\linewidth}{p{0.22\linewidth}X}
 \toprule
-Item & Value \\
+Variant & Only change relative to full standard KODAMA \\
 \midrule
 Date & 2026-07-27 UTC for the matched current-commit MetRef CPU/CUDA run; earlier validation snapshots are dated explicitly \\
 GPU & NVIDIA GeForce RTX 5060 Ti, 16 GB device memory, driver 595.71.05 \\
@@ -546,16 +574,12 @@ MetRef & native IVF-Flat & 0.816724 & 0.195 & 27 & 20 & 0.991406 \\
 \subsubsection{Archived kernel and core diagnostics}
 Earlier kernel-only and core-optimizer measurements are retained in the benchmark archive for release-history continuity. They are not repeated here because they use different timing boundaries from the native end-to-end and shared-graph comparisons below. Their seed-level outputs remain available for audit.
 
-\subsubsection{MultiCPU versus GPU KODAMA comparison}
-The backend comparison is separated by scope. Core-optimizer rows measure the repeated CV label-search kernels without final graph construction, while the KODAMA.matrix row includes landmark selection, label search, projection, and graph correction on a small end-to-end validation dataset. This prevents kernel timings from being reported as full pipeline timings.
-
-The rows below therefore state their scope explicitly. CPU rows use the configured CPU backend, CUDA rows use the CUDA backend, and differences in CPU/CUDA accuracy are treated as reproducibility tolerances caused by stochastic search, float32 arithmetic, and approximate nearest-neighbor behavior rather than as evidence of different mathematical objectives.
+For one edge, the worst-case Monte Carlo standard error of an agreement proportion is $1/(2\sqrt M)$: 0.1118 at $M=20$, 0.0707 at $M=50$, and 0.0500 at $M=100$. In the retained MetRef/USPS study, M50 agreement correlations with M100 were 0.9888--0.9988. $M=100$ is retained to control ensemble uncertainty, not to maximize an externally labelled score.
 
 \begin{table}[h]
-\caption{KODAMA core optimizer CPU/CUDA comparison. Scope is reported explicitly because these rows do not include final graph construction.}
+\caption{Agreement-graph convergence relative to $M=100$.}
 \small
-\resizebox{\linewidth}{!}{%
-\begin{tabular}{llllllll}
+\begin{tabular}{llcc}
 \toprule
 Dataset & Classifier & Backend & Seconds & CV acc & ARI & Classes & Scope \\
 \midrule
@@ -872,11 +896,11 @@ USPS & PLS-LDA & 0.1191 / 0.0803 / 0.0380 & 0.9926 \\
 Source locations, tests, rejected alternatives, and backend measurements are archived in the repository's dated full-code audit, benchmark index, and checksum-bearing CSV files. The supplement reports the decisive aggregates rather than duplicating that machine-auditable matrix.
 
 \begin{table}[h]
-\caption{Release-validation evidence tracked by the project.}
+\caption{Release claims and required evidence.}
 \small
-\begin{tabularx}{\linewidth}{p{0.18\linewidth}X}
+\begin{tabularx}{\linewidth}{p{0.20\linewidth}X}
 \toprule
-Area & Current evidence \\
+Claim & Evidence contract \\
 \midrule
 Correctness & CTest passed on dependency-free CPU, Apple Metal, and CUDA builds; tests cover constrained folds, predictions, confusion matrices, requested component counts, and backend parity. \\
 Numerics & Float32 MatrixView validation tests exercise CPU, CUDA, and Metal KNN/PLS-LDA paths with typed backend metadata; a fresh CUDA configure/build verifies that SIMPLS has no Armadillo or double-fallback dependency. \\
@@ -901,27 +925,18 @@ A versioned provenance audit maps every shipped source-like file to an SPDX lice
 CMake configures the standalone core for CPU, native Apple Metal, or NVIDIA CUDA. Thin R and Python packages link to the installed core. Build and compatibility records are maintained in \path{README.md}, \path{docs/getting-started.md}, and \path{docs/r-api.md}. Licensing boundaries are defined by \path{PROVENANCE.md}, \path{THIRD_PARTY_NOTICES.md}, SPDX headers, retained license texts, and the automated audit.
 
 \section{Limitations}
-The current implementation prioritizes KNN and PLS-LDA because they are central to the KODAMA optimization principle and can be implemented cleanly on CPU, CUDA, and Apple Metal. Additional classifiers are outside this release unless they preserve the cross-validated accuracy objective and can be tested without changing the method for a specific benchmark.
+KODAMA performs $M(T+1)$ repeated CV evaluations and can remain expensive even when graph construction is fast. PLS-LDA is especially costly for large landmark sets or many predictors. Landmark selection and proposal control remain host-orchestrated; fully device-side evolution is not claimed.
 
 The main engineering limitation is that KODAMA performs many cross-validation fits. This makes memory locality, buffer reuse, label compaction, and GPU scheduling as important as asymptotic complexity. The present release includes float32 buffers, fold reuse, label compaction, a resident full-data graph, persistent per-worker CUDA/Metal classifier workspaces, and native accelerator KNN and PLS-LDA kernels. Landmark selection and proposal control remain host orchestrated; a fully device-side evolutionary state machine is an engineering extension rather than a claim of the current manuscript.
 
 The native CUDA neighbor-graph builder currently supports at most 256 retained neighbors per sample, whereas the CPU path supports larger rows. The implementation raises an error rather than silently truncating k. Benchmark protocols therefore record unsupported graph sizes as missing and never manufacture an accelerator row by changing a requested parameter.
 
-\section{KODAMA pseudocode}
-Algorithm 1 isolates one independent run inside the M-run ensemble. It starts from one landmark label vector, uses the previous CV predictions to propose label changes, evaluates each proposal with exactly one CV pass, and returns the best label vector found by that run.
+The classic-versus-KODAMA archive is exploratory because earlier manifests lack a source commit. Its results demonstrate both favorable and adverse behavior and are excluded from release-level performance claims.
 
-\begin{scriptsize}
-\begin{verbatim}
-Algorithm 1. One independent KODAMA run
+\section{Availability, wrappers, and provenance}
+The standalone core is hosted at \url{https://github.com/tkcaccia/kodama-cpp}; the R wrapper is hosted at \url{https://github.com/tkcaccia/kodama-r}. Python binding source is versioned with the core. The project provides CMake install targets, API documentation, issue tracking, contribution guidance, benchmark drivers, and wrapper installation instructions.
 
-Input:
-  X_L: landmark matrix for this run
-  y0: initial label vector on landmarks
-  groups: movable units, either samples or constrained groups
-  fixed: optional fixed-label mask
-  folds: CV fold assignment
-  F: classifier in {KNN, PLS-LDA}
-  Tcycle: proposal/evaluation cycles
+Original project code is MIT licensed. Identified third-party-derived portions retain compatible upstream terms; the Metal list-scan/top-k lineage is marked MIT AND Apache-2.0. \path{PROVENANCE.md}, \path{THIRD_PARTY_NOTICES.md}, retained license files, source SPDX headers, and the automated license audit define the distribution boundary. Historical KODAMA, fastPLS, fastEmbedR, faissR, FAISS, Faiss-mlx, and cuVS revisions are recorded for attribution and audit; none is a runtime dependency of the standalone library.
 
 Output:
   y_best: optimized labels for this run
@@ -982,6 +997,5 @@ return y_best, pred_best, acc_best
 The compact ensemble pseudocode in Section 2.5 and the graph-input contract in Section 3.8 define KODAMA.matrix and KODAMA.matrix.graph without repeating the same steps here. Executable C++, R, and Python examples are maintained in the public API documentation.
 
 \acks{The authors thank contributors to the KODAMA, fastPLS, and fastEmbedR software projects.}
-\nocite{*}
 \bibliography{kodama_cpp_refs}
 \end{document}

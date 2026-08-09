@@ -2217,11 +2217,9 @@ std::vector<int> train_predict_pls_lda_projected_cuda_float(
   const int p = x_train.cols;
   const int n_val = x_val.rows;
   const int k = ncomp;
-  const int cnum = static_cast<int>(classes.size());
   CudaLDAContext& context = cuda_lda_context(gpu_device);
   cudaStream_t stream = context.stream();
   cublasHandle_t blas = context.blas();
-  cusolverDnHandle_t solver = context.solver();
   CudaPLSLDAFloatWorkspace& workspace = cuda_pls_lda_float_workspace(gpu_device);
 
   encode_labels_from_sorted_classes(y_train, classes, workspace.encoded, workspace.class_counts, 1);
@@ -2236,47 +2234,26 @@ std::vector<int> train_predict_pls_lda_projected_cuda_float(
   workspace.x_train.ensure(x_train.data.size());
   workspace.x_val.ensure(x_val.data.size());
   workspace.weights.ensure(workspace.weights_prefix.size());
-  workspace.train_scores.ensure(static_cast<std::size_t>(n) * static_cast<std::size_t>(k));
-  workspace.val_scores.ensure(static_cast<std::size_t>(n_val) * static_cast<std::size_t>(k));
   workspace.labels.ensure(workspace.encoded.size());
   workspace.counts.ensure(workspace.class_counts.size());
-  workspace.means.ensure(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
-  workspace.pooled.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
-  workspace.cov.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(k));
-  workspace.rhs.ensure(static_cast<std::size_t>(k) * static_cast<std::size_t>(cnum));
-  workspace.linear.ensure(static_cast<std::size_t>(cnum) * static_cast<std::size_t>(k));
-  workspace.constants.ensure(static_cast<std::size_t>(cnum));
-  workspace.lambda.ensure(1);
-  workspace.info.ensure(1);
-  workspace.pred.ensure(static_cast<std::size_t>(n_val));
+  check_cuda(cudaMemcpyAsync(workspace.x_train.data(), x_train.data.data(), x_train.data.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA Xtrain");
+  check_cuda(cudaMemcpyAsync(workspace.x_val.data(), x_val.data.data(), x_val.data.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA Xval");
+  check_cuda(cudaMemcpyAsync(workspace.weights.data(), workspace.weights_prefix.data(), workspace.weights_prefix.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA weights");
+  check_cuda(cudaMemcpyAsync(workspace.labels.data(), workspace.encoded.data(), workspace.encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA labels");
+  check_cuda(cudaMemcpyAsync(workspace.counts.data(), workspace.class_counts.data(), workspace.class_counts.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA counts");
 
-  try {
-    check_cuda(cudaMemcpyAsync(workspace.x_train.data(), x_train.data.data(), x_train.data.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA Xtrain");
-    check_cuda(cudaMemcpyAsync(workspace.x_val.data(), x_val.data.data(), x_val.data.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA Xval");
-    check_cuda(cudaMemcpyAsync(workspace.weights.data(), workspace.weights_prefix.data(), workspace.weights_prefix.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA weights");
-    check_cuda(cudaMemcpyAsync(workspace.labels.data(), workspace.encoded.data(), workspace.encoded.size() * sizeof(int), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA labels");
-    check_cuda(cudaMemcpyAsync(workspace.counts.data(), workspace.class_counts.data(), workspace.class_counts.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync float32 PLS-LDA counts");
-
+  const bool use_train_gram = p <= n;
+  if (use_train_gram) {
+    workspace.train_gram.ensure(static_cast<std::size_t>(p) * static_cast<std::size_t>(p));
     const float one = 1.0f;
     const float zero = 0.0f;
     check_cublas(
       cublasSgemm(
-        blas,
-        CUBLAS_OP_N,
-        CUBLAS_OP_N,
-        k,
-        n,
-        p,
-        &one,
-        workspace.weights.data(),
-        k,
-        workspace.x_train.data(),
-        p,
-        &zero,
-        workspace.train_scores.data(),
-        k
+        blas, CUBLAS_OP_N, CUBLAS_OP_T, p, p, n, &one,
+        workspace.x_train.data(), p, workspace.x_train.data(), p,
+        &zero, workspace.train_gram.data(), p
       ),
-      "cublasSgemm float32 PLS-LDA train scores"
+      "cublasSgemm float32 PLS-LDA X'X"
     );
     check_cublas(
       cublasSgemm(
@@ -2986,7 +2963,9 @@ std::vector<int> PLSLDAPredict_METAL(
   PLSFitF fit = fit_pls_components_labels_metal_float(x_train, labels, classes, ncomp);
   DenseF t_train = transform_pls_scores_metal_float(x_train, fit, fit.weights.cols);
   DenseF t_test = transform_pls_scores_metal_float(x_test, fit, fit.weights.cols);
-  return predict_pls_lda_float(t_train, labels, t_test, classes, fit.weights.cols);
+  return predict_pls_lda_float(
+    t_train, labels, t_test, classes, fit.weights.cols
+  );
 #else
   (void)train;
   (void)labels;

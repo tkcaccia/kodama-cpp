@@ -113,6 +113,8 @@ test_that("public API wrappers are exposed", {
   core_pls <- CorePLSLDA(x, labels, cycles = 1, folds = 3, ncomp = 2, backend = "cpu")
   pca <- KODAMA.pca(x, ncomp = 3, backend = "cpu", seed = 4)
   graph <- KODAMA.graph(x, k = 5, backend = "cpu")
+  expect_s3_class(graph$timings, "data.frame")
+  expect_true(all(c("knn_graph", "total") %in% graph$timings$step))
   emb_default <- KODAMA.visualization(
     graph,
     method = "UMAP",
@@ -158,6 +160,20 @@ test_that("public API wrappers are exposed", {
   expect_length(pls$predicted, nrow(x))
   expect_length(core_knn$clbest, nrow(x))
   expect_length(core_pls$clbest, nrow(x))
+  transition_fields <- c(
+    "proposals_evaluated", "best_state_updates", "current_state_accepts",
+    "stochastic_state_attempts", "stochastic_state_accepts",
+    "current_state_rejections",
+    "coarsening_moves", "absorption_moves"
+  )
+  expect_true(all(transition_fields %in% names(core_knn)))
+  expect_true(all(transition_fields %in% names(core_pls)))
+  expect_identical(core_knn$proposals_evaluated, core_knn$cycles_completed)
+  expect_identical(core_pls$proposals_evaluated, core_pls$cycles_completed)
+  expect_identical(core_knn$current_state_accepts + core_knn$current_state_rejections, 0L)
+  expect_identical(core_pls$current_state_accepts + core_pls$current_state_rejections, 0L)
+  expect_lte(core_knn$stochastic_state_accepts, core_knn$stochastic_state_attempts)
+  expect_lte(core_pls$stochastic_state_accepts, core_pls$stochastic_state_attempts)
   expect_identical(knncv$backend, "cpu")
   expect_identical(pls$backend, "cpu")
   expect_identical(core_knn$backend, "cpu")
@@ -369,4 +385,20 @@ test_that("diagnostics report wrapper runtime information", {
   expect_s3_class(diag, "kodama_diagnostics")
   expect_true(nzchar(diag$package))
   expect_true("CONDA_PREFIX" %in% names(diag$environment))
+})
+
+test_that("shared k-means landmark atlas is reported", {
+  set.seed(47)
+  x <- matrix(rnorm(120 * 5), 120, 5)
+  prepared <- KODAMA.graph(
+    x, k = 12L, backend = "cpu", n.cores = 2L, storage = "handle"
+  )
+  result <- KODAMA.matrix(
+    data = x, graph = prepared, M = 1L, Tcycle = 1L,
+    landmarks = 80L, splitting = 8L, graph.neighbors = 12L,
+    knn.k = 5L,
+    backend = "cpu", progress = FALSE
+  )
+  expect_true(result$shared_landmark_partition_used)
+  expect_identical(result$shared_landmark_partition_strata, 8L)
 })

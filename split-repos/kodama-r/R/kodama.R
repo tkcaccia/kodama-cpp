@@ -205,6 +205,9 @@ PLSLDACV <- function(data,
 #' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
+#' @return A list containing the best labels and predictions, accuracy and score
+#'   traces, plus explicit proposal, acceptance, rejection, coarsening, and
+#'   absorption counters for optimizer-state diagnostics.
 #' @export
 CoreKNN <- function(data,
                     labels,
@@ -253,6 +256,9 @@ CoreKNN <- function(data,
 #' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
+#' @return A list containing the best labels and predictions, accuracy and score
+#'   traces, plus explicit proposal, acceptance, rejection, coarsening, and
+#'   absorption counters for optimizer-state diagnostics.
 #' @export
 CorePLSLDA <- function(data,
                        labels,

@@ -261,6 +261,25 @@ Rcpp::List folds_to_r(const std::vector<kodama::FoldResult>& folds) {
   );
 }
 
+Rcpp::DataFrame stage_timings_to_r(
+  const std::vector<kodama::KODAMAStageTiming>& timings
+) {
+  Rcpp::CharacterVector step(timings.size());
+  Rcpp::NumericVector wall(timings.size());
+  Rcpp::NumericVector accumulated(timings.size());
+  for (std::size_t i = 0; i < timings.size(); ++i) {
+    step[static_cast<R_xlen_t>(i)] = timings[i].step;
+    wall[static_cast<R_xlen_t>(i)] = timings[i].wall_seconds;
+    accumulated[static_cast<R_xlen_t>(i)] = timings[i].accumulated_seconds;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("step") = step,
+    Rcpp::Named("wall_seconds") = wall,
+    Rcpp::Named("accumulated_seconds") = accumulated,
+    Rcpp::Named("stringsAsFactors") = false
+  );
+}
+
 Rcpp::List confusion_to_r(const kodama::ConfusionMatrix& confusion) {
   Rcpp::IntegerMatrix counts(confusion.n_labels, confusion.n_labels);
   for (std::size_t i = 0; i < confusion.n_labels; ++i) {
@@ -321,6 +340,14 @@ Rcpp::List core_to_r(const kodama::CoreResult& result) {
     Rcpp::Named("vect_acc") = Rcpp::NumericVector(result.vect_acc.begin(), result.vect_acc.end()),
     Rcpp::Named("vect_score") = Rcpp::NumericVector(result.vect_score.begin(), result.vect_score.end()),
     Rcpp::Named("cycles_completed") = result.cycles_completed,
+    Rcpp::Named("proposals_evaluated") = result.proposals_evaluated,
+    Rcpp::Named("best_state_updates") = result.best_state_updates,
+    Rcpp::Named("current_state_accepts") = result.current_state_accepts,
+    Rcpp::Named("stochastic_state_attempts") = result.stochastic_state_attempts,
+    Rcpp::Named("stochastic_state_accepts") = result.stochastic_state_accepts,
+    Rcpp::Named("current_state_rejections") = result.current_state_rejections,
+    Rcpp::Named("coarsening_moves") = result.coarsening_moves,
+    Rcpp::Named("absorption_moves") = result.absorption_moves,
     Rcpp::Named("success") = result.success,
     Rcpp::Named("runtime_seconds") = result.runtime_seconds,
     Rcpp::Named("peak_memory_mb") = result.peak_memory_mb
@@ -564,6 +591,8 @@ Rcpp::List kodama_matrix_result_to_r(
       Rcpp::Named("graph_feature_seconds") = result.graph_feature_seconds,
       Rcpp::Named("spatial_precompute_seconds") = result.spatial_precompute_seconds,
       Rcpp::Named("graph_seconds") = result.graph_seconds,
+      Rcpp::Named("shared_landmark_partition_seconds") =
+        result.shared_landmark_partition_seconds,
       Rcpp::Named("spatial_graph_seconds") = result.spatial_graph_seconds,
       Rcpp::Named("landmark_sum_seconds") = landmark_sum_seconds,
       Rcpp::Named("landmark_mean_seconds") = landmark_mean_seconds,
@@ -574,6 +603,7 @@ Rcpp::List kodama_matrix_result_to_r(
       Rcpp::Named("r_graph_conversion_seconds") = graph_conversion_seconds,
       Rcpp::Named("runtime_seconds") = result.runtime_seconds
     ),
+    Rcpp::Named("timings") = stage_timings_to_r(result.timings),
     Rcpp::Named("peak_memory_mb") = result.peak_memory_mb
   );
 }

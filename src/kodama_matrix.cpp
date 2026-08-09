@@ -1618,6 +1618,14 @@ struct IterationResult {
   int landmark_represented_strata = 0;
   int landmark_grid_bins = 0;
   double landmark_seconds = 0.0;
+  double coarse_partition_seconds = 0.0;
+  double landmark_sampling_seconds = 0.0;
+  double constraint_seconds = 0.0;
+  double landmark_prepare_seconds = 0.0;
+  double landmark_initialization_seconds = 0.0;
+  double landmark_graph_seconds = 0.0;
+  double core_evolution_seconds = 0.0;
+  double projection_seconds = 0.0;
   double accbest = std::numeric_limits<double>::quiet_NaN();
   double runtime = 0.0;
   double memory = 0.0;
@@ -2187,6 +2195,9 @@ namespace {
 struct DatasetExecutionContext {
   std::vector<float> matrix;
   const VisualizationInitResult* pca_initialization = nullptr;
+  IndexedStrata shared_landmark_strata;
+  int shared_landmark_strata_count = 0;
+  bool has_shared_landmark_strata = false;
   std::shared_ptr<DeviceResidentKODAMAGraph> graph =
     std::make_shared<DeviceResidentKODAMAGraph>();
 #if defined(KODAMA_ENABLE_CUDA)
@@ -2590,12 +2601,15 @@ IterationResult run_iteration(
   detail::Timer iter_timer;
   const int kmeans_gpu_device = options.knn.gpu_device;
   LandmarkSample landmark_sample;
+  double coarse_partition_seconds = 0.0;
+  double landmark_sampling_seconds = 0.0;
   scratch.coarse_labels.clear();
   if (spatial_flag) {
     if (options.progress) {
       std::cerr << "[kodama] M " << run_id << "/" << options.runs
                 << " spatial grid landmark selection for " << landmarks << " samples" << std::endl;
     }
+    detail::Timer sampling_timer;
     landmark_sample = spatial_grid_landmarks(
       spatial,
       n,
@@ -2603,11 +2617,67 @@ IterationResult run_iteration(
       landmarks,
       rng
     );
+    landmark_sampling_seconds = sampling_timer.seconds();
   } else {
     const int coarse_k = std::max(2, std::min(splitting, n));
-    if (options.progress) {
-      std::cerr << "[kodama] M " << run_id << "/" << options.runs
-                << " coarse landmark partition with " << coarse_k << " centers" << std::endl;
+    if (execution_context != nullptr && execution_context->has_shared_landmark_strata) {
+      if (options.progress) {
+        std::cerr << "[kodama] M " << run_id << "/" << options.runs
+                  << " sampling from shared landmark partition with "
+                  << execution_context->shared_landmark_strata_count << " strata"
+                  << std::endl;
+      }
+      // Keep quota sampling on the same per-run random substream whether the
+      // partition is computed now or supplied by the shared atlas.
+      (void)rng();
+      detail::Timer sampling_timer;
+      landmark_sample = quota_sample_landmarks(
+        execution_context->shared_landmark_strata.offsets,
+        execution_context->shared_landmark_strata.rows,
+        landmarks,
+        rng,
+        false
+      );
+      landmark_sampling_seconds = sampling_timer.seconds();
+    } else {
+      if (options.progress) {
+        std::cerr << "[kodama] M " << run_id << "/" << options.runs
+                  << " coarse landmark partition with " << coarse_k << " centers" << std::endl;
+      }
+      detail::Timer coarse_timer;
+      scratch.coarse_labels = kmeans_labels(
+        full_float,
+        n,
+        p,
+        coarse_k,
+        rng,
+        10,
+        options.n_threads,
+        options.backend,
+        kmeans_gpu_device,
+        worker_lane,
+#if defined(KODAMA_ENABLE_CUDA)
+        execution_context == nullptr ? nullptr : execution_context->cuda_kmeans.get(),
+#else
+        nullptr,
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+        execution_context == nullptr ? nullptr : execution_context->metal_kmeans.get()
+#else
+        nullptr
+#endif
+      );
+      coarse_partition_seconds = coarse_timer.seconds();
+      const IndexedStrata indexed = index_strata(scratch.coarse_labels, coarse_k);
+      detail::Timer sampling_timer;
+      landmark_sample = quota_sample_landmarks(
+        indexed.offsets,
+        indexed.rows,
+        landmarks,
+        rng,
+        false
+      );
+      landmark_sampling_seconds = sampling_timer.seconds();
     }
     scratch.coarse_labels = kmeans_labels(
       full_float,
@@ -2652,6 +2722,7 @@ IterationResult run_iteration(
     }
     std::cerr << " in " << landmark_seconds << "s" << std::endl;
   }
+  detail::Timer constraint_timer;
   const std::vector<int>* run_constrain_ptr = &constrain;
   bool run_constrain_is_identity = constrain_is_identity;
   if (spatial_flag) {
@@ -2697,9 +2768,11 @@ IterationResult run_iteration(
     run_constrain_ptr = &scratch.run_constrain;
     run_constrain_is_identity = is_identity_constrain(*run_constrain_ptr);
   }
+  const double constraint_seconds = constraint_timer.seconds();
   const std::vector<int>& run_constrain = *run_constrain_ptr;
   const std::vector<int>& landpoints = scratch.landpoints;
 
+  detail::Timer prepare_timer;
   scratch.is_landmark.assign(static_cast<std::size_t>(n), 0);
   for (int row : landpoints) scratch.is_landmark[static_cast<std::size_t>(row)] = 1;
   scratch.tpoints.clear();
@@ -2718,7 +2791,9 @@ IterationResult run_iteration(
   }
   scratch.x_fixed.resize(landpoints.size());
   for (std::size_t i = 0; i < landpoints.size(); ++i) scratch.x_fixed[i] = fixed[static_cast<std::size_t>(landpoints[i])];
+  const double landmark_prepare_seconds = prepare_timer.seconds();
 
+  detail::Timer initialization_timer;
   scratch.xw.assign(landpoints.size(), 0);
   if (!starting_labels.empty()) {
     scratch.tmp_labels.resize(landpoints.size());
@@ -2741,6 +2816,7 @@ IterationResult run_iteration(
     );
     scratch.xw = run_constrain_is_identity ? scratch.init : constrained_majority(scratch.init, scratch.x_constrain);
   }
+  const double landmark_initialization_seconds = initialization_timer.seconds();
 
   MatrixView x_view{scratch.x_land.data(), landpoints.size(), full.cols};
   CoreOptions core;
@@ -2790,6 +2866,8 @@ IterationResult run_iteration(
   };
 
   CoreResult core_result;
+  double landmark_graph_seconds = 0.0;
+  detail::Timer classifier_timer;
   if (options.classifier == CoreClassifier::KNN) {
     if (resident_graph != nullptr && resident_graph->has_landmark_index()) {
       scratch.local_graph = resident_graph->landmark_knn_graph(
@@ -2828,6 +2906,8 @@ IterationResult run_iteration(
   } else {
     throw std::invalid_argument("Unsupported KODAMA.matrix classifier.");
   }
+  const double classifier_seconds = classifier_timer.seconds();
+  const double core_evolution_seconds = std::max(0.0, classifier_seconds - landmark_graph_seconds);
 
   IterationResult out;
   out.landmarks_used = static_cast<int>(landpoints.size());
@@ -2835,6 +2915,14 @@ IterationResult run_iteration(
   out.landmark_represented_strata = landmark_sample.represented_strata;
   out.landmark_grid_bins = landmark_sample.grid_bins;
   out.landmark_seconds = landmark_seconds;
+  out.coarse_partition_seconds = coarse_partition_seconds;
+  out.landmark_sampling_seconds = landmark_sampling_seconds;
+  out.constraint_seconds = constraint_seconds;
+  out.landmark_prepare_seconds = landmark_prepare_seconds;
+  out.landmark_initialization_seconds = landmark_initialization_seconds;
+  out.landmark_graph_seconds = landmark_graph_seconds;
+  out.core_evolution_seconds = core_evolution_seconds;
+  detail::Timer projection_timer;
   out.res.assign(static_cast<std::size_t>(n), 0);
   out.constrain = run_constrain;
   for (std::size_t i = 0; i < landpoints.size(); ++i) out.res[static_cast<std::size_t>(landpoints[i])] = core_result.clbest[i];
@@ -2930,7 +3018,6 @@ KODAMAMatrixResult run_kodama_matrix(
   if (x.rows < 3) throw std::invalid_argument("KODAMAMatrix requires at least 3 rows.");
   if (options.runs < 1) throw std::invalid_argument("KODAMAMatrixOptions::runs must be positive.");
   if (options.cycles < 0) throw std::invalid_argument("KODAMAMatrixOptions::cycles must be non-negative.");
-
   detail::Timer timer;
   if (options.landmarks <= 0) options.landmarks = 10000;
   if (static_cast<std::size_t>(options.landmarks) >= x.rows) {
@@ -3047,6 +3134,14 @@ KODAMAMatrixResult run_kodama_matrix(
   result.landmark_represented_strata.assign(static_cast<std::size_t>(options.runs), 0);
   result.landmark_grid_bins.assign(static_cast<std::size_t>(options.runs), 0);
   result.landmark_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.coarse_partition_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.landmark_sampling_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.constraint_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.landmark_prepare_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.landmark_initialization_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.landmark_graph_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.core_evolution_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
+  result.projection_seconds.assign(static_cast<std::size_t>(options.runs), 0.0);
   result.v.assign(static_cast<std::size_t>(options.runs) * options.cycles, std::numeric_limits<double>::quiet_NaN());
   result.res.assign(static_cast<std::size_t>(options.runs) * x.rows, 0);
   result.res_constrain.assign(static_cast<std::size_t>(result.res_constrain_rows) * x.rows, 0);
@@ -3264,6 +3359,42 @@ KODAMAMatrixResult run_kodama_matrix(
         );
     }
 #endif
+    if (options.progress) {
+      std::cerr << "[kodama] building one shared k-means landmark atlas with "
+                << coarse_k << " strata for all independent M runs" << std::endl;
+    }
+    detail::Timer shared_partition_timer;
+    std::mt19937_64 shared_rng(options.seed + 1u);
+    std::vector<int> shared_labels = kmeans_labels(
+      full_float,
+      static_cast<int>(x.rows),
+      static_cast<int>(x.cols),
+      coarse_k,
+      shared_rng,
+      10,
+      options.n_threads,
+      options.backend,
+      options.knn.gpu_device,
+      0,
+#if defined(KODAMA_ENABLE_CUDA)
+      execution_context.cuda_kmeans.get(),
+#else
+      nullptr,
+#endif
+#if defined(KODAMA_ENABLE_METAL)
+      execution_context.metal_kmeans.get()
+#else
+      nullptr
+#endif
+    );
+    execution_context.shared_landmark_strata =
+      index_strata(shared_labels, coarse_k);
+    execution_context.shared_landmark_strata_count = coarse_k;
+    execution_context.has_shared_landmark_strata = true;
+    result.shared_landmark_partition_used = true;
+    result.shared_landmark_partition_strata = coarse_k;
+    result.shared_landmark_partition_seconds =
+      shared_partition_timer.seconds();
   }
   result.kmeans_input_uploads = execution_context.kmeans_input_uploads();
   // A raw-data accelerator run queries the retained IVF index for each
@@ -3523,6 +3654,54 @@ KODAMAMatrixResult run_kodama_matrix(
     result.graph_storage_bytes = 0;
   }
   result.runtime_seconds = timer.seconds();
+  const auto accumulated = [](const std::vector<double>& values) {
+    return std::accumulate(values.begin(), values.end(), 0.0);
+  };
+  const double measured_wall =
+    result.input_copy_seconds + result.spatial_precompute_seconds +
+    result.graph_seconds + result.graph_feature_seconds +
+    result.visual_init_seconds +
+    result.shared_landmark_partition_seconds + result.optimization_wall_seconds +
+    result.spatial_graph_seconds + result.dissimilarity_seconds;
+  const double orchestration_seconds =
+    std::max(0.0, result.runtime_seconds - measured_wall);
+  result.timings = {
+    {"input_copy", result.input_copy_seconds, result.input_copy_seconds},
+    {"spatial_precompute", result.spatial_precompute_seconds,
+      result.spatial_precompute_seconds},
+    {"knn_graph", result.graph_seconds, result.graph_seconds},
+    {"graph_features", result.graph_feature_seconds,
+      result.graph_feature_seconds},
+    {"visual_initialization", result.visual_init_seconds,
+      result.visual_init_seconds},
+    {"shared_landmark_partition", result.shared_landmark_partition_seconds,
+      result.shared_landmark_partition_seconds},
+    {"optimization", result.optimization_wall_seconds,
+      result.optimization_sum_seconds},
+    {"coarse_partition_per_run", 0.0,
+      accumulated(result.coarse_partition_seconds)},
+    {"landmark_sampling", 0.0,
+      accumulated(result.landmark_sampling_seconds)},
+    {"constraint_preparation", 0.0,
+      accumulated(result.constraint_seconds)},
+    {"landmark_matrix_preparation", 0.0,
+      accumulated(result.landmark_prepare_seconds)},
+    {"landmark_initialization", 0.0,
+      accumulated(result.landmark_initialization_seconds)},
+    {"landmark_graph", 0.0,
+      accumulated(result.landmark_graph_seconds)},
+    {"core_evolution", 0.0,
+      accumulated(result.core_evolution_seconds)},
+    {"label_projection", 0.0,
+      accumulated(result.projection_seconds)},
+    {"spatial_graph_fusion", result.spatial_graph_seconds,
+      result.spatial_graph_seconds},
+    {"kodama_dissimilarity", result.dissimilarity_seconds,
+      result.dissimilarity_seconds},
+    {"orchestration_and_materialization", orchestration_seconds,
+      orchestration_seconds},
+    {"total", result.runtime_seconds, result.runtime_seconds}
+  };
   result.peak_memory_mb = std::max(result.peak_memory_mb, detail::peak_memory_mb());
   if (options.progress) {
     std::cerr << "[kodama] finished KODAMA.matrix in " << result.runtime_seconds << "s" << std::endl;
@@ -3664,6 +3843,22 @@ KODAMAGraphResult run_public_kodama_graph(
   }
   result.input_copy_seconds = input_copy_seconds;
   result.runtime_seconds = timer.seconds();
+  const double measured_wall =
+    result.input_copy_seconds + result.graph_seconds +
+    result.spatial_graph_seconds + result.visual_init_seconds;
+  const double orchestration_seconds =
+    std::max(0.0, result.runtime_seconds - measured_wall);
+  result.timings = {
+    {"input_copy", result.input_copy_seconds, result.input_copy_seconds},
+    {"knn_graph", result.graph_seconds, result.graph_seconds},
+    {"spatial_graph", result.spatial_graph_seconds,
+      result.spatial_graph_seconds},
+    {"visual_initialization", result.visual_init_seconds,
+      result.visual_init_seconds},
+    {"orchestration_and_materialization", orchestration_seconds,
+      orchestration_seconds},
+    {"total", result.runtime_seconds, result.runtime_seconds}
+  };
   return result;
 }
 

@@ -238,7 +238,7 @@ stored initialization, UMAP uses its graph-spectral start and openTSNE uses
 its deterministic random start.
 
 The complete installation and `R CMD check` procedure is in
-`split-repos/kodama-r/README.md`.
+`split-repos/kodama-r/inst/INSTALL.md`.
 
 ## Python wrapper
 

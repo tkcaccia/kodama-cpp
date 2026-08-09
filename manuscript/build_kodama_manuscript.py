@@ -4616,11 +4616,9 @@ def build_bib() -> None:
 def main() -> None:
     build_docx()
     build_self_review()
-    build_tex()
     build_bib()
     print(MANUSCRIPT)
     print(SELF_REVIEW)
-    print(TEX)
     print(BIB)
 
 

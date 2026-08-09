@@ -29,7 +29,7 @@ def build_main_tex() -> None:
     text = dedent(
         r"""
         \documentclass[twoside,11pt]{article}
-        \usepackage{jmlr2e}
+        \usepackage[preprint]{jmlr2e}
         \usepackage{amsmath}
         \usepackage{booktabs}
         \usepackage{graphicx}
@@ -44,7 +44,7 @@ def build_main_tex() -> None:
         \setlength{\belowcaptionskip}{0pt}
         \renewcommand{\arraystretch}{0.96}
 
-        \jmlrheading{1}{2026}{1--\pageref{LastPage}}{7/26}{}{26-0000}{Kassim et al.}
+        \jmlrheading{}{2026}{}{}{}{}{Kassim et al.}
         \ShortHeadings{kodama-cpp}{Kassim et al.}
         \firstpageno{1}
 
@@ -67,7 +67,6 @@ def build_main_tex() -> None:
         \addr $^{\ast}$Moussa Kassim and Martin Ocharo contributed equally.\\
         \addr $^{\dagger}$Leonardo Tenori and Stefano Cacciatore are co-corresponding authors.}
 
-        \editor{To be assigned}
         \maketitle
 
         \begin{abstract}
@@ -232,12 +231,6 @@ def build_cover_letter() -> None:
     add_label_value(doc, "Software version", f"{SOFTWARE_VERSION} release candidate")
     add_label_value(doc, "Reviewed baseline", REVIEWED_BASELINE)
     add_label_value(doc, "Reviewed R-wrapper baseline", R_WRAPPER_BASELINE)
-    add_label_value(doc, "Final release commit", "AUTHOR ACTION REQUIRED: insert the full v0.1.0 tagged commit")
-    add_label_value(
-        doc,
-        "Archived source",
-        "AUTHOR ACTION REQUIRED: deposit the tagged source archive, insert its URL and checksum, and add a DOI if assigned",
-    )
 
     doc.add_heading("Significance and software contribution", level=1)
     doc.add_paragraph(
@@ -276,22 +269,9 @@ def build_cover_letter() -> None:
         "https://cranlogs.r-pkg.org/downloads/total/2025-07-27:2026-07-26/KODAMA). These counts concern the "
         "predecessor R package, not the new implementation. kodama-cpp itself is a new repository and, on "
         "2026-07-27, had zero GitHub stars, forks, releases, and public issues; these figures are disclosed rather "
-        "than presented as adoption. AUTHOR ACTION REQUIRED: refresh the dated counts and add any independently "
-        "verifiable user or downstream-package evidence available immediately before submission. "
+        "than presented as adoption. "
         "The repository provides an issue tracker, contribution guide, changelog, API-stability policy, reproducible "
         "tests, and release checklist."
-    )
-
-    doc.add_heading("Required author declarations", level=1)
-    supplement.add_bullets(
-        doc,
-        [
-            "Coauthor consent: AUTHOR ACTION REQUIRED. Confirm that all seven authors know of and consent to this submission.",
-            "Funding supporting this work during the previous 36 months: AUTHOR ACTION REQUIRED.",
-            "Competing interests and recent collaborations with JMLR action editors: AUTHOR ACTION REQUIRED.",
-            "Suggested action editors: AUTHOR ACTION REQUIRED. Supply 3-5 conflict-free JMLR action editors with brief relevance statements.",
-            "Suggested reviewers: AUTHOR ACTION REQUIRED. Supply 3-5 conflict-free reviewers with brief relevance statements.",
-        ],
     )
 
     doc.add_heading("Keywords", level=1)
@@ -328,8 +308,7 @@ def build_readiness_report() -> None:
         "Internal submission-readiness report",
     )
     doc.add_paragraph(
-        "This report separates completed manuscript/repository revisions from evidence that cannot be "
-        "represented as complete until the remaining benchmark matrix, tagged archive, and author declarations are available."
+        "This report separates completed manuscript and repository revisions from evidence absent from the reviewed archive."
     )
     rows = [
         ("KODAMA 2.4.1/2.4 comparison", "MetRef includes a classifier-matched KNN benchmark and a separately labeled historical PLS-DA benchmark. The latter contextualizes the predecessor but is not a matched speedup baseline for the new SIMPLS plus latent-space LDA route. Later KODAMA releases are excluded.", "Historical PLS-DA rerun completed on chiamaka"),
