@@ -383,7 +383,10 @@ no process-global cache.
 | `graph.neighbors` | Neighbors retained in the returned KODAMA graph |
 | `backend` | Strict execution backend: CPU, CUDA, or an API-supported Metal path |
 
-The R wrapper defaults `splitting` to 100 below 40,000 samples and 300
+The KNN classifier defaults to `knn.k = 10`, selected by the reproducible
+ten-dataset sweep described in `benchmarks/README.md`. This does not change the
+full-data graph width or the visualization neighborhood size. The R wrapper
+defaults `splitting` to 100 below 40,000 samples and 300
 otherwise. UMAP uses `k = 30` by default; openTSNE uses perplexity 30.
 
 Landmarks use exact population-proportional quotas. Matrix-only runs first

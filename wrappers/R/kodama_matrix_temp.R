@@ -200,7 +200,7 @@ KODAMA.matrix.cpp <- local({
            splitting = ifelse(nrow(data) < 40000, 100L, 300L),
            n.cores = 4L,
            graph.neighbors = 100L,
-           knn.k = 30L,
+           knn.k = 10L,
            spatial.resolution = 0.3,
            spatial.graph.mix = FALSE,
            spatial.constraint.mode = c("kmeans", "graph", "auto"),

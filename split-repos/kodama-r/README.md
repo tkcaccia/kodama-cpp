@@ -333,7 +333,7 @@ kk <- KODAMA.matrix(
   backend = "cuda",
   M = 100,
   Tcycle = 20,
-  knn.k = 30
+  knn.k = 10
 )
 
 KODAMA.timing(kk)

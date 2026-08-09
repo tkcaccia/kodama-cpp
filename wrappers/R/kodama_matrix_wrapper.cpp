@@ -123,7 +123,7 @@ Rcpp::List kodama_matrix_cpp_temp(
   int splitting = 0,
   int n_cores = 4,
   int graph_neighbors = 100,
-  int knn_k = 30,
+  int knn_k = 10,
   double spatial_resolution = 0.3,
   bool spatial_graph_mix = false,
   int spatial_constraint_mode = 0,

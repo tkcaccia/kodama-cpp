@@ -433,3 +433,31 @@ PLS-LDA. Both KODAMA truth-label UMAP silhouettes were below classic UMAP, so
 the result is retained as a negative systems and quality control. Cycle 22 also
 adds a deterministic test for the public binary UMAP graph route copied from
 fastEmbedR; no production optimizer or KODAMA mathematics changed.
+
+## KNN predictor default sweep
+
+`run_jmlr_nonspatial_panel.R` and `run_knn_k_fixed_graph_sweep.R` reproduce
+the 2026-08-10 CUDA comparison of `knn.k` values 5, 10, 15, 20, 30, and 50.
+The experiment used the ten-dataset non-spatial panel, `M=100`,
+`Tcycle=100`, seed 1234, 100,000 requested landmarks, a graph width of 100,
+and UMAP `k=30`. Truth labels were used only for evaluation. The three
+70,000-sample datasets used one fixed CPU HNSW graph for every candidate after
+the display-attached CUDA device triggered its kernel watchdog during graph
+construction; KODAMA optimization and voting remained CUDA-native.
+
+| `knn.k` | Median selected ARI | Median run ARI | Median truth silhouette | Median classes | Selected-run collapses |
+|---:|---:|---:|---:|---:|---:|
+| 5 | 0.144 | 0.142 | 0.260 | 98.0 | 0 |
+| 10 | 0.174 | 0.184 | 0.242 | 84.8 | 0 |
+| 15 | 0.229 | 0.216 | 0.233 | 71.5 | 2 |
+| 20 | 0.248 | 0.252 | 0.214 | 61.0 | 2 |
+| 30 | 0.339 | 0.324 | 0.199 | 45.5 | 2 |
+| 50 | 0.339 | 0.340 | 0.121 | 26.0 | 3 |
+
+A collapse here means that the CV-selected run retained fewer than half of
+the known benchmark classes; it is a diagnostic, not an input to KODAMA.
+Although `k=50` maximized aggregate ARI, it visibly over-merged MetRef and
+COIL20. Among the candidates with no selected-run collapse, `k=10` improved
+both selected and median-run ARI over `k=5`, reduced fragmentation, and had
+similar runtime. It is therefore the production KNN-classifier default.
+Graph construction and visualization neighborhood defaults are unchanged.

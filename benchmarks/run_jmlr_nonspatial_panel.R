@@ -47,7 +47,7 @@ M <- as.integer(value_or("KODAMA_PANEL_M", "100"))
 Tcycle <- as.integer(value_or("KODAMA_PANEL_TCYCLE", "100"))
 landmarks <- as.integer(value_or("KODAMA_PANEL_LANDMARKS", "100000"))
 ncomp <- as.integer(value_or("KODAMA_PANEL_NCOMP", "50"))
-knn_k <- as.integer(value_or("KODAMA_PANEL_KNN_K", "30"))
+knn_k <- as.integer(value_or("KODAMA_PANEL_KNN_K", "10"))
 graph_k <- as.integer(value_or("KODAMA_PANEL_GRAPH_K", "100"))
 embedding_k <- as.integer(value_or("KODAMA_PANEL_EMBED_K", "30"))
 perplexity <- as.numeric(value_or("KODAMA_PANEL_PERPLEXITY", "30"))
@@ -370,7 +370,10 @@ run_dataset <- function(dataset) {
   classic_graph_record <- if (file.exists(classic_graph_file)) readRDS(classic_graph_file) else NULL
 
   for (classifier in classifiers) {
-    job <- paste(dataset, classifier, backend, paste0("M", M), paste0("T", Tcycle), sep = "__")
+    job <- paste(
+      dataset, classifier, backend, paste0("M", M), paste0("T", Tcycle),
+      paste0("k", knn_k), sep = "__"
+    )
     result_file <- file.path(out_dir, "results", paste0(job, ".rds"))
     timing_file <- file.path(out_dir, "results", paste0(job, "__timing.rds"))
     if (file.exists(result_file) && file.exists(timing_file)) {
@@ -395,7 +398,8 @@ run_dataset <- function(dataset) {
         seed = seed,
         visual.init = TRUE,
         progress = TRUE,
-        apply.kodama.dissimilarity = TRUE
+        apply.kodama.dissimilarity = TRUE,
+        return.graph = TRUE
       )
       matrix_timing <- list(
         wall_seconds = proc.time()[["elapsed"]] - start,

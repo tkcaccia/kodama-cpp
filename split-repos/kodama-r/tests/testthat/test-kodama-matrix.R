@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Stefano Cacciatore
 # SPDX-License-Identifier: MIT
 
+test_that("KNN classifier defaults are benchmark-selected without changing graph defaults", {
+  expect_identical(formals(CoreKNN)$k, 10L)
+  expect_identical(formals(kodama_matrix)$knn.k, 10L)
+  expect_identical(formals(kodama_matrix_graph)$knn.k, 10L)
+  expect_identical(formals(KODAMA.graph)$k, 100L)
+  expect_identical(formals(KODAMA.visualization)$k, 30L)
+})
+
 test_that("kodama_matrix runs KNN and PLS-LDA on a small matrix", {
   set.seed(1)
   x <- matrix(rnorm(90 * 6), 90, 6)
@@ -379,6 +387,60 @@ test_that("handle-backed graphs avoid R matrices and preserve results", {
   )
   expect_equal(as.numeric(handle_umap), as.numeric(matrix_umap), tolerance = 0)
   expect_identical(attr(handle_umap, "initialization"), "raw_pca")
+})
+
+test_that("KODAMA.matrix accepts all raw and graph input forms", {
+  set.seed(3)
+  x <- matrix(rnorm(60 * 6), 60, 6)
+  prepared <- KODAMA.graph(
+    x,
+    k = 15,
+    backend = "cpu",
+    n.cores = 1,
+    seed = 9
+  )
+  materialized <- KODAMA.graph.materialize(prepared)
+  bare <- list(indices = materialized$indices, distances = materialized$distances)
+  common <- list(
+    M = 1L,
+    Tcycle = 1L,
+    ncomp = 3L,
+    landmarks = 40L,
+    splitting = 5L,
+    n.cores = 1L,
+    graph.neighbors = 15L,
+    knn.k = 5L,
+    classifier = "knn",
+    backend = "cpu",
+    seed = 9L,
+    progress = FALSE
+  )
+
+  from_raw <- do.call(KODAMA.matrix, c(list(data = x), common))
+  from_prepared <- do.call(KODAMA.matrix, c(list(graph = prepared), common))
+  from_prepared_data <- do.call(
+    KODAMA.matrix,
+    c(list(data = x, graph = prepared), common)
+  )
+  from_bare <- do.call(KODAMA.matrix, c(list(graph = bare), common))
+
+  expect_identical(from_raw$graph_builds, 1L)
+  expect_identical(from_prepared$graph_builds, 0L)
+  expect_identical(from_prepared_data$graph_builds, 0L)
+  expect_identical(from_bare$graph_builds, 0L)
+  expect_equal(from_prepared$parameters$graph.uses.data.geometry, FALSE)
+  expect_equal(from_prepared_data$parameters$graph.uses.data.geometry, TRUE)
+  expect_equal(from_bare$parameters$graph.uses.data.geometry, FALSE)
+  expect_equal(dim(from_prepared_data$res), dim(from_raw$res))
+  expect_equal(
+    as.numeric(from_prepared$visual_init$umap),
+    as.numeric(prepared$visual_init$umap)
+  )
+  expect_null(from_bare$visual_init)
+  expect_error(
+    do.call(KODAMA.matrix, c(list(data = prepared), common)),
+    "pass graph inputs through graph"
+  )
 })
 
 test_that("diagnostics report wrapper runtime information", {

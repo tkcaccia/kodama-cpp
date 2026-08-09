@@ -10,7 +10,7 @@ diagnostics.
 - `M = 100` independent runs
 - `Tcycle = 100` proposal/evaluation cycles
 - `landmarks = 100000`, with `ceil(0.75 * n)` when `n <= landmarks`
-- `knn.k = 30`
+- `knn.k = 10`
 - `ncomp = 50`, limited only by mathematical feasibility
 - `splitting = 100` for `n < 40000`, otherwise `300`
 - UMAP `k = 30`; openTSNE perplexity `30`
@@ -161,7 +161,7 @@ runs the declared historical/current KNN comparison jobs.
 
 The 2026-07-16 MetRef KNN run fixed `M = 100`, `Tcycle = 100`,
 `landmarks = 100000` (655 effective under the historical 75% rule),
-`splitting = 50`, `knn.k = 30`, graph `k = 100`, and seed 1234.
+`splitting = 50`, `knn.k = 10`, graph `k = 100`, and seed 1234.
 Wall times were 610.543 s for KODAMA R 2.4.1, 965.348 s for current
 single-core CPU, 235.547 s for current four-core CPU, and 2.361 s for
 current CUDA. All four rows reached best raw CV accuracy 1.000.

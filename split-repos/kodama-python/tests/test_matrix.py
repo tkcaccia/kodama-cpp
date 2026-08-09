@@ -377,6 +377,7 @@ def test_diagnostics():
 
 
 def test_python_signatures_mirror_r_api():
+    assert inspect.signature(kodama.CoreKNN).parameters["k"].default == 10
     assert list(inspect.signature(kodama.KNNCV).parameters) == [
         "data",
         "labels",
@@ -435,6 +436,7 @@ def test_python_signatures_mirror_r_api():
     ]
 
     matrix_signature = inspect.signature(kodama.matrix)
+    assert matrix_signature.parameters["knn_k"].default == 10
     assert list(matrix_signature.parameters) == [
         "data",
         "graph",
@@ -471,6 +473,7 @@ def test_python_signatures_mirror_r_api():
     assert "n_threads" not in matrix_signature.parameters
 
     graph_signature = inspect.signature(kodama.matrix_graph)
+    assert graph_signature.parameters["knn_k"].default == 10
     assert list(graph_signature.parameters) == [
         "indices",
         "distances",
@@ -529,6 +532,7 @@ def test_python_signatures_mirror_r_api():
     ]
     assert visualization_signature.parameters["seed"].default == 4
     assert visualization_signature.parameters["graph_mode"].default == "fuzzy"
+    assert visualization_signature.parameters["k"].default == 30
     assert "n_cores" in visualization_signature.parameters
     assert list(inspect.signature(kodama.graph).parameters) == [
         "data",
