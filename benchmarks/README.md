@@ -1,5 +1,10 @@
 # Benchmark Notes
 
+Publication-facing, reproducible R benchmark protocols are maintained under
+[`publication/R`](publication/R/README.md). Exploratory engineering screens
+and rejected optimization experiments remain in this parent directory and
+must not be cited as release evidence without a frozen protocol and manifest.
+
 `batched_kmeans_20260809/` records a rejected CUDA experiment that moved the
 resident coarse-k-means centroid update from CPU to per-lane CUDA streams. The
 production implementation already uploads one immutable matrix and shares it

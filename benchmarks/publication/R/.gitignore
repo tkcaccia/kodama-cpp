@@ -1,0 +1,11 @@
+**/generated/
+**/logs/
+**/results/
+**/prepared/
+**/prepared_graphs/
+**/bundle_status/
+**/*.rds
+**/*.RData
+**/*.Rdata
+**/*.sif
+**/sessionInfo.txt

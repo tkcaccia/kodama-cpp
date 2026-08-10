@@ -1,0 +1,13 @@
+dataset,representation,relative_path,source,preprocessing,version,license,enabled
+COIL20,native,COIL20/COIL20.RData,COIL-20,provided matrix,release input,academic dataset,TRUE
+FashionMNIST,native,FashionMNIST/FashionMNIST.RData,Fashion-MNIST,provided matrix,release input,MIT,TRUE
+MNIST,native,MNIST/MNIST.RData,MNIST,provided matrix,release input,CC BY-SA 3.0,TRUE
+Macosko2015_retina,native,Macosko2015_retina/Macosko2015_retina.RData,Macosko et al.,provided matrix,release input,source terms,TRUE
+MetRef,native,MetRef/MetRef.RData,KODAMA,provided matrix,release input,package data,TRUE
+TabulaMuris,native,TabulaMuris/TabulaMuris.RData,Tabula Muris,provided matrix,release input,CC BY 4.0,TRUE
+USPS,native,USPS/USPS.RData,USPS,provided matrix,release input,source terms,TRUE
+flow18,native,flow18/flow18.RData,FlowRepository,provided matrix,release input,source terms,TRUE
+imagenet,raw,imagenet/imagenet.RData,ImageNet-derived,provided DINOv2 features,release input,source terms,TRUE
+imagenet,pca50,imagenet/imagenet.RData,ImageNet-derived,CPU4 KODAMA.pca 50 scores,release input,source terms,TRUE
+mass41,native,mass41/mass41.RData,KODAMA benchmark,provided matrix,release input,source terms,TRUE
+FlowRepository,native,FlowRepository_FR-FCM-ZYRM_files/van_unen_FR-FCM-ZYRM.RData,FlowRepository,provided matrix,release input,source terms,TRUE
