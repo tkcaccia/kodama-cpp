@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 .this_file <- sub("^--file=", "", commandArgs(FALSE)[grepl("^--file=", commandArgs(FALSE))][[1L]])
 source(file.path(dirname(normalizePath(.this_file)), "common.R"))
 args <- parse_cli(); data_root <- args$data_root %||% stop("--data-root required"); out <- args$out %||% stop("--out required")

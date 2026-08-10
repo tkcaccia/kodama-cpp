@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 .this_file <- sub("^--file=", "", commandArgs(FALSE)[grepl("^--file=", commandArgs(FALSE))][[1L]])
 source(file.path(dirname(normalizePath(.this_file)),"common.R"))
 args<-parse_cli();bundle_id<-as_int(args$bundle_id%||%Sys.getenv("SLURM_ARRAY_TASK_ID"));bundles<-read.csv(args$bundles,stringsAsFactors=FALSE)

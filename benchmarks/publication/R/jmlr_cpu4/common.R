@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Stefano Cacciatore
+# SPDX-License-Identifier: MIT
+
 `%||%` <- function(x, y) if (is.null(x) || !length(x)) y else x
 
 parse_cli <- function(x = commandArgs(trailingOnly = TRUE)) {
