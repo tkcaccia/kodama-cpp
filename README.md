@@ -210,6 +210,23 @@ that is consumed directly by matrix optimization and visualization. The
 backward-compatible `storage = "matrix"` materializes R matrices using a
 cache-blocked conversion; `KODAMA.graph.materialize()` performs that conversion
 explicitly when needed.
+For data assembled from multiple slides or samples, provide the same identifier
+vector to graph preparation and matrix optimization:
+
+```r
+prepared <- KODAMA.graph(x, spatial = xy, samples = slide_id)
+fit <- KODAMA.matrix(
+  data = x, graph = prepared, spatial = xy, samples = slide_id,
+  classifier = "pls_lda"
+)
+```
+
+Before constructing spatial neighbors and constraints, KODAMA separates the
+first spatial coordinate of each slide using the rule from the original R
+implementation. Spatial landmark strata, singleton repair, and final constraint
+IDs are additionally keyed by `samples`; consequently, no optimization block
+can contain rows from different slides. The transform and hard boundary are
+shared by CPU, CUDA, and Metal.
 `KODAMA.matrix()` reserves `data` for raw features and `graph` for a prepared
 object or bare `indices`/`distances` graph. Either argument can be supplied
 alone, or both can be supplied together. For graph-only PLS-LDA, self-tuning

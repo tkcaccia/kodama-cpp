@@ -817,6 +817,27 @@ struct LandmarkSample {
   int grid_bins = 0;
 };
 
+std::vector<int> intersect_groupings(
+  const std::vector<int>& groups,
+  const std::vector<int>& samples
+) {
+  if (samples.empty()) return groups;
+  if (groups.size() != samples.size()) {
+    throw std::invalid_argument("Grouping and samples sizes must match.");
+  }
+  std::map<std::pair<int, int>, int> compact;
+  std::vector<int> out(groups.size(), 0);
+  for (std::size_t row = 0; row < groups.size(); ++row) {
+    const std::pair<int, int> key{samples[row], groups[row]};
+    auto it = compact.find(key);
+    if (it == compact.end()) {
+      it = compact.emplace(key, static_cast<int>(compact.size()) + 1).first;
+    }
+    out[row] = it->second;
+  }
+  return out;
+}
+
 LandmarkSample quota_sample_landmarks(
   const std::vector<int>& offsets,
   const std::vector<int>& rows,
@@ -912,7 +933,8 @@ LandmarkSample spatial_grid_landmarks(
   int samples,
   int dimensions,
   int target,
-  std::mt19937_64& rng
+  std::mt19937_64& rng,
+  const std::vector<int>& sample_ids
 ) {
   if (dimensions != 2 && dimensions != 3) {
     throw std::invalid_argument("Spatial grid landmark selection supports 2D or 3D coordinates.");
@@ -924,13 +946,26 @@ LandmarkSample spatial_grid_landmarks(
   const int bins = std::max(1, std::min(4096, static_cast<int>(std::ceil(root))));
   const detail::SpatialGridIndex grid =
     detail::build_spatial_grid_index(spatial.data(), samples, dimensions, bins);
+  IndexedStrata strata{grid.offsets, grid.rows};
+  if (!sample_ids.empty()) {
+    if (sample_ids.size() != static_cast<std::size_t>(samples)) {
+      throw std::invalid_argument("samples size must match spatial landmark rows.");
+    }
+    std::vector<int> grid_labels(static_cast<std::size_t>(samples), 0);
+    for (std::size_t cell = 0; cell + 1 < grid.offsets.size(); ++cell) {
+      for (int cursor = grid.offsets[cell]; cursor < grid.offsets[cell + 1]; ++cursor) {
+        grid_labels[static_cast<std::size_t>(grid.rows[static_cast<std::size_t>(cursor)])] =
+          static_cast<int>(cell) + 1;
+      }
+    }
+    const std::vector<int> sample_grid_labels =
+      intersect_groupings(grid_labels, sample_ids);
+    const int sample_grid_strata = *std::max_element(
+      sample_grid_labels.begin(), sample_grid_labels.end());
+    strata = index_strata(sample_grid_labels, sample_grid_strata);
+  }
   LandmarkSample out = quota_sample_landmarks(
-    grid.offsets,
-    grid.rows,
-    target,
-    rng,
-    true
-  );
+    strata.offsets, strata.rows, target, rng, true);
   out.grid_bins = bins;
   return out;
 }
@@ -1166,47 +1201,46 @@ void repair_singleton_spatial_clusters(
   const std::vector<float>& spatial,
   int n,
   int dims,
-  int n_threads
+  int n_threads,
+  const std::vector<int>& samples
 ) {
+  if (!samples.empty() && samples.size() != static_cast<std::size_t>(n)) {
+    throw std::invalid_argument("samples size must match spatial cluster rows.");
+  }
   std::map<int, int> counts;
   for (int c : clusters) counts[c] += 1;
-  std::vector<char> keep(static_cast<std::size_t>(n), 0);
-  int n_keep = 0;
-  for (int i = 0; i < n; ++i) {
-    if (counts[clusters[static_cast<std::size_t>(i)]] > 1) {
-      keep[static_cast<std::size_t>(i)] = 1;
-      ++n_keep;
+  std::map<int, std::vector<int>> rows_by_sample;
+  for (int row = 0; row < n; ++row) {
+    rows_by_sample[samples.empty() ? 1 : samples[static_cast<std::size_t>(row)]].push_back(row);
+  }
+  for (const auto& sample_rows : rows_by_sample) {
+    std::vector<int> base_rows;
+    std::vector<int> query_rows;
+    for (const int row : sample_rows.second) {
+      if (counts[clusters[static_cast<std::size_t>(row)]] > 1) base_rows.push_back(row);
+      else query_rows.push_back(row);
     }
-  }
-  if (n_keep == n || n_keep == 0) return;
-
-  std::vector<float> base(static_cast<std::size_t>(n_keep) * dims, 0.0f);
-  std::vector<float> query(static_cast<std::size_t>(n - n_keep) * dims, 0.0f);
-  std::vector<int> base_rows;
-  std::vector<int> query_rows;
-  base_rows.reserve(static_cast<std::size_t>(n_keep));
-  query_rows.reserve(static_cast<std::size_t>(n - n_keep));
-  for (int i = 0; i < n; ++i) {
-    if (keep[static_cast<std::size_t>(i)]) base_rows.push_back(i);
-    else query_rows.push_back(i);
-  }
-  for (std::size_t i = 0; i < base_rows.size(); ++i) {
-    std::copy_n(spatial.data() + static_cast<std::size_t>(base_rows[i]) * dims, dims, base.data() + i * dims);
-  }
-  for (std::size_t i = 0; i < query_rows.size(); ++i) {
-    std::copy_n(spatial.data() + static_cast<std::size_t>(query_rows[i]) * dims, dims, query.data() + i * dims);
-  }
-  NeighborGraph nearest = detail::spatial_grid_query_nearest(
-    base.data(),
-    n_keep,
-    query.data(),
-    static_cast<int>(query_rows.size()),
-    dims,
-    n_threads
-  );
-  for (std::size_t i = 0; i < query_rows.size(); ++i) {
-    const int local = nearest.indices[i];
-    if (local >= 0) clusters[static_cast<std::size_t>(query_rows[i])] = clusters[static_cast<std::size_t>(base_rows[static_cast<std::size_t>(local)])];
+    if (base_rows.empty() || query_rows.empty()) continue;
+    std::vector<float> base(base_rows.size() * static_cast<std::size_t>(dims), 0.0f);
+    std::vector<float> query(query_rows.size() * static_cast<std::size_t>(dims), 0.0f);
+    for (std::size_t i = 0; i < base_rows.size(); ++i) {
+      std::copy_n(spatial.data() + static_cast<std::size_t>(base_rows[i]) * dims,
+                  dims, base.data() + i * dims);
+    }
+    for (std::size_t i = 0; i < query_rows.size(); ++i) {
+      std::copy_n(spatial.data() + static_cast<std::size_t>(query_rows[i]) * dims,
+                  dims, query.data() + i * dims);
+    }
+    NeighborGraph nearest = detail::spatial_grid_query_nearest(
+      base.data(), static_cast<int>(base_rows.size()), query.data(),
+      static_cast<int>(query_rows.size()), dims, n_threads);
+    for (std::size_t i = 0; i < query_rows.size(); ++i) {
+      const int local = nearest.indices[i];
+      if (local >= 0) {
+        clusters[static_cast<std::size_t>(query_rows[i])] =
+          clusters[static_cast<std::size_t>(base_rows[static_cast<std::size_t>(local)])];
+      }
+    }
   }
 }
 
@@ -2629,7 +2663,8 @@ IterationResult run_iteration(
       n,
       options.spatial_cols,
       landmarks,
-      rng
+      rng,
+      options.samples
     );
     landmark_sampling_seconds = sampling_timer.seconds();
   } else {
@@ -2775,10 +2810,18 @@ IterationResult run_iteration(
         kmeans_gpu_device
       );
     }
-    repair_singleton_spatial_clusters(scratch.spatial_clusters, spatial, n, spatial_dims, options.n_threads);
+    scratch.spatial_clusters = intersect_groupings(
+      scratch.spatial_clusters, options.samples);
+    repair_singleton_spatial_clusters(
+      scratch.spatial_clusters, spatial, n, spatial_dims, options.n_threads,
+      options.samples);
+    const std::vector<int> sample_constrain =
+      intersect_groupings(constrain, options.samples);
     scratch.run_constrain = constrain_is_identity ?
       scratch.spatial_clusters :
-      majority_by_constrain(scratch.spatial_clusters, constrain);
+      majority_by_constrain(scratch.spatial_clusters, sample_constrain);
+    scratch.run_constrain = intersect_groupings(
+      scratch.run_constrain, options.samples);
     run_constrain_ptr = &scratch.run_constrain;
     run_constrain_is_identity = is_identity_constrain(*run_constrain_ptr);
   }
@@ -3118,6 +3161,16 @@ KODAMAMatrixResult run_kodama_matrix(
     if (options.spatial_resolution <= 0.0 || !std::isfinite(options.spatial_resolution)) {
       throw std::invalid_argument("KODAMAMatrixOptions::spatial_resolution must be positive.");
     }
+    options.spatial = KODAMASeparateSpatialSamples(
+      options.spatial,
+      static_cast<int>(x.rows),
+      options.spatial_cols,
+      options.samples
+    );
+  } else if (!options.samples.empty()) {
+    throw std::invalid_argument(
+      "KODAMAMatrixOptions::samples requires spatial coordinates."
+    );
   }
 
   detail::Timer input_copy_timer;
@@ -3771,6 +3824,11 @@ KODAMAGraphResult run_public_kodama_graph(
   const KODAMAGraphOptions& options,
   const MatrixView* spatial = nullptr
 ) {
+  if (spatial == nullptr && !options.samples.empty()) {
+    throw std::invalid_argument(
+      "KODAMAGraphOptions::samples requires spatial coordinates."
+    );
+  }
   detail::validate_inputs(x, std::vector<int>(x.rows, 1), std::vector<int>());
   if (x.rows < 2 || x.cols < 1) {
     throw std::invalid_argument("KODAMAGraph requires at least two rows and one column.");
@@ -3842,7 +3900,12 @@ KODAMAGraphResult run_public_kodama_graph(
       );
     }
     detail::Timer spatial_timer;
-    const std::vector<float> spatial_data = copy_float32(*spatial);
+    const std::vector<float> spatial_data = KODAMASeparateSpatialSamples(
+      copy_float32(*spatial),
+      static_cast<int>(x.rows),
+      static_cast<int>(spatial->cols),
+      options.samples
+    );
     const int spatial_neighbors = std::min(
       static_cast<int>(x.rows) - 1,
       std::max(20, result.neighbors)
@@ -3916,6 +3979,50 @@ KODAMAGraphResult run_public_kodama_graph(
 }
 
 }  // namespace
+
+std::vector<float> KODAMASeparateSpatialSamples(
+  const std::vector<float>& spatial,
+  const int rows,
+  const int columns,
+  const std::vector<int>& samples
+) {
+  if (rows < 0 || columns < 1 ||
+      spatial.size() != static_cast<std::size_t>(rows) * static_cast<std::size_t>(columns)) {
+    throw std::invalid_argument(
+      "Spatial coordinates must contain rows * columns values."
+    );
+  }
+  if (samples.empty()) return spatial;
+  if (samples.size() != static_cast<std::size_t>(rows)) {
+    throw std::invalid_argument("samples size must match the number of spatial rows.");
+  }
+
+  std::vector<int> sample_names = samples;
+  std::sort(sample_names.begin(), sample_names.end());
+  sample_names.erase(std::unique(sample_names.begin(), sample_names.end()), sample_names.end());
+  if (sample_names.size() <= 1u) return spatial;
+
+  std::vector<float> separated = spatial;
+  double offset = 0.0;
+  for (const int sample : sample_names) {
+    float minimum = std::numeric_limits<float>::infinity();
+    float maximum = -std::numeric_limits<float>::infinity();
+    bool found = false;
+    for (int row = 0; row < rows; ++row) {
+      if (samples[static_cast<std::size_t>(row)] != sample) continue;
+      float& coordinate = separated[static_cast<std::size_t>(row) * columns];
+      coordinate = static_cast<float>(static_cast<double>(coordinate) + offset);
+      minimum = std::min(minimum, coordinate);
+      maximum = std::max(maximum, coordinate);
+      found = true;
+    }
+    if (found) {
+      const double range = static_cast<double>(maximum) - static_cast<double>(minimum);
+      offset = static_cast<double>(maximum) + 0.5 * range;
+    }
+  }
+  return separated;
+}
 
 KODAMAGraphResult KODAMAGraph_CPU(
   MatrixView x,

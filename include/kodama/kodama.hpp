@@ -465,6 +465,7 @@ struct KODAMAGraphOptions {
   int ivf_nprobe = 0;
   int gpu_device = 0;
   bool materialize_graph = false;
+  std::vector<int> samples;
 };
 
 struct KODAMAGraphResult;
@@ -546,6 +547,7 @@ struct KODAMAMatrixOptions {
   int graph_feature_components = 0;
   int graph_feature_steps = 3;
   std::vector<float> spatial;
+  std::vector<int> samples;
   KNNOptions knn = [] {
     KNNOptions options;
     options.k = 30;
@@ -1056,6 +1058,14 @@ KODAMAGraphResult KODAMAGraph_METAL(
 KODAMAGraphResult KODAMAGraph(
   MatrixView x,
   const KODAMAGraphOptions& options = KODAMAGraphOptions()
+);
+
+/** Apply the original KODAMA multi-sample separation to spatial coordinate 1. */
+std::vector<float> KODAMASeparateSpatialSamples(
+  const std::vector<float>& spatial,
+  int rows,
+  int columns,
+  const std::vector<int>& samples
 );
 
 /** Materialize a handle-backed graph as one-based host arrays on demand. */

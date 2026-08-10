@@ -46,6 +46,16 @@ directly by matrix optimization, visualization, and clustering; use
 matrix conversion uses a cache-blocked row-major/column-major transpose.
 External handles are process-local and must be materialized before an object is
 saved for use in another R session.
+
+For multi-slide coordinate data, pass `samples` together with `spatial` to
+`KODAMA.graph()` or `KODAMA.matrix()`. Following the original KODAMA contract,
+the first spatial coordinate of each sample/slide is offset in sorted sample
+order before the spatial graph and constraints are constructed. A one-level
+`samples` vector leaves the coordinates unchanged. The separation is performed
+centrally in float32, so CPU, CUDA, and Metal consume identical coordinates.
+KODAMA also composes spatial landmark strata and constraint IDs with the sample
+identifier. This is a hard boundary: an optimization block never contains
+spots from different slides, even if their original coordinate ranges overlap.
 `KODAMA.matrix()` reserves `data` for raw features and
 `graph` for a prepared KODAMA graph or bare `indices`/`distances` graph. Either
 argument can be supplied alone, or both can be supplied together. Graph-only

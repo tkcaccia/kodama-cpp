@@ -568,6 +568,7 @@ py::dict graph_cluster_to_python(const kodama::GraphClusterResult& result) {
 py::dict matrix(
   py::array_t<float, py::array::c_style | py::array::forcecast> data,
   py::object spatial,
+  py::object samples,
   py::object W,
   py::object constrain,
   py::object fix,
@@ -623,6 +624,7 @@ py::dict matrix(
   options.knn.hnsw_target_recall = 0.99;
   options.knn.n_threads = 1;
   options.pls.n_threads = 1;
+  options.samples = optional_int_vector(samples);
 
   py::array_t<float, py::array::c_style | py::array::forcecast> spatial_array;
   if (!spatial.is_none()) {
@@ -659,6 +661,7 @@ py::dict matrix_graph(
   py::array_t<float, py::array::c_style | py::array::forcecast> distances,
   py::object data,
   py::object spatial,
+  py::object samples,
   py::object W,
   py::object constrain,
   py::object fix,
@@ -719,6 +722,7 @@ py::dict matrix_graph(
   options.knn.hnsw_target_recall = 0.99;
   options.knn.n_threads = 1;
   options.pls.n_threads = 1;
+  options.samples = optional_int_vector(samples);
 
   py::array_t<float, py::array::c_style | py::array::forcecast> spatial_array;
   if (!spatial.is_none()) {
@@ -756,7 +760,8 @@ py::dict matrix_graph(
 }
 
 py::dict matrix_graph_handle(
-  py::capsule capsule, py::object data, py::object spatial, py::object W,
+  py::capsule capsule, py::object data, py::object spatial, py::object samples,
+  py::object W,
   py::object constrain, py::object fix, int M, int Tcycle, int ncomp,
   int landmarks, int splitting, int n_threads, int graph_neighbors, int knn_k,
   double spatial_resolution, bool spatial_graph_mix, int spatial_constraint_mode,
@@ -793,6 +798,7 @@ py::dict matrix_graph_handle(
   options.compute_visual_init = false;
   options.knn.n_threads = 1;
   options.pls.n_threads = 1;
+  options.samples = optional_int_vector(samples);
   if (!spatial.is_none()) {
     py::array_t<float, py::array::c_style | py::array::forcecast> values(spatial);
     auto view = values.unchecked<2>();
@@ -987,6 +993,8 @@ py::dict core_plslda(
 
 py::dict knn_graph(
   py::array_t<float, py::array::c_style | py::array::forcecast> data,
+  py::object spatial,
+  py::object samples,
   int k,
   const std::string& metric,
   const std::string& backend,
@@ -1003,22 +1011,42 @@ py::dict knn_graph(
   options.n_threads = n_threads;
   options.gpu_device = gpu_device;
   options.seed = static_cast<std::uint64_t>(seed);
+  options.samples = optional_int_vector(samples);
   if (storage != "handle" && storage != "matrix") {
     throw std::invalid_argument("storage must be 'handle' or 'matrix'.");
   }
   options.materialize_graph = storage == "matrix";
   const int n = static_cast<int>(x_view.shape(0));
-  kodama::KODAMAGraphResult result = kodama::KODAMAGraph(
-    kodama::MatrixView{
-      static_cast<const float*>(data.request().ptr),
-      static_cast<std::size_t>(x_view.shape(0)),
-      static_cast<std::size_t>(x_view.shape(1))
-    },
-    options
-  );
+  const kodama::MatrixView view{
+    static_cast<const float*>(data.request().ptr),
+    static_cast<std::size_t>(x_view.shape(0)),
+    static_cast<std::size_t>(x_view.shape(1))
+  };
+  kodama::KODAMAGraphResult result;
+  py::array_t<float, py::array::c_style | py::array::forcecast> spatial_array;
+  if (!spatial.is_none()) {
+    spatial_array = py::array_t<float, py::array::c_style | py::array::forcecast>(spatial);
+    if (spatial_array.ndim() != 2 || spatial_array.shape(0) != x_view.shape(0)) {
+      throw std::invalid_argument("spatial must have one row per data sample.");
+    }
+    result = kodama::KODAMAGraph(
+      view,
+      kodama::MatrixView{spatial_array.data(),
+        static_cast<std::size_t>(spatial_array.shape(0)),
+        static_cast<std::size_t>(spatial_array.shape(1))},
+      options
+    );
+  } else {
+    result = kodama::KODAMAGraph(view, options);
+  }
   py::dict out;
   if (storage == "matrix") {
     out = graph_to_python(result.knn, n);
+    if (result.spatial_graph_builds > 0) {
+      out["spatial_knn"] = graph_to_python(result.spatial_knn, n);
+      out["spatial_jitter"] = vector_to_float_array(result.spatial_jitter);
+      out["spatial_dimensions"] = result.spatial_dimensions;
+    }
   } else {
     out["handle"] = graph_capsule(std::move(result));
     out["storage"] = "handle";
@@ -1435,6 +1463,7 @@ PYBIND11_MODULE(_core, m) {
     &matrix,
     py::arg("data"),
     py::arg("spatial") = py::none(),
+    py::arg("samples") = py::none(),
     py::arg("W") = py::none(),
     py::arg("constrain") = py::none(),
     py::arg("fix") = py::none(),
@@ -1467,6 +1496,7 @@ PYBIND11_MODULE(_core, m) {
     py::arg("distances"),
     py::arg("data") = py::none(),
     py::arg("spatial") = py::none(),
+    py::arg("samples") = py::none(),
     py::arg("W") = py::none(),
     py::arg("constrain") = py::none(),
     py::arg("fix") = py::none(),
@@ -1496,7 +1526,8 @@ PYBIND11_MODULE(_core, m) {
   m.def(
     "matrix_graph_handle", &matrix_graph_handle,
     py::arg("handle"), py::arg("data") = py::none(),
-    py::arg("spatial") = py::none(), py::arg("W") = py::none(),
+    py::arg("spatial") = py::none(), py::arg("samples") = py::none(),
+    py::arg("W") = py::none(),
     py::arg("constrain") = py::none(), py::arg("fix") = py::none(),
     py::arg("M") = 100, py::arg("Tcycle") = 20, py::arg("ncomp") = 50,
     py::arg("landmarks") = 10000, py::arg("splitting") = 100,
@@ -1518,6 +1549,8 @@ PYBIND11_MODULE(_core, m) {
     "graph",
     &knn_graph,
     py::arg("data"),
+    py::arg("spatial") = py::none(),
+    py::arg("samples") = py::none(),
     py::arg("k") = 100,
     py::arg("metric") = "euclidean",
     py::arg("backend") = "cpu",

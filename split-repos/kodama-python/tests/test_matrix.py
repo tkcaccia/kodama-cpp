@@ -10,6 +10,70 @@ import pytest
 import kodama
 
 
+def test_samples_reproduces_original_spatial_separation():
+    rng = np.random.default_rng(11)
+    x = rng.normal(size=(24, 4)).astype(np.float32)
+    spatial = np.column_stack(
+        (np.tile(np.arange(6), 4), np.repeat(np.arange(4), 6))
+    ).astype(np.float32)
+    samples = np.repeat(np.array(["slide_b", "slide_a"]), 12)
+    separated = spatial.copy()
+    offset = 0.0
+    for sample_name in np.unique(samples):
+        selected = samples == sample_name
+        separated[selected, 0] += offset
+        limits = np.ptp(separated[selected, 0])
+        offset = separated[selected, 0].max() + limits * 0.5
+
+    from_samples = kodama.graph(
+        x, spatial=spatial, samples=samples, k=8,
+        backend="cpu", n_cores=1, seed=4, storage="matrix"
+    )
+    from_manual = kodama.graph(
+        x, spatial=separated, k=8,
+        backend="cpu", n_cores=1, seed=4, storage="matrix"
+    )
+    one_sample = kodama.graph(
+        x, spatial=spatial, samples=np.repeat("one", x.shape[0]), k=8,
+        backend="cpu", n_cores=1, seed=4, storage="matrix"
+    )
+    without_samples = kodama.graph(
+        x, spatial=spatial, k=8,
+        backend="cpu", n_cores=1, seed=4, storage="matrix"
+    )
+
+    np.testing.assert_array_equal(
+        from_samples["spatial_knn"]["indices"],
+        from_manual["spatial_knn"]["indices"],
+    )
+    np.testing.assert_array_equal(
+        from_samples["spatial_knn"]["distances"],
+        from_manual["spatial_knn"]["distances"],
+    )
+    np.testing.assert_array_equal(
+        one_sample["spatial_knn"]["indices"],
+        without_samples["spatial_knn"]["indices"],
+    )
+    with pytest.raises(ValueError, match="one value per data row"):
+        kodama.graph(x, spatial=spatial, samples=samples[:-1])
+    with pytest.raises(ValueError, match="requires spatial"):
+        kodama.graph(x, samples=samples)
+
+    common = dict(
+        M=1, Tcycle=1, landmarks=18, splitting=6,
+        graph_neighbors=8, knn_k=5, classifier="knn",
+        backend="cpu", n_cores=1, seed=4,
+        visual_init=False, progress=False, return_graph=False,
+    )
+    matrix_from_samples = kodama.matrix(
+        x, spatial=spatial, samples=samples, **common
+    )
+    constrain = np.atleast_2d(matrix_from_samples["res_constrain"])
+    for run in constrain:
+        for group in np.unique(run):
+            assert np.unique(samples[run == group]).size == 1
+
+
 def test_native_preprocessing_cpu():
     train = np.array([[1, 2, 3], [2, 4, 8], [4, 1, 5], [3, 6, 9]], dtype=np.float32)
     test = np.array([[2, 3, 4], [5, 2, 1]], dtype=np.float32)
@@ -441,6 +505,7 @@ def test_python_signatures_mirror_r_api():
         "data",
         "graph",
         "spatial",
+        "samples",
         "W",
         "constrain",
         "fix",
@@ -479,6 +544,7 @@ def test_python_signatures_mirror_r_api():
         "distances",
         "data",
         "spatial",
+        "samples",
         "W",
         "constrain",
         "fix",
@@ -536,14 +602,16 @@ def test_python_signatures_mirror_r_api():
     assert "n_cores" in visualization_signature.parameters
     assert list(inspect.signature(kodama.graph).parameters) == [
         "data",
+        "spatial",
+        "samples",
         "k",
         "metric",
         "backend",
         "n_cores",
-            "gpu_device",
-            "seed",
-            "storage",
-        ]
+        "gpu_device",
+        "seed",
+        "storage",
+    ]
     assert list(inspect.signature(kodama.kodama_pca).parameters) == [
         "data",
         "ncomp",

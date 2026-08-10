@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -1916,6 +1917,49 @@ int main() {
   const kodama::MatrixView spatial_view{
     spatial.data(), static_cast<std::size_t>(d.n), 2u
   };
+  const std::vector<float> slide_coordinates{
+    0.0f, 0.0f,
+    2.0f, 1.0f,
+    0.0f, 0.0f,
+    2.0f, 1.0f
+  };
+  const std::vector<int> slide_ids{1, 1, 2, 2};
+  const std::vector<float> separated_coordinates =
+    kodama::KODAMASeparateSpatialSamples(slide_coordinates, 4, 2, slide_ids);
+  require(
+    separated_coordinates == std::vector<float>({
+      0.0f, 0.0f,
+      2.0f, 1.0f,
+      3.0f, 0.0f,
+      5.0f, 1.0f
+    }),
+    "Multi-sample spatial separation differs from the original KODAMA rule."
+  );
+  require(
+    kodama::KODAMASeparateSpatialSamples(
+      slide_coordinates, 4, 2, std::vector<int>(4, 7)) == slide_coordinates,
+    "A single spatial sample should not alter coordinates."
+  );
+  require_throws<std::invalid_argument>([&]() {
+    (void)kodama::KODAMASeparateSpatialSamples(
+      slide_coordinates, 4, 2, std::vector<int>{1, 2});
+  }, "Spatial sample separation accepted a length mismatch.");
+  require_throws<std::invalid_argument>([&]() {
+    kodama::KODAMAGraphOptions invalid_sample_options = prepared_graph_options;
+    invalid_sample_options.samples.assign(static_cast<std::size_t>(d.n), 1);
+    (void)kodama::KODAMAGraph_CPU(fview, invalid_sample_options);
+  }, "KODAMAGraph accepted samples without spatial coordinates.");
+  kodama::KODAMAGraphOptions sampled_graph_options = prepared_graph_options;
+  sampled_graph_options.samples.resize(static_cast<std::size_t>(d.n));
+  for (int row = 0; row < d.n; ++row) {
+    sampled_graph_options.samples[static_cast<std::size_t>(row)] = row < d.n / 2 ? 1 : 2;
+  }
+  const kodama::KODAMAGraphResult sampled_spatial_graph =
+    kodama::KODAMAGraph_CPU(fview, spatial_view, sampled_graph_options);
+  require(
+    sampled_spatial_graph.spatial_graph_builds == 1,
+    "KODAMAGraph did not accept multi-sample spatial coordinates."
+  );
   const kodama::KODAMAGraphResult spatial_prepared_graph =
     kodama::KODAMAGraph_CPU(fview, spatial_view, prepared_graph_options);
   require(
@@ -2189,6 +2233,29 @@ int main() {
     km_spatial_options
   );
   require(km_spatial_repeat.res == km_spatial_res.res, "Spatial landmark sampling is not repeatable for a fixed seed.");
+  kodama::KODAMAMatrixOptions km_multislide_options = km_spatial_options;
+  km_multislide_options.samples.resize(static_cast<std::size_t>(d.n));
+  for (int row = 0; row < d.n; ++row) {
+    km_multislide_options.samples[static_cast<std::size_t>(row)] =
+      row < d.n / 2 ? 1 : 2;
+  }
+  const kodama::KODAMAMatrixResult km_multislide_res =
+    kodama::KODAMAMatrix_CPU(
+      fview, std::vector<int>(), std::vector<int>(), fixed,
+      km_multislide_options);
+  for (int run = 0; run < km_multislide_res.res_constrain_rows; ++run) {
+    std::map<int, int> group_sample;
+    for (int row = 0; row < d.n; ++row) {
+      const int group = km_multislide_res.res_constrain[
+        static_cast<std::size_t>(run) * d.n + static_cast<std::size_t>(row)];
+      const int sample = km_multislide_options.samples[static_cast<std::size_t>(row)];
+      const auto inserted = group_sample.emplace(group, sample);
+      require(
+        inserted.second || inserted.first->second == sample,
+        "A spatial constraint group contains rows from different samples."
+      );
+    }
+  }
 
   kodama::UMAPOptions umap_options;
   require(

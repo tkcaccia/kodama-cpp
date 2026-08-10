@@ -150,6 +150,22 @@ Either can be supplied alone, or both can be supplied together. Graph-only
 PLS-LDA uses self-tuning Laplacian features; providing `data` uses the ordinary
 data-input PLS-LDA geometry.
 
+For multiple slides, pass one identifier per row to both stages:
+
+```python
+prepared = kodama.graph(x, spatial=xy, samples=slide_id)
+fit = kodama.matrix(
+    data=x, graph=prepared, spatial=xy, samples=slide_id,
+    classifier="knn",
+)
+```
+
+The first spatial coordinate is separated slide by slide using the original
+KODAMA rule before spatial neighbors and constraints are constructed. A
+single-level identifier vector leaves coordinates unchanged. Spatial landmark
+strata and optimization constraints are also keyed by slide, so no constraint
+group can contain rows from different slides.
+
 The native `kodama.matrix()` call builds the full-data graph once before all
 `M` searches. By default it also performs one backend-native float32 PCA and
 stores separately scaled UMAP and openTSNE starts. `kodama.visualization()`

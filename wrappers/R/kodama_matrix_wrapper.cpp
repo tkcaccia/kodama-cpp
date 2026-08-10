@@ -71,7 +71,6 @@ Rcpp::List graph_to_r(const kodama::NeighborGraph& graph, int samples) {
       distances(i, j) = graph.distances[offset];
     }
   }
-  Rcpp::List graph = graph_to_r(result.knn, result.samples);
   return Rcpp::List::create(
     Rcpp::Named("indices") = indices,
     Rcpp::Named("distances") = distances,
@@ -113,6 +112,7 @@ Rcpp::NumericMatrix embedding_to_r(const kodama::EmbeddingResult& result) {
 Rcpp::List kodama_matrix_cpp_temp(
   Rcpp::NumericMatrix data,
   Rcpp::Nullable<Rcpp::NumericMatrix> spatial = R_NilValue,
+  Rcpp::Nullable<Rcpp::IntegerVector> samples = R_NilValue,
   Rcpp::Nullable<Rcpp::IntegerVector> W = R_NilValue,
   Rcpp::Nullable<Rcpp::IntegerVector> constrain = R_NilValue,
   Rcpp::Nullable<Rcpp::IntegerVector> fix = R_NilValue,
@@ -178,6 +178,7 @@ Rcpp::List kodama_matrix_cpp_temp(
       }
     }
   }
+  options.samples = optional_int_vector(samples);
 
   kodama::MatrixView view{x.data(), static_cast<std::size_t>(n), static_cast<std::size_t>(p)};
   const std::vector<int> W_vec = optional_int_vector(W);
@@ -185,6 +186,7 @@ Rcpp::List kodama_matrix_cpp_temp(
   const std::vector<int> fix_vec = optional_int_vector(fix);
   kodama::KODAMAMatrixResult result = kodama::KODAMAMatrix(view, W_vec, constrain_vec, fix_vec, options);
 
+  Rcpp::List graph = graph_to_r(result.knn, result.samples);
   Rcpp::NumericVector acc(result.acc.begin(), result.acc.end());
   Rcpp::NumericMatrix v(result.runs, result.cycles);
   for (int i = 0; i < result.runs; ++i) {

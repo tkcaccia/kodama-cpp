@@ -190,6 +190,7 @@ KODAMA.matrix.cpp <- local({
 
   function(data,
            spatial = NULL,
+           samples = NULL,
            W = NULL,
            constrain = NULL,
            fix = NULL,
@@ -222,6 +223,13 @@ KODAMA.matrix.cpp <- local({
       "no_pls_transition_coarsening", "no_pls_fragmentation_penalty"
     ))
     data <- .kodama_as_numeric_matrix(data)
+    if (!is.null(samples)) {
+      if (length(samples) != nrow(data) || anyNA(samples)) {
+        stop("samples must contain one non-missing value per data row")
+      }
+      sample_names <- names(table(samples))
+      samples <- match(as.character(samples), sample_names)
+    }
     visual_init <- if (isTRUE(visual.init)) .kodama_make_visual_init(data, seed = seed, backend = backend) else NULL
 
     if (!loaded) {
@@ -298,6 +306,7 @@ KODAMA.matrix.cpp <- local({
       spatial = if (is.null(spatial)) NULL else {
         .kodama_as_numeric_matrix(spatial)
       },
+      samples = if (is.null(samples)) NULL else as.integer(samples),
       W = if (is.null(W)) NULL else as.integer(W),
       constrain = if (is.null(constrain)) NULL else as.integer(constrain),
       fix = if (is.null(fix)) NULL else as.integer(fix),

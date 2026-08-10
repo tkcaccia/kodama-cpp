@@ -66,6 +66,18 @@ def _int_vector(value):
     return None if value is None else np.asarray(value, dtype=np.int32)
 
 
+def _sample_ids(samples, n_samples):
+    if samples is None:
+        return None
+    values = np.asarray(samples)
+    if values.ndim != 1 or values.shape[0] != n_samples:
+        raise ValueError("samples must have one value per data row")
+    if any(value is None or value != value for value in values.tolist()):
+        raise ValueError("samples must not contain missing values")
+    _, encoded = np.unique(values, return_inverse=True)
+    return (encoded + 1).astype(np.int32)
+
+
 def _choice(value, name, choices):
     if value not in choices:
         options = ", ".join(repr(option) for option in choices)
@@ -428,6 +440,7 @@ def matrix(
     data=None,
     graph=None,
     spatial=None,
+    samples=None,
     W=None,
     constrain=None,
     fix=None,
@@ -471,19 +484,19 @@ def matrix(
                 "data must be the raw array; pass graph inputs through graph"
             )
         raw = data
-        samples = (
+        n_samples = (
             int(supplied_graph["samples"])
             if "handle" in supplied_graph
             else np.asarray(supplied_graph["indices"]).shape[0]
         )
-        if raw is not None and np.asarray(raw).shape[0] != samples:
+        if raw is not None and np.asarray(raw).shape[0] != n_samples:
             raise ValueError(
                 "data and graph must contain the same number of samples"
             )
         if ncomp is None:
             ncomp = 50 if raw is None else min(50, np.asarray(raw).shape[1])
         if splitting is None:
-            splitting = _default_splitting(samples)
+            splitting = _default_splitting(n_samples)
         if graph_neighbors is None:
             graph_neighbors = np.asarray(supplied_graph["indices"]).shape[1]
         if backend is None:
@@ -492,6 +505,7 @@ def matrix(
             graph,
             data=raw,
             spatial=spatial,
+            samples=samples,
             W=W,
             constrain=constrain,
             fix=fix,
@@ -538,9 +552,11 @@ def matrix(
     )
     spatial_constraint_code = _spatial_constraint_code(spatial_constraint_mode)
     spatial_array = None if spatial is None else _matrix32(spatial, "spatial")
+    sample_ids = _sample_ids(samples, x.shape[0])
     result = _matrix(
         x,
         spatial=spatial_array,
+        samples=sample_ids,
         W=_int_vector(W),
         constrain=_int_vector(constrain),
         fix=_int_vector(fix),
@@ -577,6 +593,7 @@ def matrix(
         "graph_neighbors": int(graph_neighbors),
         "knn_k": int(knn_k),
         "spatial_resolution": float(spatial_resolution),
+        "samples": 0 if sample_ids is None else int(np.unique(sample_ids).size),
         "spatial_graph_mix": bool(spatial_graph_mix),
         "spatial_constraint_mode": spatial_constraint_mode,
         "metric": metric,
@@ -600,6 +617,7 @@ def matrix_graph(
     distances=None,
     data=None,
     spatial=None,
+    samples=None,
     W=None,
     constrain=None,
     fix=None,
@@ -657,12 +675,17 @@ def matrix_graph(
         _evolution_policy, "_evolution_policy", _EVOLUTION_POLICIES
     )
     spatial_constraint_code = _spatial_constraint_code(spatial_constraint_mode)
+    sample_ids = _sample_ids(
+        samples,
+        int(supplied_graph["samples"]) if graph_handle is not None else idx.shape[0],
+    )
     native = _matrix_graph_handle if graph_handle is not None else _matrix_graph
     positional = (graph_handle,) if graph_handle is not None else (idx, dst)
     result = native(
         *positional,
         data=None if data is None else _matrix32(data),
         spatial=None if spatial is None else _matrix32(spatial, "spatial"),
+        samples=sample_ids,
         W=_int_vector(W),
         constrain=_int_vector(constrain),
         fix=_int_vector(fix),
@@ -711,6 +734,7 @@ def matrix_graph(
         "graph_neighbors": int(graph_neighbors),
         "knn_k": int(knn_k),
         "spatial_resolution": float(spatial_resolution),
+        "samples": 0 if sample_ids is None else int(np.unique(sample_ids).size),
         "spatial_graph_mix": bool(spatial_graph_mix),
         "spatial_constraint_mode": spatial_constraint_mode,
         "classifier": classifier,
@@ -734,6 +758,8 @@ def matrix_graph(
 
 def graph(
     data,
+    spatial=None,
+    samples=None,
     k=100,
     metric="euclidean",
     backend="cpu",
@@ -746,8 +772,12 @@ def graph(
     metric = _choice(metric, "metric", _METRICS)
     backend = _choice(backend, "backend", _BACKENDS)
     x = _matrix32(data)
+    spatial_array = None if spatial is None else _matrix32(spatial, "spatial")
+    sample_ids = _sample_ids(samples, x.shape[0])
     result = _graph(
         x,
+        spatial=spatial_array,
+        samples=sample_ids,
         k=int(k),
         metric=metric,
         backend=backend,
@@ -758,6 +788,8 @@ def graph(
     )
     result["parameters"] = {
         "k": int(k),
+        "spatial": spatial is not None,
+        "samples": 0 if sample_ids is None else int(np.unique(sample_ids).size),
         "metric": metric,
         "backend": backend,
         "n_cores": int(n_cores),

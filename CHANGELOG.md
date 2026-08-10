@@ -5,6 +5,14 @@ All notable changes to kodama-cpp are documented here. The project follows
 
 ## [Unreleased]
 
+- Restored the original multi-sample spatial contract across C++, R, and
+  Python. `KODAMA.graph()` and `KODAMA.matrix()` now accept one `samples`
+  identifier per row and separate coordinate 1 slide by slide before spatial
+  graph and constraint construction. The centralized float32 transform is
+  identical for CPU, CUDA, and Metal; one-level inputs are unchanged. Spatial
+  landmark strata, singleton repair, and final optimization constraints are
+  now sample-keyed, which guarantees that a constraint group cannot cross a
+  slide boundary.
 - Reduced accelerator KNN proposal overhead without changing voting. Active
   labels are encoded once as ordered compact class codes, dense code lookup is
   used when its table is no larger than the label vector, and prediction
