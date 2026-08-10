@@ -157,7 +157,7 @@ fit <- KODAMA.matrix(
   landmarks = 90,
   splitting = 12,
   graph.neighbors = 30,
-  knn.k = 10,
+  knn.k = 30,
   progress = TRUE
 )
 
@@ -383,9 +383,9 @@ no process-global cache.
 | `graph.neighbors` | Neighbors retained in the returned KODAMA graph |
 | `backend` | Strict execution backend: CPU, CUDA, or an API-supported Metal path |
 
-The KNN classifier defaults to `knn.k = 10`, selected by the reproducible
-ten-dataset sweep described in `benchmarks/README.md`. This does not change the
-full-data graph width or the visualization neighborhood size. The R wrapper
+The KODAMA KNN classifier defaults to `knn.k = 30`. This does not change the
+standalone KNNCV default, full-data graph width, or visualization neighborhood
+size. The R wrapper
 defaults `splitting` to 100 below 40,000 samples and 300
 otherwise. UMAP uses `k = 30` by default; openTSNE uses perplexity 30.
 

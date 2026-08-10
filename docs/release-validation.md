@@ -10,7 +10,7 @@ diagnostics.
 - `M = 100` independent runs
 - `Tcycle = 100` proposal/evaluation cycles
 - `landmarks = 100000`, with `ceil(0.75 * n)` when `n <= landmarks`
-- `knn.k = 10`
+- `knn.k = 30`
 - `ncomp = 50`, limited only by mathematical feasibility
 - `splitting = 100` for `n < 40000`, otherwise `300`
 - UMAP `k = 30`; openTSNE perplexity `30`

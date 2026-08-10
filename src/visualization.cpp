@@ -2553,7 +2553,9 @@ std::vector<float> optimize_opentsne_cpu(
   std::vector<float> update(y.size(), 0.0f);
   std::vector<float> gains(y.size(), 1.0f);
   FftGridWorkspaceT<float> fft_workspace;
-  const bool use_fft = options.theta > 0.0 && options.n_components == 2;
+  // Match fastEmbedR's validated openTSNE dispatch: exact repulsion is both
+  // faster and more faithful for small layouts; FFT is used above this size.
+  const bool use_fft = n > 3000 && options.theta > 0.0 && options.n_components == 2;
 
   auto run_phase = [&](const int phase_iter, const double phase_exaggeration, const double phase_momentum) {
     if (phase_iter <= 0) return;
@@ -3080,7 +3082,8 @@ EmbeddingResult KODAMAOpenTSNE_CPU(
   result.components = options.n_components;
   result.backend = Backend::CPU;
   result.embedding = optimize_opentsne_cpu(prepared, options);
-  result.optimizer = options.theta > 0.0 && options.n_components == 2 ?
+  result.optimizer = prepared.samples > 3000 &&
+      options.theta > 0.0 && options.n_components == 2 ?
     "opentsne_fitsne_fft_grid_sparse_knn_float32" :
     "opentsne_exact_sparse_knn_float32";
   set_embedding_initialization(

@@ -1518,6 +1518,12 @@ void check_pca_cpu() {
 }  // namespace
 
 int main() {
+  require(kodama::CoreOptions().knn.k == 30,
+          "CoreKNN production default should use k=30.");
+  require(kodama::KODAMAMatrixOptions().knn.k == 30,
+          "KODAMA matrix production default should use knn.k=30.");
+  require(kodama::KNNOptions().k == 10,
+          "Standalone KNNCV default should remain k=10.");
   test_public_string_contracts();
   test_public_error_contracts();
   test_preprocessing();
@@ -2312,7 +2318,7 @@ int main() {
   require(tsne_res.components == 2, "CPU openTSNE component count mismatch.");
   require(tsne_res.embedding.size() == static_cast<std::size_t>(d.n * 2), "CPU openTSNE embedding size mismatch.");
   require(tsne_res.initialization == "random", "CPU openTSNE graph fallback was not reported.");
-  require(tsne_res.optimizer == "opentsne_fitsne_fft_grid_sparse_knn_float32" &&
+  require(tsne_res.optimizer == "opentsne_exact_sparse_knn_float32" &&
           tsne_res.graph_edges == 0 && tsne_res.graph_max_weight == 0.0f,
           "CPU openTSNE optimizer diagnostics mismatch.");
   for (float value : tsne_res.embedding) require(std::isfinite(value), "CPU openTSNE produced a non-finite value.");

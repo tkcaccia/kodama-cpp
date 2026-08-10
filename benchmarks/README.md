@@ -434,7 +434,7 @@ the result is retained as a negative systems and quality control. Cycle 22 also
 adds a deterministic test for the public binary UMAP graph route copied from
 fastEmbedR; no production optimizer or KODAMA mathematics changed.
 
-## KNN predictor default sweep
+## Historical KNN predictor sweep (superseded for default selection)
 
 `run_jmlr_nonspatial_panel.R` and `run_knn_k_fixed_graph_sweep.R` reproduce
 the 2026-08-10 CUDA comparison of `knn.k` values 5, 10, 15, 20, 30, and 50.
@@ -454,10 +454,20 @@ construction; KODAMA optimization and voting remained CUDA-native.
 | 30 | 0.339 | 0.324 | 0.199 | 45.5 | 2 |
 | 50 | 0.339 | 0.340 | 0.121 | 26.0 | 3 |
 
-A collapse here means that the CV-selected run retained fewer than half of
-the known benchmark classes; it is a diagnostic, not an input to KODAMA.
-Although `k=50` maximized aggregate ARI, it visibly over-merged MetRef and
-COIL20. Among the candidates with no selected-run collapse, `k=10` improved
-both selected and median-run ARI over `k=5`, reduced fragmentation, and had
-similar runtime. It is therefore the production KNN-classifier default.
-Graph construction and visualization neighborhood defaults are unchanged.
+A collapse in this historical table was defined relative to the withheld
+truth-class count. That definition is not generic and must not determine a
+production default. The historical driver also did not retain the complete
+visual and active-class evidence requested for every dataset. Consequently,
+the earlier `k=10` conclusion is provisional rather than a validated default
+selection.
+
+`run_knn_k_multidataset_visual_sweep.R` is the extended comparison protocol. It tests
+`k=5,10,15,20,30,50,100` over the full non-spatial panel, including flow18,
+with seeds 4, 17, and 42 at `M=Tcycle=100`. One graph is reused within every
+dataset/seed sweep. For every k it records mean, median, standard deviation,
+quartiles, range, and sum of active-class counts across all M runs, as well as
+one/two-class collapse rates and the number of distinct M solutions. It emits
+a two-row visual grid containing classic and KODAMA UMAP/openTSNE panels for
+every k. The production KODAMA predictor default is `k=30`; this protocol
+remains the release-quality sensitivity analysis and does not alter graph or
+visualization neighborhood defaults.

@@ -121,7 +121,7 @@ kk = kodama.matrix(
     backend="cpu",
     M=10,
     Tcycle=20,
-    knn_k=10,
+    knn_k=30,
     n_cores=4,
     return_graph=True,
 )

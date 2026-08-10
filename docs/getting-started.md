@@ -35,7 +35,7 @@ int main() {
   options.splitting = 10;
   options.classifier = kodama::CoreClassifier::KNN;
   options.backend = kodama::Backend::CPU;
-  options.knn.k = 10;
+  options.knn.k = 30;
 
   const auto result = kodama::KODAMAMatrix(
     kodama::MatrixView{x.data(), n, p}, {}, {}, {}, options

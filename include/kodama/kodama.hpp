@@ -298,7 +298,11 @@ struct CoreOptions {
   bool adaptive_proposal_size = true;
   EvolutionPolicy evolution = EvolutionPolicy::standard();
   CorePLSLDAOptions pls;
-  KNNOptions knn;
+  KNNOptions knn = [] {
+    KNNOptions options;
+    options.k = 30;
+    return options;
+  }();
 };
 
 struct CoreResult {
@@ -542,7 +546,11 @@ struct KODAMAMatrixOptions {
   int graph_feature_components = 0;
   int graph_feature_steps = 3;
   std::vector<float> spatial;
-  KNNOptions knn;
+  KNNOptions knn = [] {
+    KNNOptions options;
+    options.k = 30;
+    return options;
+  }();
   CorePLSLDAOptions pls;
 };
 
