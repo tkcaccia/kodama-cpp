@@ -3552,14 +3552,38 @@ NeighborGraph metal_resident_landmark_knn_graph(
 
 void metal_prepare_resident_results(
   NativeMetalKODAMAGraph& graph,
-  int runs
+  int runs,
+  int lanes
 ) {
-  if (!graph.valid() || runs < 1) {
+  if (!graph.valid() || runs < 1 || lanes < 1) {
     throw std::invalid_argument("Invalid Metal resident KODAMA result matrix.");
   }
   @autoreleasepool {
     MetalState& state = metal_state();
     NativeMetalKODAMAGraph::Impl& impl = *graph.impl_;
+    const std::size_t prior_lanes = impl.lane_buffers.size();
+    if (prior_lanes < static_cast<std::size_t>(lanes)) {
+      impl.lane_buffers.resize(static_cast<std::size_t>(lanes));
+      for (std::size_t lane_id = prior_lanes;
+           lane_id < impl.lane_buffers.size();
+           ++lane_id) {
+        NativeMetalKODAMAGraph::Impl::Lane& lane = impl.lane_buffers[lane_id];
+        lane.landmark_epoch = [state.device
+          newBufferWithLength:static_cast<std::size_t>(impl.samples) * sizeof(int)
+          options:MTLResourceStorageModeShared];
+        lane.labels = [state.device
+          newBufferWithLength:static_cast<std::size_t>(impl.samples) * sizeof(int)
+          options:MTLResourceStorageModeShared];
+        lane.constrain = [state.device
+          newBufferWithLength:static_cast<std::size_t>(impl.samples) * sizeof(int)
+          options:MTLResourceStorageModeShared];
+        if (lane.landmark_epoch == nil || lane.labels == nil || lane.constrain == nil) {
+          throw std::runtime_error(
+            "Failed to expand reusable Metal KODAMA projection workspaces."
+          );
+        }
+      }
+    }
     const std::size_t required = static_cast<std::size_t>(runs) * impl.samples;
     if (impl.result_capacity < required) {
       impl.result_labels = [state.device
@@ -3569,6 +3593,13 @@ void metal_prepare_resident_results(
         throw std::runtime_error("Failed to allocate resident Metal KODAMA results.");
       }
       impl.result_capacity = required;
+    }
+    for (NativeMetalKODAMAGraph::Impl::Lane& lane : impl.lane_buffers) {
+      std::memset(
+        [lane.landmark_epoch contents],
+        0,
+        static_cast<std::size_t>(impl.samples) * sizeof(int)
+      );
     }
     impl.result_runs = runs;
   }

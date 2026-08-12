@@ -191,7 +191,7 @@ class NativeMetalKODAMAGraph {
     int,
     MetalIVFStats*
   );
-  friend void metal_prepare_resident_results(NativeMetalKODAMAGraph&, int);
+  friend void metal_prepare_resident_results(NativeMetalKODAMAGraph&, int, int);
   friend void metal_project_landmark_labels_to_result(
     NativeMetalKODAMAGraph&,
     const std::vector<int>&,
@@ -403,7 +403,11 @@ NeighborGraph metal_resident_landmark_knn_graph(
   double target_recall
 );
 
-void metal_prepare_resident_results(NativeMetalKODAMAGraph& graph, int runs);
+void metal_prepare_resident_results(
+  NativeMetalKODAMAGraph& graph,
+  int runs,
+  int lanes = 1
+);
 
 void metal_project_landmark_labels_to_result(
   NativeMetalKODAMAGraph& graph,

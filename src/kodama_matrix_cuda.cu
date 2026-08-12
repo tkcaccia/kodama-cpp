@@ -847,12 +847,42 @@ NeighborGraph cuda_resident_landmark_knn_graph(
   return output;
 }
 
-void cuda_resident_prepare_results(CudaResidentKODAMAGraph& graph, int runs) {
-  if (!graph.valid() || runs < 1) {
+void cuda_resident_prepare_results(
+  CudaResidentKODAMAGraph& graph,
+  int runs,
+  int lanes
+) {
+  if (!graph.valid() || runs < 1 || lanes < 1) {
     throw std::invalid_argument("Invalid CUDA resident KODAMA result matrix.");
   }
   CudaResidentKODAMAGraph::Impl& impl = *graph.impl_;
   check_cuda(cudaSetDevice(impl.device), "cudaSetDevice resident KODAMA results");
+  const std::size_t prior_lanes = impl.lane_buffers.size();
+  if (prior_lanes < static_cast<std::size_t>(lanes)) {
+    impl.lane_buffers.resize(static_cast<std::size_t>(lanes));
+    for (std::size_t lane_id = prior_lanes; lane_id < impl.lane_buffers.size(); ++lane_id) {
+      CudaResidentKODAMAGraph::Impl::Lane& lane = impl.lane_buffers[lane_id];
+      check_cuda(
+        cudaStreamCreateWithFlags(&lane.stream, cudaStreamNonBlocking),
+        "create reusable resident KODAMA graph stream"
+      );
+      check_cuda(
+        cudaMalloc(
+          &lane.landmark_epoch,
+          static_cast<std::size_t>(impl.samples) * sizeof(int)
+        ),
+        "allocate reusable resident KODAMA landmark epochs"
+      );
+      check_cuda(
+        cudaMalloc(&lane.labels, static_cast<std::size_t>(impl.samples) * sizeof(int)),
+        "allocate reusable resident KODAMA labels"
+      );
+      check_cuda(
+        cudaMalloc(&lane.constrain, static_cast<std::size_t>(impl.samples) * sizeof(int)),
+        "allocate reusable resident KODAMA constraints"
+      );
+    }
+  }
   const std::size_t required = static_cast<std::size_t>(runs) * impl.samples;
   if (impl.result_capacity < required) {
     cudaFree(impl.result_labels);
@@ -860,6 +890,16 @@ void cuda_resident_prepare_results(CudaResidentKODAMAGraph& graph, int runs) {
     check_cuda(cudaMalloc(&impl.result_labels, required * sizeof(int)),
                "allocate resident KODAMA result labels");
     impl.result_capacity = required;
+  }
+  for (CudaResidentKODAMAGraph::Impl::Lane& lane : impl.lane_buffers) {
+    check_cuda(
+      cudaMemset(
+        lane.landmark_epoch,
+        0,
+        static_cast<std::size_t>(impl.samples) * sizeof(int)
+      ),
+      "reset resident KODAMA landmark epochs"
+    );
   }
   impl.result_runs = runs;
 }

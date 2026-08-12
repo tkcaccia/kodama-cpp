@@ -54,6 +54,7 @@ class CudaResidentKODAMAGraph {
   );
   friend void cuda_resident_prepare_results(
     CudaResidentKODAMAGraph&,
+    int,
     int
   );
   friend void cuda_resident_project_landmark_labels_to_result(
@@ -133,7 +134,8 @@ CudaResidentKODAMAGraph make_cuda_resident_kodama_graph_ivf(
 
 void cuda_resident_prepare_results(
   CudaResidentKODAMAGraph& graph,
-  int runs
+  int runs,
+  int lanes = 1
 );
 
 void cuda_resident_project_landmark_labels_to_result(

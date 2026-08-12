@@ -2191,16 +2191,16 @@ class DeviceResidentKODAMAGraph {
     return false;
   }
 
-  void prepare_results(int runs) {
+  void prepare_results(int runs, int lanes) {
 #if defined(KODAMA_ENABLE_CUDA)
     if (backend_ == Backend::CUDA && cuda_) {
-      detail::cuda_resident_prepare_results(*cuda_, runs);
+      detail::cuda_resident_prepare_results(*cuda_, runs, lanes);
       return;
     }
 #endif
 #if defined(KODAMA_ENABLE_METAL)
     if (backend_ == Backend::Metal && metal_) {
-      detail::metal_prepare_resident_results(*metal_, runs);
+      detail::metal_prepare_resident_results(*metal_, runs, lanes);
       return;
     }
 #endif
@@ -3656,7 +3656,7 @@ KODAMAMatrixResult run_kodama_matrix(
     }
   }
   if (resident_graph.valid()) {
-    resident_graph.prepare_results(options.runs);
+    resident_graph.prepare_results(options.runs, workers);
   }
   execution_context.pca_initialization = result.has_visual_init ? &result.visual_init : nullptr;
   if (options.spatial.empty()) {
