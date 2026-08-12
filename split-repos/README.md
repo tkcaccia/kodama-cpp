@@ -2,15 +2,16 @@
 
 This directory contains split-ready repositories:
 
-- `kodama-r`: thin R wrapper for `kodama-cpp`
+- `KODAMA`: canonical R package with a vendored portable CPU core
 - `kodama-python`: thin Python wrapper for `kodama-cpp`
 
 They are staged inside this checkout because the current sandbox can only write
 inside the `kodama-cpp` workspace. They are intended to be moved or pushed as:
 
-- `tkcaccia/kodama-r`
+- `tkcaccia/KODAMA`
 - `tkcaccia/kodama-python`
 
-The wrappers do not contain algorithm implementations. They link to the
-standalone `kodama-cpp` library and expose KODAMA matrix optimization with KNN
-and PLS-LDA classifiers.
+The R source package vendors the portable CPU implementation so it can be
+installed on CRAN/Bioconductor builders without an external system library.
+Optional developer builds link CUDA or Metal `kodama-cpp`. The Python wrapper
+links the standalone core and exposes its broader numerical API.

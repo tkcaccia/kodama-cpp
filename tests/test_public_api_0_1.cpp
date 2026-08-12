@@ -48,10 +48,18 @@ int main() {
       const kodama::NeighborGraph&, const kodama::OpenTSNEOptions&);
   using PCAFn = kodama::PCAResult (*)(
       kodama::MatrixView, const kodama::PCAOptions&);
+  using GeneralPLSFn = kodama::PLSFitResult (*)(
+      kodama::MatrixView, kodama::MatrixView, const kodama::PLSOptions&);
   using NormalizationFn = kodama::NormalizationResult (*)(
       kodama::MatrixView, kodama::MatrixView, const kodama::NormalizationOptions&);
   using ScalingFn = kodama::ScalingResult (*)(
       kodama::MatrixView, kodama::MatrixView, const kodama::ScalingOptions&);
+  using PassingMessageFn = kodama::PassingMessageResult (*)(
+      kodama::MatrixView, kodama::MatrixView, const std::vector<int>&,
+      const kodama::PassingMessageOptions&);
+  using SpatialFeatureFn = kodama::SpatialFeatureResult (*)(
+      kodama::MatrixView, kodama::MatrixView, const std::vector<int>&,
+      const kodama::SpatialFeatureOptions&);
   using VisualizationInitFn = kodama::VisualizationInitResult (*)(
       kodama::MatrixView, const kodama::VisualizationInitOptions&);
   using DissimilarityInPlaceFn = void (*)(
@@ -108,12 +116,21 @@ int main() {
       &kodama::KODAMAOpenTSNE_METAL};
   const PCAFn pca[] = {
       &kodama::PCA, &kodama::PCA_CPU, &kodama::PCA_CUDA, &kodama::PCA_METAL};
+  const PCAFn rsvd = &kodama::RSVD;
+  const GeneralPLSFn general_pls[] = {
+      &kodama::PLS, &kodama::PLS_CPU, &kodama::PLS_CUDA, &kodama::PLS_METAL};
   const NormalizationFn normalization[] = {
       &kodama::Normalization, &kodama::Normalization_CPU,
       &kodama::Normalization_CUDA, &kodama::Normalization_METAL};
   const ScalingFn scaling[] = {
       &kodama::Scaling, &kodama::Scaling_CPU,
       &kodama::Scaling_CUDA, &kodama::Scaling_METAL};
+  const PassingMessageFn passing_message[] = {
+      &kodama::PassingMessage, &kodama::PassingMessage_CPU,
+      &kodama::PassingMessage_CUDA, &kodama::PassingMessage_METAL};
+  const SpatialFeatureFn spatial_features[] = {
+      &kodama::SpatialFeatureSelection,
+      &kodama::SpatialFeatureSelection_CPU};
   const VisualizationInitFn visualization_init =
       &kodama::KODAMAVisualizationPCAInit;
   const DissimilarityInPlaceFn dissimilarity_in_place =
@@ -130,7 +147,9 @@ int main() {
                  matrix_data_graph[0] && graph[0] && prepared_graph[0] &&
                  spatial_prepared_graph[0] &&
                  cluster[0] && umap[0] &&
-                 tsne[0] && pca[0] && normalization[0] && scaling[0] && visualization_init &&
+                 tsne[0] && pca[0] && rsvd && general_pls[0] &&
+                 normalization[0] && scaling[0] &&
+                 passing_message[0] && spatial_features[0] && visualization_init &&
                  dissimilarity_in_place && resident_ivf_build &&
                  resident_ivf_search && resident_ivf_self_search
              ? 0

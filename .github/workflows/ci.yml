@@ -60,27 +60,11 @@ jobs:
       - uses: r-lib/actions/setup-r@v2
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          working-directory: split-repos/kodama-r
-      - name: Build core
-        run: >-
-          cmake -S . -B build-r-ci
-          -DCMAKE_BUILD_TYPE=Release
-          -DKODAMA_ENABLE_CUDA=OFF
-          -DKODAMA_ENABLE_METAL=OFF
-          -DKODAMA_ENABLE_OPENMP=OFF
-          -DKODAMA_BUILD_EXAMPLES=OFF
-          -DKODAMA_BUILD_TESTS=ON
-      - run: cmake --build build-r-ci --parallel 2
+          working-directory: split-repos/KODAMA
       - name: Build R source package
-        env:
-          KODAMA_CPP_ROOT: ${{ github.workspace }}
-          KODAMA_CPP_BUILD_DIR: ${{ github.workspace }}/build-r-ci
-        run: R CMD build split-repos/kodama-r
+        run: R CMD build split-repos/KODAMA
       - name: Check R package
-        env:
-          KODAMA_CPP_ROOT: ${{ github.workspace }}
-          KODAMA_CPP_BUILD_DIR: ${{ github.workspace }}/build-r-ci
-        run: R CMD check --no-manual --no-build-vignettes kodamaR_0.1.0.tar.gz
+        run: R CMD check --no-manual KODAMA_0.99.0.tar.gz
 
   python-wrapper:
     name: Python wrapper

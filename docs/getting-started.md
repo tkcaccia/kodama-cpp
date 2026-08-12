@@ -180,16 +180,14 @@ graph.
 
 ## R wrapper
 
-Build the core first, then install the thin wrapper from the checkout:
+Install the portable R source package from the checkout:
 
 ```sh
-KODAMA_CPP_ROOT="$PWD" \
-KODAMA_CPP_BUILD_DIR="$PWD/build" \
-R CMD INSTALL split-repos/kodama-r
+R CMD INSTALL split-repos/KODAMA
 ```
 
 ```r
-library(kodamaR)
+library(KODAMA)
 
 set.seed(1)
 x <- matrix(rnorm(120 * 8), 120, 8)
@@ -238,7 +236,7 @@ stored initialization, UMAP uses its graph-spectral start and openTSNE uses
 its deterministic random start.
 
 The complete installation and `R CMD check` procedure is in
-`split-repos/kodama-r/inst/INSTALL.md`.
+`split-repos/KODAMA/inst/INSTALL.md`.
 
 ## Python wrapper
 

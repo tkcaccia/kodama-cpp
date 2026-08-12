@@ -134,7 +134,7 @@ and installed R-wrapper tests pass with this contract.
 For the R wrapper, validate core-selection invalidation in addition to a clean
 install. Install once, select a core archive at a different path (or rebuild
 the archive), and install again without `--preclean`. The second log must
-compile both `RcppExports.cpp` and `kodama_r.cpp` and relink `kodamaR`; a third
+compile both `RcppExports.cpp` and `kodama_r.cpp` and relink `KODAMA`; a third
 install against the unchanged archive must be a no-op at the native build
 step. The generated `.kodama-core.signature` records the selected archive and
 public-header checksums and is removed by the package cleanup script.

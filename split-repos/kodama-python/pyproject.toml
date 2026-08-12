@@ -19,6 +19,8 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest"]
 benchmark = ["pandas"]
+singlecell = ["anndata>=0.10", "scipy>=1.10"]
+spatial = ["anndata>=0.10", "scipy>=1.10", "spatialdata>=0.2", "squidpy>=1.5"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"

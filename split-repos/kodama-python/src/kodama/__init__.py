@@ -24,8 +24,12 @@ from ._core import (
     matrix_graph_handle as _matrix_graph_handle,
     normalization as _normalization,
     opentsne as _opentsne,
+    passing_message as _passing_message,
     pca as _pca,
+    pls as _pls,
+    rsvd as _rsvd,
     scaling as _scaling,
+    spatial_features as _spatial_features,
     plsldacv as _plsldacv,
     umap as _umap,
     visual_init as _visual_init,
@@ -36,6 +40,7 @@ _VISUALIZATION_BACKENDS = ("cpu", "cuda", "metal")
 _METRICS = ("euclidean", "cosine", "inner_product")
 _CLASSIFIERS = ("knn", "pls_lda")
 _SPATIAL_CONSTRAINT_MODES = ("kmeans", "graph", "auto")
+_SPATIAL_MODES = ("standard", "population")
 _GRAPH_FEATURE_MODES = ("laplacian_self_tuning",)
 _GRAPH_WEIGHTS = ("distance", "snn", "adaptive", "binary")
 _EVOLUTION_POLICIES = (
@@ -105,7 +110,7 @@ def KNNCV(
     n_cores=1,
     gpu_device=0,
 ):
-    """Cross-validated KNN classification, mirroring ``kodamaR::KNNCV``."""
+    """Cross-validated KNN classification, mirroring ``KODAMA::KNNCV``."""
     metric = _choice(metric, "metric", ("cosine", "inner_product", "euclidean"))
     backend = _choice(backend, "backend", _BACKENDS)
     return _knncv(
@@ -137,7 +142,7 @@ def PLSLDACV(
     n_cores=1,
     gpu_device=0,
 ):
-    """Cross-validated SIMPLS plus LDA, mirroring ``kodamaR::PLSLDACV``."""
+    """Cross-validated SIMPLS plus LDA, mirroring ``KODAMA::PLSLDACV``."""
     x = _matrix32(data)
     if ncomp is None:
         ncomp = min(50, x.shape[1])
@@ -173,7 +178,7 @@ def CoreKNN(
     n_cores=4,
     gpu_device=0,
 ):
-    """KODAMA label evolution with KNN, mirroring ``kodamaR::CoreKNN``."""
+    """KODAMA label evolution with KNN, mirroring ``KODAMA::CoreKNN``."""
     metric = _choice(metric, "metric", _METRICS)
     backend = _choice(backend, "backend", _BACKENDS)
     return _core_knn(
@@ -207,7 +212,7 @@ def CorePLSLDA(
     n_cores=4,
     gpu_device=0,
 ):
-    """KODAMA label evolution with PLS-LDA, mirroring ``kodamaR::CorePLSLDA``."""
+    """KODAMA label evolution with PLS-LDA, mirroring ``KODAMA::CorePLSLDA``."""
     x = _matrix32(data)
     if ncomp is None:
         ncomp = min(50, x.shape[1])
@@ -240,7 +245,7 @@ def kodama_pca(
     oversample=None,
     power=None,
 ):
-    """Backend-native float32 PCA, mirroring ``kodamaR::kodama_pca``."""
+    """Backend-native float32 PCA, mirroring ``KODAMA::kodama_pca``."""
     backend = _choice(backend, "backend", _BACKENDS)
     return _pca(
         _matrix32(data),
@@ -253,6 +258,48 @@ def kodama_pca(
         gpu_device=int(gpu_device),
         oversample=-1 if oversample is None else int(oversample),
         power=-1 if power is None else int(power),
+    )
+
+
+def rsvd(
+    data,
+    ncomp=2,
+    center=True,
+    scale=False,
+    backend="cpu",
+    n_cores=1,
+    gpu_device=0,
+    seed=4,
+    oversample=None,
+    power=None,
+):
+    """Randomized truncated SVD using the standalone float32 core."""
+    backend = _choice(backend, "backend", _BACKENDS)
+    return _rsvd(
+        _matrix32(data), ncomp=int(ncomp), center=bool(center),
+        scale=bool(scale), backend=backend, seed=int(seed),
+        n_threads=int(n_cores), gpu_device=int(gpu_device),
+        oversample=-1 if oversample is None else int(oversample),
+        power=-1 if power is None else int(power),
+    )
+
+
+def pls(
+    data,
+    response,
+    ncomp=2,
+    center=True,
+    scale=True,
+    backend="cpu",
+    n_cores=1,
+    gpu_device=0,
+):
+    """Fit a general float32 SIMPLS model."""
+    backend = _choice(backend, "backend", _BACKENDS)
+    return _pls(
+        _matrix32(data), _matrix32(response, "response"),
+        ncomp=int(ncomp), center=bool(center), scale=bool(scale),
+        backend=backend, n_threads=int(n_cores), gpu_device=int(gpu_device),
     )
 
 
@@ -305,6 +352,256 @@ def scaling(
         n_threads=int(n_cores),
         gpu_device=int(gpu_device),
     )
+
+
+def spatial_feature_selection(
+    data,
+    spatial,
+    samples=None,
+    n_cores=4,
+    require_nonzero_each_sample=True,
+):
+    """Screen spatially autocorrelated features on the multicore CPU backend."""
+    data = _matrix32(data)
+    spatial = _matrix32(spatial, "spatial")
+    if spatial.shape[0] != data.shape[0]:
+        raise ValueError("data and spatial must have the same rows")
+    result = _spatial_features(
+        data,
+        spatial,
+        samples=_sample_ids(samples, data.shape[0]),
+        n_threads=int(n_cores),
+        require_nonzero_each_sample=bool(require_nonzero_each_sample),
+    )
+    result["features"] = result["ranking"].copy()
+    return result
+
+
+def passing_message(
+    data,
+    spatial,
+    samples=None,
+    number_knn=15,
+    backend="cpu",
+    n_cores=4,
+    gpu_device=0,
+):
+    """Aggregate local expression messages within each sample or slide."""
+    data = _matrix32(data)
+    spatial = _matrix32(spatial, "spatial")
+    if spatial.shape[0] != data.shape[0]:
+        raise ValueError("data and spatial must have the same rows")
+    backend = _choice(backend, "backend", _BACKENDS)
+    return _passing_message(
+        data,
+        spatial,
+        samples=_sample_ids(samples, data.shape[0]),
+        number_knn=int(number_knn),
+        backend=backend,
+        n_threads=int(n_cores),
+        gpu_device=int(gpu_device),
+    )
+
+
+def _dense_object_matrix(value, name="data"):
+    """Convert NumPy or scipy-like matrices without importing scipy."""
+    if hasattr(value, "toarray"):
+        value = value.toarray()
+    return _matrix32(value, name)
+
+
+def _anndata_table(value, table_key=None):
+    """Return an AnnData-like table from AnnData or SpatialData."""
+    if hasattr(value, "X") and hasattr(value, "obs") and hasattr(value, "obsm"):
+        return value
+    tables = getattr(value, "tables", None)
+    if tables is None:
+        raise TypeError("object must be AnnData-like or SpatialData-like")
+    keys = list(tables.keys())
+    if table_key is None:
+        if len(keys) != 1:
+            raise ValueError("table_key is required when SpatialData has multiple tables")
+        table_key = keys[0]
+    if table_key not in tables:
+        raise KeyError(f"SpatialData table {table_key!r} was not found")
+    return tables[table_key]
+
+
+def _anndata_values(adata, layer=None):
+    value = adata.X if layer is None else adata.layers[layer]
+    return _dense_object_matrix(value)
+
+
+def _annotation_vector(frame, key, n_samples, name):
+    if key is None:
+        return None
+    try:
+        values = np.asarray(frame[key])
+    except Exception as error:
+        raise KeyError(f"{name} key {key!r} was not found") from error
+    if values.ndim != 1 or values.shape[0] != n_samples:
+        raise ValueError(f"{name} must contain one value per observation")
+    return values
+
+
+def _sparse_knn_graph(matrix, k=100, similarity=False):
+    """Convert a scipy-compatible sparse matrix to fixed-width KNN arrays."""
+    if not all(hasattr(matrix, field) for field in ("indptr", "indices", "data")):
+        raise TypeError("Squidpy graph must be a CSR-compatible sparse matrix")
+    csr = matrix.tocsr() if hasattr(matrix, "tocsr") else matrix
+    n_samples = int(csr.shape[0])
+    width = min(int(k), max(1, n_samples - 1))
+    indices = np.empty((n_samples, width), dtype=np.int32)
+    distances = np.empty((n_samples, width), dtype=np.float32)
+    for row in range(n_samples):
+        begin, end = int(csr.indptr[row]), int(csr.indptr[row + 1])
+        candidates = np.asarray(csr.indices[begin:end], dtype=np.int32)
+        values = np.asarray(csr.data[begin:end], dtype=np.float32)
+        keep = candidates != row
+        candidates, values = candidates[keep], values[keep]
+        if similarity:
+            values = 1.0 - np.clip(values, 0.0, 1.0)
+        order = np.argsort(values, kind="stable")
+        candidates, values = candidates[order], values[order]
+        if candidates.size == 0:
+            candidates = np.array([row], dtype=np.int32)
+            values = np.array([0.0], dtype=np.float32)
+        take = min(width, candidates.size)
+        indices[row, :take] = candidates[:take]
+        distances[row, :take] = values[:take]
+        if take < width:
+            indices[row, take:] = candidates[take - 1]
+            distances[row, take:] = values[take - 1]
+    return {"indices": indices, "distances": distances, "neighbors": width}
+
+
+def graph_from_anndata(
+    obj,
+    *,
+    table_key=None,
+    distances_key=None,
+    connectivities_key=None,
+    k=100,
+):
+    """Read a Scanpy/Squidpy graph from ``AnnData.obsp``."""
+    adata = _anndata_table(obj, table_key)
+    candidates = []
+    if distances_key is not None:
+        candidates.append((distances_key, False))
+    else:
+        candidates.extend((("spatial_distances", False), ("distances", False)))
+    if connectivities_key is not None:
+        candidates.append((connectivities_key, True))
+    else:
+        candidates.extend((("spatial_connectivities", True), ("connectivities", True)))
+    for key, similarity in candidates:
+        try:
+            value = adata.obsp[key]
+        except Exception:
+            continue
+        out = _sparse_knn_graph(value, k=k, similarity=similarity)
+        out.update({"source": "anndata_obsp", "key": key, "storage": "matrix"})
+        return out
+    raise KeyError("no Scanpy/Squidpy distance or connectivity graph was found in obsp")
+
+
+def RunKODAMAgraph(
+    obj,
+    *,
+    table_key=None,
+    layer=None,
+    spatial_key="spatial",
+    sample_key=None,
+    result_key="kodama_graph",
+    copy=False,
+    **kwargs,
+):
+    """Build and store a KODAMA graph on AnnData or SpatialData."""
+    target = obj.copy() if copy and hasattr(obj, "copy") else obj
+    adata = _anndata_table(target, table_key)
+    data = _anndata_values(adata, layer)
+    spatial = None if spatial_key is None else _matrix32(adata.obsm[spatial_key], "spatial")
+    samples = _annotation_vector(adata.obs, sample_key, data.shape[0], "sample")
+    result = graph(data, spatial=spatial, samples=samples, **kwargs)
+    adata.uns[result_key] = result
+    return target if copy else result
+
+
+def RunKODAMAmatrix(
+    obj,
+    *,
+    table_key=None,
+    layer=None,
+    spatial_key="spatial",
+    sample_key=None,
+    graph_key="kodama_graph",
+    result_key="kodama",
+    labels_key="kodama_labels",
+    use_existing_graph=True,
+    copy=False,
+    **kwargs,
+):
+    """Run KODAMA and store best labels on AnnData or SpatialData."""
+    target = obj.copy() if copy and hasattr(obj, "copy") else obj
+    adata = _anndata_table(target, table_key)
+    data = _anndata_values(adata, layer)
+    spatial = None if spatial_key is None else _matrix32(adata.obsm[spatial_key], "spatial")
+    samples = _annotation_vector(adata.obs, sample_key, data.shape[0], "sample")
+    prepared = adata.uns.get(graph_key) if use_existing_graph else None
+    kwargs.setdefault("return_graph", True)
+    result = matrix(data=data, graph=prepared, spatial=spatial, samples=samples, **kwargs)
+    adata.uns[result_key] = result
+    adata.obs[labels_key] = np.asarray(result.best_labels).astype(str)
+    return target if copy else result
+
+
+def RunKODAMAvisualization(
+    obj,
+    *,
+    table_key=None,
+    layer=None,
+    result_key="kodama",
+    embedding_key="X_kodama_umap",
+    method="UMAP",
+    copy=False,
+    **kwargs,
+):
+    """Embed a stored KODAMA result and write it to ``AnnData.obsm``."""
+    target = obj.copy() if copy and hasattr(obj, "copy") else obj
+    adata = _anndata_table(target, table_key)
+    if result_key not in adata.uns:
+        raise KeyError(f"KODAMA result {result_key!r} was not found in uns")
+    embedding = visualization(
+        adata.uns[result_key], method=method,
+        raw_data=_anndata_values(adata, layer), **kwargs
+    )
+    adata.obsm[embedding_key] = np.asarray(embedding, dtype=np.float32)
+    return target if copy else embedding
+
+
+def RunSpatialFeatureSelection(
+    obj,
+    *,
+    table_key=None,
+    layer=None,
+    spatial_key="spatial",
+    sample_key=None,
+    result_key="kodama_spatial_features",
+    copy=False,
+    **kwargs,
+):
+    """Run spatial feature selection and annotate ``AnnData.var``."""
+    target = obj.copy() if copy and hasattr(obj, "copy") else obj
+    adata = _anndata_table(target, table_key)
+    data = _anndata_values(adata, layer)
+    samples = _annotation_vector(adata.obs, sample_key, data.shape[0], "sample")
+    result = spatial_feature_selection(
+        data, _matrix32(adata.obsm[spatial_key], "spatial"), samples=samples, **kwargs
+    )
+    adata.uns[result_key] = result
+    for key in ("score", "p_value", "adjusted_p_value"):
+        adata.var[f"{result_key}_{key}"] = np.asarray(result[key])
+    return target if copy else result
 
 
 def _visual_initialization(data, backend="cpu", seed=4, n_cores=1, gpu_device=0):
@@ -455,6 +752,7 @@ def matrix(
     spatial_resolution=0.4,
     spatial_graph_mix=False,
     spatial_constraint_mode="kmeans",
+    spatial_mode="standard",
     metric="euclidean",
     classifier="knn",
     backend=None,
@@ -466,7 +764,7 @@ def matrix(
     return_graph=False,
     _evolution_policy="full",
 ):
-    """Run KODAMA matrix optimization, mirroring ``kodamaR::kodama_matrix``.
+    """Run KODAMA matrix optimization, mirroring ``KODAMA::kodama_matrix``.
 
     The native call builds one full-data graph before all ``M`` runs. With
     ``visual_init=True`` it also performs one float32 PCA and stores both UMAP
@@ -520,6 +818,7 @@ def matrix(
             spatial_resolution=spatial_resolution,
             spatial_graph_mix=spatial_graph_mix,
             spatial_constraint_mode=spatial_constraint_mode,
+            spatial_mode=spatial_mode,
             classifier=classifier,
             backend=backend,
             seed=seed,
@@ -551,6 +850,7 @@ def matrix(
         _evolution_policy, "_evolution_policy", _EVOLUTION_POLICIES
     )
     spatial_constraint_code = _spatial_constraint_code(spatial_constraint_mode)
+    spatial_mode = _choice(spatial_mode, "spatial_mode", _SPATIAL_MODES)
     spatial_array = None if spatial is None else _matrix32(spatial, "spatial")
     sample_ids = _sample_ids(samples, x.shape[0])
     result = _matrix(
@@ -571,6 +871,7 @@ def matrix(
         spatial_resolution=float(spatial_resolution),
         spatial_graph_mix=bool(spatial_graph_mix),
         spatial_constraint_mode=spatial_constraint_code,
+        spatial_coordinate_mode=1 if spatial_mode == "population" else 0,
         metric=metric,
         classifier=classifier,
         backend=backend,
@@ -596,6 +897,7 @@ def matrix(
         "samples": 0 if sample_ids is None else int(np.unique(sample_ids).size),
         "spatial_graph_mix": bool(spatial_graph_mix),
         "spatial_constraint_mode": spatial_constraint_mode,
+        "spatial_mode": spatial_mode,
         "metric": metric,
         "classifier": classifier,
         "backend": backend,
@@ -632,6 +934,7 @@ def matrix_graph(
     spatial_resolution=0.4,
     spatial_graph_mix=False,
     spatial_constraint_mode="kmeans",
+    spatial_mode="standard",
     classifier="knn",
     backend=None,
     graph_feature_mode="laplacian_self_tuning",
@@ -645,7 +948,7 @@ def matrix_graph(
     return_graph=False,
     _evolution_policy="full",
 ):
-    """Run KODAMA from a KNN matrix, mirroring ``kodamaR::kodama_matrix_graph``."""
+    """Run KODAMA from a KNN matrix, mirroring ``KODAMA::kodama_matrix_graph``."""
     graph_object = indices if isinstance(indices, dict) else None
     supplied_graph = _extract_graph(indices)
     graph_handle = supplied_graph.get("handle") if isinstance(supplied_graph, dict) else None
@@ -675,6 +978,7 @@ def matrix_graph(
         _evolution_policy, "_evolution_policy", _EVOLUTION_POLICIES
     )
     spatial_constraint_code = _spatial_constraint_code(spatial_constraint_mode)
+    spatial_mode = _choice(spatial_mode, "spatial_mode", _SPATIAL_MODES)
     sample_ids = _sample_ids(
         samples,
         int(supplied_graph["samples"]) if graph_handle is not None else idx.shape[0],
@@ -700,6 +1004,7 @@ def matrix_graph(
         spatial_resolution=float(spatial_resolution),
         spatial_graph_mix=bool(spatial_graph_mix),
         spatial_constraint_mode=spatial_constraint_code,
+        spatial_coordinate_mode=1 if spatial_mode == "population" else 0,
         classifier=classifier,
         backend=backend,
         graph_feature_mode=graph_feature_mode,
@@ -737,6 +1042,7 @@ def matrix_graph(
         "samples": 0 if sample_ids is None else int(np.unique(sample_ids).size),
         "spatial_graph_mix": bool(spatial_graph_mix),
         "spatial_constraint_mode": spatial_constraint_mode,
+        "spatial_mode": spatial_mode,
         "classifier": classifier,
         "backend": backend,
         "graph_feature_mode": graph_feature_mode,
@@ -939,6 +1245,16 @@ def visualization(
     raise ValueError(f"Unsupported visualization method: {method}")
 
 
+def umap(x, **kwargs):
+    """Run the native UMAP implementation on data or a prepared KNN graph."""
+    return visualization(x, method="UMAP", **kwargs)
+
+
+def opentsne(x, **kwargs):
+    """Run the native openTSNE implementation on data or a prepared KNN graph."""
+    return visualization(x, method="opentsne", **kwargs)
+
+
 def timing(x):
     """Return KODAMA timing records, mirroring ``KODAMA.timing``."""
     raw = x.get("timing") if isinstance(x, dict) else None
@@ -1060,14 +1376,20 @@ KODAMA = SimpleNamespace(
     matrix=matrix,
     matrix_graph=matrix_graph,
     visualization=visualization,
+    umap=umap,
+    opentsne=opentsne,
     graph=graph,
     makeSNNGraph=graph,
     clustering=clustering,
     timing=timing,
     diagnostics=diagnostics,
     pca=kodama_pca,
+    pls=pls,
+    rsvd=rsvd,
     normalization=normalization,
     scaling=scaling,
+    spatial_features=spatial_feature_selection,
+    passing_message=passing_message,
 )
 
 knncv = KNNCV
@@ -1075,6 +1397,7 @@ plsldacv = PLSLDACV
 core_knn = CoreKNN
 core_plslda = CorePLSLDA
 pca = kodama_pca
+spatial_features = spatial_feature_selection
 kodama_matrix = matrix
 kodama_matrix_graph = matrix_graph
 kodama_visualization = visualization
@@ -1093,6 +1416,8 @@ KODAMA_diagnostics = diagnostics
 makeSNNGraph = graph
 KODAMA_makeSNNGraph = graph
 KODAMA_pca = kodama_pca
+KODAMA_spatial_features = spatial_feature_selection
+KODAMA_passing_message = passing_message
 
 __all__ = [
     "KNNCV",
@@ -1100,8 +1425,13 @@ __all__ = [
     "CoreKNN",
     "CorePLSLDA",
     "PCA",
+    "pls",
+    "rsvd",
     "normalization",
     "scaling",
+    "passing_message",
+    "spatial_feature_selection",
+    "spatial_features",
     "KODAMA",
     "KODAMA_matrix",
     "KODAMA_matrix_graph",
@@ -1111,6 +1441,8 @@ __all__ = [
     "KODAMA_timing",
     "KODAMA_diagnostics",
     "KODAMA_pca",
+    "KODAMA_spatial_features",
+    "KODAMA_passing_message",
     "KODAMA_makeSNNGraph",
     "KodamaEmbedding",
     "KodamaMatrixResult",
@@ -1135,4 +1467,11 @@ __all__ = [
     "plsldacv",
     "timing",
     "visualization",
+    "umap",
+    "opentsne",
+    "graph_from_anndata",
+    "RunKODAMAgraph",
+    "RunKODAMAmatrix",
+    "RunKODAMAvisualization",
+    "RunSpatialFeatureSelection",
 ]

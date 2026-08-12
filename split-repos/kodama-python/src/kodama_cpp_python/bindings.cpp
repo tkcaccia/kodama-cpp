@@ -495,6 +495,28 @@ py::dict pca_to_python(const kodama::PCAResult& result) {
   return out;
 }
 
+py::dict pls_to_python(const kodama::PLSFitResult& result) {
+  py::dict out;
+  out["weights"] = matrix_to_float_array(
+    result.weights, result.predictors, result.components);
+  out["response_loadings"] = matrix_to_float_array(
+    result.response_loadings, result.responses, result.components);
+  out["scores"] = matrix_to_float_array(
+    result.scores, result.samples, result.components);
+  out["coefficients"] = matrix_to_float_array(
+    result.coefficients, result.predictors, result.responses);
+  out["fitted"] = matrix_to_float_array(
+    result.fitted, result.samples, result.responses);
+  out["x_center"] = vector_to_float_array(result.x_center);
+  out["x_scale"] = vector_to_float_array(result.x_scale);
+  out["y_center"] = vector_to_float_array(result.y_center);
+  out["ncomp"] = result.components;
+  out["backend"] = kodama::to_string(result.backend);
+  out["precision"] = "float32";
+  out["runtime_seconds"] = result.runtime_seconds;
+  return out;
+}
+
 py::dict normalization_to_python(const kodama::NormalizationResult& result) {
   py::dict out;
   out["newXtrain"] = matrix_to_float_array(
@@ -583,6 +605,7 @@ py::dict matrix(
   double spatial_resolution,
   bool spatial_graph_mix,
   int spatial_constraint_mode,
+  int spatial_coordinate_mode,
   const std::string& metric,
   const std::string& classifier,
   const std::string& backend,
@@ -611,6 +634,9 @@ py::dict matrix(
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
   options.spatial_constraint_mode = spatial_constraint_mode;
+  options.spatial_coordinate_mode = spatial_coordinate_mode == 1 ?
+    kodama::SpatialCoordinateMode::Population :
+    kodama::SpatialCoordinateMode::Standard;
   options.seed = static_cast<std::uint64_t>(seed);
   options.metric = parse_metric(metric);
   options.backend = parse_backend(backend);
@@ -676,6 +702,7 @@ py::dict matrix_graph(
   double spatial_resolution,
   bool spatial_graph_mix,
   int spatial_constraint_mode,
+  int spatial_coordinate_mode,
   const std::string& classifier,
   const std::string& backend,
   const std::string& graph_feature_mode,
@@ -707,6 +734,9 @@ py::dict matrix_graph(
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
   options.spatial_constraint_mode = spatial_constraint_mode;
+  options.spatial_coordinate_mode = spatial_coordinate_mode == 1 ?
+    kodama::SpatialCoordinateMode::Population :
+    kodama::SpatialCoordinateMode::Standard;
   options.seed = static_cast<std::uint64_t>(seed);
   options.backend = parse_backend(backend);
   options.classifier = parse_classifier(classifier);
@@ -765,6 +795,7 @@ py::dict matrix_graph_handle(
   py::object constrain, py::object fix, int M, int Tcycle, int ncomp,
   int landmarks, int splitting, int n_threads, int graph_neighbors, int knn_k,
   double spatial_resolution, bool spatial_graph_mix, int spatial_constraint_mode,
+  int spatial_coordinate_mode,
   const std::string& classifier, const std::string& backend,
   const std::string& graph_feature_mode, int graph_feature_components,
   int graph_feature_steps, int seed, bool progress,
@@ -786,6 +817,9 @@ py::dict matrix_graph_handle(
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
   options.spatial_constraint_mode = spatial_constraint_mode;
+  options.spatial_coordinate_mode = spatial_coordinate_mode == 1 ?
+    kodama::SpatialCoordinateMode::Population :
+    kodama::SpatialCoordinateMode::Standard;
   options.classifier = parse_classifier(classifier);
   options.backend = parse_backend(backend);
   options.graph_feature_mode = parse_graph_feature_mode(graph_feature_mode);
@@ -1123,6 +1157,64 @@ py::dict pca(
   ));
 }
 
+py::dict rsvd(
+  py::array_t<float, py::array::c_style | py::array::forcecast> data,
+  const int ncomp,
+  const bool center,
+  const bool scale,
+  const std::string& backend,
+  const int seed,
+  const int n_threads,
+  const int gpu_device,
+  const int oversample,
+  const int power
+) {
+  auto view = data.unchecked<2>();
+  kodama::PCAOptions options;
+  options.n_components = ncomp;
+  options.center = center;
+  options.scale = scale;
+  options.backend = parse_backend(backend);
+  options.seed = static_cast<std::uint64_t>(seed);
+  options.n_threads = n_threads;
+  options.gpu_device = gpu_device;
+  options.oversample = oversample;
+  options.power_iterations = power;
+  return pca_to_python(kodama::RSVD(
+    kodama::MatrixView{static_cast<const float*>(data.request().ptr),
+      static_cast<std::size_t>(view.shape(0)), static_cast<std::size_t>(view.shape(1))},
+    options));
+}
+
+py::dict pls(
+  py::array_t<float, py::array::c_style | py::array::forcecast> data,
+  py::array_t<float, py::array::c_style | py::array::forcecast> response,
+  const int ncomp,
+  const bool center,
+  const bool scale,
+  const std::string& backend,
+  const int n_threads,
+  const int gpu_device
+) {
+  if (data.ndim() != 2 || response.ndim() != 2 || data.shape(0) != response.shape(0)) {
+    throw std::invalid_argument("data and response must be 2D arrays with equal rows.");
+  }
+  kodama::PLSOptions options;
+  options.max_components = ncomp;
+  options.fixed_components = ncomp;
+  options.center = center;
+  options.scale = scale;
+  options.backend = parse_backend(backend);
+  options.n_threads = n_threads;
+  options.gpu_device = gpu_device;
+  return pls_to_python(kodama::PLS(
+    kodama::MatrixView{static_cast<const float*>(data.request().ptr),
+      static_cast<std::size_t>(data.shape(0)), static_cast<std::size_t>(data.shape(1))},
+    kodama::MatrixView{static_cast<const float*>(response.request().ptr),
+      static_cast<std::size_t>(response.shape(0)), static_cast<std::size_t>(response.shape(1))},
+    options));
+}
+
 py::dict normalization(
   py::array_t<float, py::array::c_style | py::array::forcecast> train,
   py::object test,
@@ -1190,6 +1282,96 @@ py::dict scaling(
     test_rows == 0 ? kodama::MatrixView{} : kodama::MatrixView{
       static_cast<const float*>(test_array.request().ptr), static_cast<std::size_t>(test_rows),
       static_cast<std::size_t>(train_view.shape(1))}, options));
+}
+
+py::dict spatial_features(
+  py::array_t<float, py::array::c_style | py::array::forcecast> data,
+  py::array_t<float, py::array::c_style | py::array::forcecast> spatial,
+  py::object samples,
+  const int n_threads,
+  const bool require_nonzero_each_sample
+) {
+  if (data.ndim() != 2 || spatial.ndim() != 2 || data.shape(0) != spatial.shape(0)) {
+    throw std::invalid_argument("data and spatial must be 2D arrays with equal rows.");
+  }
+  kodama::SpatialFeatureOptions options;
+  options.n_threads = n_threads;
+  options.require_nonzero_each_sample = require_nonzero_each_sample;
+  const kodama::SpatialFeatureResult result = kodama::SpatialFeatureSelection_CPU(
+    kodama::MatrixView{static_cast<const float*>(data.request().ptr),
+      static_cast<std::size_t>(data.shape(0)), static_cast<std::size_t>(data.shape(1))},
+    kodama::MatrixView{static_cast<const float*>(spatial.request().ptr),
+      static_cast<std::size_t>(spatial.shape(0)), static_cast<std::size_t>(spatial.shape(1))},
+    optional_int_vector(samples), options
+  );
+  py::array_t<double> per_sample_p({
+    static_cast<py::ssize_t>(result.sample_groups),
+    static_cast<py::ssize_t>(result.variables)
+  });
+  auto p_view = per_sample_p.mutable_unchecked<2>();
+  for (py::ssize_t sample = 0; sample < p_view.shape(0); ++sample) {
+    for (py::ssize_t variable = 0; variable < p_view.shape(1); ++variable) {
+      p_view(sample, variable) = result.per_sample_p_value[
+        static_cast<std::size_t>(sample) * result.variables + variable];
+    }
+  }
+  py::dict out;
+  out["score"] = vector_to_float_array(result.score);
+  out["p_value"] = vector_to_double_array(result.p_value);
+  out["adjusted_p_value"] = vector_to_double_array(result.adjusted_p_value);
+  out["ranking"] = vector_to_int_array(result.ranking);
+  out["per_sample_score"] = matrix_to_float_array(
+    result.per_sample_score, static_cast<int>(result.sample_groups),
+    static_cast<int>(result.variables));
+  out["per_sample_p_value"] = std::move(per_sample_p);
+  out["sample_labels"] = vector_to_int_array(result.sample_labels);
+  out["basis_dimensions"] = vector_to_int_array(result.basis_dimensions);
+  out["backend"] = kodama::to_string(result.backend);
+  out["basis_seconds"] = result.basis_seconds;
+  out["statistic_seconds"] = result.statistic_seconds;
+  out["runtime_seconds"] = result.runtime_seconds;
+  out["precision"] = "float32";
+  return out;
+}
+
+py::dict passing_message(
+  py::array_t<float, py::array::c_style | py::array::forcecast> data,
+  py::array_t<float, py::array::c_style | py::array::forcecast> spatial,
+  py::object samples,
+  const int number_knn,
+  const std::string& backend,
+  const int n_threads,
+  const int gpu_device
+) {
+  if (data.ndim() != 2 || spatial.ndim() != 2 || data.shape(0) != spatial.shape(0)) {
+    throw std::invalid_argument("data and spatial must be 2D arrays with equal rows.");
+  }
+  kodama::PassingMessageOptions options;
+  options.neighbors = number_knn;
+  options.backend = parse_backend(backend);
+  options.n_threads = n_threads;
+  options.gpu_device = gpu_device;
+  const kodama::PassingMessageResult result = kodama::PassingMessage(
+    kodama::MatrixView{static_cast<const float*>(data.request().ptr),
+      static_cast<std::size_t>(data.shape(0)), static_cast<std::size_t>(data.shape(1))},
+    kodama::MatrixView{static_cast<const float*>(spatial.request().ptr),
+      static_cast<std::size_t>(spatial.shape(0)), static_cast<std::size_t>(spatial.shape(1))},
+    optional_int_vector(samples), options
+  );
+  py::dict out;
+  out["values"] = matrix_to_float_array(
+    result.values, static_cast<int>(result.samples), static_cast<int>(result.variables));
+  out["sample_max_distances"] = vector_to_float_array(result.sample_max_distances);
+  out["samples"] = result.samples;
+  out["variables"] = result.variables;
+  out["sample_groups"] = result.sample_groups;
+  out["neighbors"] = result.neighbors;
+  out["backend"] = kodama::to_string(result.backend);
+  out["graph_seconds"] = result.graph_seconds;
+  out["aggregation_seconds"] = result.aggregation_seconds;
+  out["runtime_seconds"] = result.runtime_seconds;
+  out["precision"] = "float32";
+  return out;
 }
 
 py::dict visual_init(
@@ -1478,6 +1660,7 @@ PYBIND11_MODULE(_core, m) {
     py::arg("spatial_resolution") = 0.3,
     py::arg("spatial_graph_mix") = false,
     py::arg("spatial_constraint_mode") = 0,
+    py::arg("spatial_coordinate_mode") = 0,
     py::arg("metric") = "euclidean",
     py::arg("classifier") = "knn",
     py::arg("backend") = "cpu",
@@ -1511,6 +1694,7 @@ PYBIND11_MODULE(_core, m) {
     py::arg("spatial_resolution") = 0.3,
     py::arg("spatial_graph_mix") = false,
     py::arg("spatial_constraint_mode") = 0,
+    py::arg("spatial_coordinate_mode") = 0,
     py::arg("classifier") = "knn",
     py::arg("backend") = "cpu",
     py::arg("graph_feature_mode") = "laplacian_self_tuning",
@@ -1535,6 +1719,7 @@ PYBIND11_MODULE(_core, m) {
     py::arg("knn_k") = 30, py::arg("spatial_resolution") = 0.3,
     py::arg("spatial_graph_mix") = false,
     py::arg("spatial_constraint_mode") = 0,
+    py::arg("spatial_coordinate_mode") = 0,
     py::arg("classifier") = "knn", py::arg("backend") = "cpu",
     py::arg("graph_feature_mode") = "laplacian_self_tuning",
     py::arg("graph_feature_components") = 0,
@@ -1575,6 +1760,21 @@ PYBIND11_MODULE(_core, m) {
     py::arg("power") = -1
   );
   m.def(
+    "rsvd", &rsvd,
+    py::arg("data"), py::arg("ncomp") = 2, py::arg("center") = true,
+    py::arg("scale") = false, py::arg("backend") = "cpu",
+    py::arg("seed") = 4, py::arg("n_threads") = 1,
+    py::arg("gpu_device") = 0, py::arg("oversample") = -1,
+    py::arg("power") = -1
+  );
+  m.def(
+    "pls", &pls,
+    py::arg("data"), py::arg("response"), py::arg("ncomp") = 2,
+    py::arg("center") = true, py::arg("scale") = true,
+    py::arg("backend") = "cpu", py::arg("n_threads") = 1,
+    py::arg("gpu_device") = 0
+  );
+  m.def(
     "normalization", &normalization,
     py::arg("train"), py::arg("test") = py::none(), py::arg("method") = "pqn",
     py::arg("reference") = py::none(), py::arg("backend") = "cpu",
@@ -1584,6 +1784,18 @@ PYBIND11_MODULE(_core, m) {
     "scaling", &scaling,
     py::arg("train"), py::arg("test") = py::none(), py::arg("method") = "autoscaling",
     py::arg("backend") = "cpu", py::arg("n_threads") = 1, py::arg("gpu_device") = 0
+  );
+  m.def(
+    "spatial_features", &spatial_features,
+    py::arg("data"), py::arg("spatial"), py::arg("samples") = py::none(),
+    py::arg("n_threads") = 4,
+    py::arg("require_nonzero_each_sample") = true
+  );
+  m.def(
+    "passing_message", &passing_message,
+    py::arg("data"), py::arg("spatial"), py::arg("samples") = py::none(),
+    py::arg("number_knn") = 15, py::arg("backend") = "cpu",
+    py::arg("n_threads") = 4, py::arg("gpu_device") = 0
   );
   m.def(
     "visual_init",

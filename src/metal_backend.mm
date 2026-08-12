@@ -43,7 +43,7 @@ constexpr int kMaximumMetalLists = 1024;
 constexpr int kMaximumMetalProbe = 128;
 constexpr int kMetalProjectionDimension = 128;
 
-const char* kMetalSource = R"METAL(
+const char* kMetalSourcePart1 = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -1074,6 +1074,10 @@ kernel void apply_constrained_majority(
     uint row [[thread_position_in_grid]]) {
   if (row < params.samples) labels[row] = group_labels[groups[row]];
 }
+
+)METAL";
+
+const char* kMetalSourcePart2 = R"METAL(
 
 kernel void kodama_dissimilarity_resident(
     device int* indices [[buffer(0)]],
@@ -2448,8 +2452,10 @@ MetalState& metal_state() {
       MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
       options.fastMathEnabled = YES;
       NSError* error = nil;
+      const std::string metal_source =
+        std::string(kMetalSourcePart1) + kMetalSourcePart2;
       state.library = [state.device
-        newLibraryWithSource:[NSString stringWithUTF8String:kMetalSource]
+        newLibraryWithSource:[NSString stringWithUTF8String:metal_source.c_str()]
         options:options
         error:&error];
       if (state.library == nil) throw metal_error("Failed to compile KODAMA Metal kernels", error);

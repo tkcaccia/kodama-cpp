@@ -17,6 +17,19 @@ SIMPLS/LDA implementation are separately relicensed under MIT by Stefano
 Cacciatore for this repository. This permission covers only material whose
 copyright he owns; package and publication coauthors remain credited.
 
+`src/passing_message.cpp` reproduces the mathematics of the
+maintainer-authored `passing.message` function in `tkcaccia/KODAMAextra` and
+replaces its R-level nearest-neighbor call and accumulation loops with the
+package-owned exact grid search and float32 C++ kernels. KODAMAextra remains
+credited as the source lineage; this preprocessing operation is not claimed as
+a new method.
+
+`src/spatial_features.cpp`, `src/spatial_features_cuda.cu`, and
+`src/spatial_features_metal.mm` are original MIT-licensed implementations of a
+low-rank spatial covariance screening method. No SPARK or SPARK-X source code
+is included or linked. SPARK-X is used only as an external benchmark and is
+credited in the method documentation and benchmark report.
+
 The native visualization, CPU HNSW, and Metal implementation were adapted
 from the MIT-licensed `fastEmbedR` snapshot
 `814350a5ca69b0c26e6df40377636f109055f84b`. The exact 2D/3D grid search was

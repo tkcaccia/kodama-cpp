@@ -1,0 +1,45 @@
+Package: KODAMA
+Title: Knowledge Discovery by Accuracy Maximization
+Version: 0.99.0
+Authors@R: c(
+    person("Stefano", "Cacciatore", role = c("aut", "cre"),
+           email = "stefano.cacciatore@icgeb.org")
+  )
+Author: Stefano Cacciatore [aut, cre]
+Maintainer: Stefano Cacciatore <stefano.cacciatore@icgeb.org>
+Description: Knowledge Discovery by Accuracy Maximization using KNN or
+    SIMPLS followed by latent-space LDA. The portable source package vendors
+    the MIT-licensed CPU implementation from the standalone 'kodama-cpp'
+    library. Optional developer builds can link the same public interface to
+    NVIDIA CUDA or Apple Metal backends. Reusable nearest-neighbor graphs,
+    graph-aware visualization, preprocessing, and adapters for common
+    single-cell containers are provided.
+License: MIT + file LICENSE
+Depends:
+    R (>= 4.4.0)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+LinkingTo: Rcpp
+Imports:
+    methods,
+    Rcpp,
+    stats
+Suggests:
+    BiocStyle,
+    knitr,
+    rmarkdown,
+    S4Vectors,
+    Seurat,
+    SeuratObject,
+    SingleCellExperiment,
+    SpatialExperiment,
+    SummarizedExperiment,
+    testthat (>= 3.0.0)
+VignetteBuilder: knitr
+biocViews: Software, Classification, Clustering, DimensionReduction,
+    Visualization, SingleCell, Spatial
+Config/testthat/edition: 3
+SystemRequirements: C++17
+URL: https://github.com/tkcaccia/KODAMA
+BugReports: https://github.com/tkcaccia/KODAMA/issues
+Config/roxygen2/version: 8.0.0

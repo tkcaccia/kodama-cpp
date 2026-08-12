@@ -928,6 +928,174 @@ void test_preprocessing() {
   }
 }
 
+void test_general_pls_and_rsvd() {
+  constexpr int n = 48;
+  constexpr int p = 6;
+  constexpr int q = 2;
+  std::vector<float> x(static_cast<std::size_t>(n) * p);
+  std::vector<float> y(static_cast<std::size_t>(n) * q);
+  for (int row = 0; row < n; ++row) {
+    for (int col = 0; col < p; ++col) {
+      x[static_cast<std::size_t>(row) * p + col] =
+        std::sin(0.13f * static_cast<float>((row + 1) * (col + 1))) + 0.05f * col;
+    }
+    y[static_cast<std::size_t>(row) * q] =
+      1.5f * x[static_cast<std::size_t>(row) * p] -
+      0.4f * x[static_cast<std::size_t>(row) * p + 2];
+    y[static_cast<std::size_t>(row) * q + 1] =
+      -0.7f * x[static_cast<std::size_t>(row) * p + 1] +
+      0.8f * x[static_cast<std::size_t>(row) * p + 4];
+  }
+  const kodama::MatrixView xv{x.data(), n, p};
+  const kodama::MatrixView yv{y.data(), n, q};
+  kodama::PLSOptions pls;
+  pls.max_components = 4;
+  pls.fixed_components = 4;
+  pls.backend = kodama::Backend::CPU;
+  const kodama::PLSFitResult fit = kodama::PLS(xv, yv, pls);
+  require(fit.samples == n && fit.predictors == p && fit.responses == q,
+          "General PLS dimensions are incorrect.");
+  require(fit.components >= 1 && fit.components <= 4,
+          "General PLS component count is incorrect.");
+  require(fit.weights.size() == static_cast<std::size_t>(p * fit.components),
+          "General PLS weights size is incorrect.");
+  require(fit.scores.size() == static_cast<std::size_t>(n * fit.components),
+          "General PLS scores size is incorrect.");
+  require(fit.fitted.size() == y.size(), "General PLS fitted size is incorrect.");
+  for (float value : fit.fitted) require(std::isfinite(value), "General PLS fitted value is not finite.");
+
+  kodama::PCAOptions svd;
+  svd.n_components = 3;
+  svd.backend = kodama::Backend::CPU;
+  const kodama::PCAResult decomposition = kodama::RSVD(xv, svd);
+  require(decomposition.scores.size() == static_cast<std::size_t>(n * 3),
+          "RSVD score size is incorrect.");
+  require(decomposition.loadings.size() == static_cast<std::size_t>(p * 3),
+          "RSVD loading size is incorrect.");
+}
+
+std::vector<float> passing_message_reference(
+  const std::vector<float>& data,
+  const int rows,
+  const int variables,
+  const std::vector<float>& spatial,
+  const int spatial_dimensions,
+  const std::vector<int>& samples,
+  const int neighbors
+) {
+  std::vector<float> output(static_cast<std::size_t>(rows * variables), 0.0f);
+  std::map<int, std::vector<int>> groups;
+  for (int row = 0; row < rows; ++row) {
+    groups[samples.empty() ? 0 : samples[static_cast<std::size_t>(row)]].push_back(row);
+  }
+  for (const auto& entry : groups) {
+    const std::vector<int>& group = entry.second;
+    std::vector<std::vector<std::pair<float, int>>> nearest(group.size());
+    float max_distance = 0.0f;
+    for (std::size_t local_row = 0; local_row < group.size(); ++local_row) {
+      for (std::size_t local_other = 0; local_other < group.size(); ++local_other) {
+        float squared = 0.0f;
+        for (int dimension = 0; dimension < spatial_dimensions; ++dimension) {
+          const float difference =
+            spatial[static_cast<std::size_t>(group[local_row] * spatial_dimensions + dimension)] -
+            spatial[static_cast<std::size_t>(group[local_other] * spatial_dimensions + dimension)];
+          squared += difference * difference;
+        }
+        nearest[local_row].emplace_back(squared, static_cast<int>(local_other));
+      }
+      std::sort(nearest[local_row].begin(), nearest[local_row].end());
+      nearest[local_row].resize(static_cast<std::size_t>(neighbors));
+      for (const auto& candidate : nearest[local_row]) {
+        max_distance = std::max(max_distance, std::sqrt(candidate.first));
+      }
+    }
+    for (std::size_t local_row = 0; local_row < group.size(); ++local_row) {
+      const int output_row = group[local_row];
+      for (const auto& candidate : nearest[local_row]) {
+        const int input_row = group[static_cast<std::size_t>(candidate.second)];
+        const float distance = std::sqrt(candidate.first);
+        const float weight = std::exp(-(max_distance > 0.0f ? distance / max_distance : 0.0f));
+        for (int variable = 0; variable < variables; ++variable) {
+          output[static_cast<std::size_t>(output_row * variables + variable)] +=
+            data[static_cast<std::size_t>(input_row * variables + variable)] * weight;
+        }
+      }
+    }
+  }
+  return output;
+}
+
+void test_passing_message() {
+  const int rows = 8;
+  const int variables = 3;
+  const std::vector<float> data = {
+    1, 2, 3, 2, 1, 4, 4, 2, 1, 8, 1, 2,
+    10, 20, 30, 20, 10, 40, 40, 20, 10, 80, 10, 20
+  };
+  // The two slides deliberately reuse identical coordinates. A global search
+  // would mix their expression values and fail this regression.
+  const std::vector<float> spatial = {
+    0, 0, 1, 0, 3, 0, 7, 0,
+    0, 0, 1, 0, 3, 0, 7, 0
+  };
+  const std::vector<int> samples = {11, 11, 11, 11, 29, 29, 29, 29};
+  const auto expected = passing_message_reference(
+    data, rows, variables, spatial, 2, samples, 3
+  );
+
+  kodama::PassingMessageOptions one;
+  one.neighbors = 3;
+  one.n_threads = 1;
+  kodama::PassingMessageOptions four = one;
+  four.n_threads = 4;
+  const auto serial = kodama::PassingMessage_CPU(
+    kodama::MatrixView{data.data(), rows, variables},
+    kodama::MatrixView{spatial.data(), rows, 2}, samples, one
+  );
+  const auto parallel = kodama::PassingMessage_CPU(
+    kodama::MatrixView{data.data(), rows, variables},
+    kodama::MatrixView{spatial.data(), rows, 2}, samples, four
+  );
+  require_close(serial.values, expected, 2e-6f,
+    "PassingMessage disagrees with the KODAMAextra formula.");
+  require_close(parallel.values, serial.values, 0.0f,
+    "PassingMessage changed across CPU thread counts.");
+  require(serial.sample_groups == 2 && serial.sample_max_distances.size() == 2,
+    "PassingMessage sample isolation metadata is incorrect.");
+  require(serial.backend == kodama::Backend::CPU && serial.graph_seconds >= 0.0 &&
+          serial.aggregation_seconds >= 0.0 && serial.runtime_seconds >= 0.0,
+    "PassingMessage timing/backend metadata is incorrect.");
+
+  kodama::PassingMessageOptions self_options;
+  self_options.neighbors = 1;
+  const auto self = kodama::PassingMessage_CPU(
+    kodama::MatrixView{data.data(), rows, variables},
+    kodama::MatrixView{spatial.data(), rows, 2}, samples, self_options
+  );
+  require_close(self.values, data, 0.0f,
+    "PassingMessage k=1 no longer preserves the self-neighbor expression.");
+
+#if defined(KODAMA_ENABLE_CUDA)
+  kodama::PassingMessageOptions cuda_options = four;
+  cuda_options.backend = kodama::Backend::CUDA;
+  const auto cuda = kodama::PassingMessage_CUDA(
+    kodama::MatrixView{data.data(), rows, variables},
+    kodama::MatrixView{spatial.data(), rows, 2}, samples, cuda_options
+  );
+  require_close(cuda.values, serial.values, 2e-6f,
+    "PassingMessage CUDA grid search disagrees with CPU.");
+#endif
+
+  require_throws<std::invalid_argument>([&] {
+    kodama::PassingMessageOptions too_many = one;
+    too_many.neighbors = 5;
+    (void)kodama::PassingMessage_CPU(
+      kodama::MatrixView{data.data(), rows, variables},
+      kodama::MatrixView{spatial.data(), rows, 2}, samples, too_many
+    );
+  }, "PassingMessage accepted a slide smaller than its requested neighbor count.");
+}
+
 double exact_graph_recall(
   const kodama::NeighborGraph& graph,
   const std::vector<float>& data,
@@ -1261,6 +1429,47 @@ void check_spatial_grid_graph() {
     }
   }
 
+  {
+    constexpr int rows = 240;
+    constexpr int variables = 32;
+    std::vector<float> spatial(static_cast<std::size_t>(rows * 2));
+    std::vector<float> expression(static_cast<std::size_t>(rows * variables));
+    std::vector<int> slides(static_cast<std::size_t>(rows));
+    std::mt19937 rng(91);
+    std::normal_distribution<float> noise(0.0f, 1.0f);
+    for (int row = 0; row < rows; ++row) {
+      const int local = row % 120;
+      const float x_coordinate = static_cast<float>(local % 12);
+      const float y_coordinate = static_cast<float>(local / 12);
+      spatial[static_cast<std::size_t>(row * 2)] = x_coordinate;
+      spatial[static_cast<std::size_t>(row * 2 + 1)] = y_coordinate;
+      slides[static_cast<std::size_t>(row)] = row / 120;
+      expression[static_cast<std::size_t>(row * variables)] =
+        x_coordinate + 0.15f * noise(rng);
+      expression[static_cast<std::size_t>(row * variables + 1)] =
+        std::sin(0.45f * x_coordinate) + std::cos(0.55f * y_coordinate) +
+        0.15f * noise(rng);
+      for (int variable = 2; variable < variables; ++variable) {
+        expression[static_cast<std::size_t>(row * variables + variable)] = noise(rng);
+      }
+    }
+    kodama::SpatialFeatureOptions options;
+    options.n_threads = 4;
+    const kodama::SpatialFeatureResult spatial_cpu = kodama::SpatialFeatureSelection_CPU(
+      kodama::MatrixView(expression.data(), rows, variables),
+      kodama::MatrixView(spatial.data(), rows, 2), slides, options
+    );
+    require(spatial_cpu.ranking.size() == variables,
+            "Spatial feature ranking size mismatch.");
+    require(spatial_cpu.ranking[0] < 2 && spatial_cpu.ranking[1] < 2,
+            "Spatial feature screening did not recover the two spatial signals.");
+    require(spatial_cpu.p_value[0] < 1.0e-4 && spatial_cpu.p_value[1] < 1.0e-4,
+            "Spatial feature screening produced weak signal p-values.");
+
+    require(spatial_cpu.backend == kodama::Backend::CPU,
+            "Spatial feature screening must report the CPU backend.");
+  }
+
 #if defined(KODAMA_ENABLE_CUDA)
   kodama::GraphClusterOptions cuda_options = options;
   cuda_options.backend = kodama::Backend::CUDA;
@@ -1528,6 +1737,8 @@ int main() {
   test_public_string_contracts();
   test_public_error_contracts();
   test_preprocessing();
+  test_general_pls_and_rsvd();
+  test_passing_message();
   check_parallel_hnsw_graph();
   check_graph_cluster_contracts();
   check_spatial_grid_graph();
@@ -2233,6 +2444,48 @@ int main() {
     km_spatial_options
   );
   require(km_spatial_repeat.res == km_spatial_res.res, "Spatial landmark sampling is not repeatable for a fixed seed.");
+  kodama::KODAMAMatrixOptions km_population_options = km_spatial_options;
+  km_population_options.spatial_coordinate_mode =
+    kodama::SpatialCoordinateMode::Population;
+  for (int row = 0; row < d.n; ++row) {
+    const int location = row % 6;
+    km_population_options.spatial[static_cast<std::size_t>(row) * 2u] =
+      static_cast<float>(location % 3);
+    km_population_options.spatial[static_cast<std::size_t>(row) * 2u + 1u] =
+      static_cast<float>(location / 3);
+  }
+  const kodama::KODAMAMatrixResult km_population_res =
+    kodama::KODAMAMatrix_CPU(
+      fview, std::vector<int>(), std::vector<int>(), fixed,
+      km_population_options);
+  const kodama::KODAMAMatrixResult km_population_repeat =
+    kodama::KODAMAMatrix_CPU(
+      fview, std::vector<int>(), std::vector<int>(), fixed,
+      km_population_options);
+  require(
+    km_population_res.res == km_population_repeat.res &&
+      km_population_res.res_constrain == km_population_repeat.res_constrain,
+    "Population coordinate regularization is not repeatable for a fixed seed."
+  );
+  require(
+    km_population_res.effective_landmarks == km_population_options.landmarks,
+    "Population coordinate regularization changed landmark selection semantics."
+  );
+  require_throws<std::invalid_argument>([&]() {
+    kodama::KODAMAMatrixOptions missing = km_population_options;
+    missing.spatial.clear();
+    missing.spatial_cols = 0;
+    (void)kodama::KODAMAMatrix_CPU(
+      fview, std::vector<int>(), std::vector<int>(), fixed, missing);
+  }, "Population spatial mode accepted missing coordinates.");
+  require_throws<std::invalid_argument>([&]() {
+    kodama::KODAMAMatrixOptions three_dimensional = km_population_options;
+    three_dimensional.spatial_cols = 3;
+    three_dimensional.spatial.assign(static_cast<std::size_t>(d.n) * 3u, 0.0f);
+    (void)kodama::KODAMAMatrix_CPU(
+      fview, std::vector<int>(), std::vector<int>(), fixed,
+      three_dimensional);
+  }, "Population spatial mode accepted coordinates other than latitude/longitude.");
   kodama::KODAMAMatrixOptions km_multislide_options = km_spatial_options;
   km_multislide_options.samples.resize(static_cast<std::size_t>(d.n));
   for (int row = 0; row < d.n; ++row) {

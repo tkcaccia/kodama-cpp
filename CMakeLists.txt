@@ -31,9 +31,11 @@ add_library(kodama_cpp
   src/knncv.cpp
   src/native_knn.cpp
   src/pca.cpp
+  src/passing_message.cpp
   src/preprocessing.cpp
   src/plscv.cpp
   src/resident_ivf.cpp
+  src/spatial_features.cpp
   src/visualization.cpp
 )
 

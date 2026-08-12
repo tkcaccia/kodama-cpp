@@ -10,6 +10,154 @@ import pytest
 import kodama
 
 
+class _Frame(dict):
+    pass
+
+
+class _FakeAnnData:
+    def __init__(self, x, spatial):
+        self.X = x
+        self.obs = _Frame(sample=np.repeat(["a", "b"], x.shape[0] // 2))
+        self.var = _Frame()
+        self.obsm = {"spatial": spatial}
+        self.obsp = {}
+        self.uns = {}
+        self.layers = {}
+
+    def copy(self):
+        import copy
+        return copy.deepcopy(self)
+
+
+class _FakeSpatialData:
+    def __init__(self, table):
+        self.tables = {"table": table}
+
+    def copy(self):
+        return _FakeSpatialData(self.tables["table"].copy())
+
+
+class _FakeCSR:
+    def __init__(self, dense):
+        dense = np.asarray(dense)
+        self.shape = dense.shape
+        self.indptr = [0]
+        self.indices = []
+        self.data = []
+        for row in dense:
+            columns = np.flatnonzero(row)
+            self.indices.extend(columns.tolist())
+            self.data.extend(row[columns].tolist())
+            self.indptr.append(len(self.indices))
+        self.indptr = np.asarray(self.indptr, dtype=np.int32)
+        self.indices = np.asarray(self.indices, dtype=np.int32)
+        self.data = np.asarray(self.data, dtype=np.float32)
+
+    def tocsr(self):
+        return self
+
+
+def test_anndata_spatialdata_and_squidpy_adapters():
+    rng = np.random.default_rng(71)
+    x = rng.normal(size=(40, 5)).astype(np.float32)
+    spatial = rng.normal(size=(40, 2)).astype(np.float32)
+    adata = _FakeAnnData(x, spatial)
+
+    graph = kodama.RunKODAMAgraph(
+        adata, sample_key="sample", k=8, backend="cpu", n_cores=1,
+        storage="matrix"
+    )
+    assert graph["indices"].shape == (40, 8)
+    assert adata.uns["kodama_graph"] is graph
+
+    result = kodama.RunKODAMAmatrix(
+        adata, sample_key="sample", M=1, Tcycle=1, landmarks=30,
+        splitting=5, graph_neighbors=8, knn_k=3, classifier="knn",
+        backend="cpu", n_cores=1, visual_init=False, progress=False,
+    )
+    assert result.best_labels.shape == (40,)
+    assert len(adata.obs["kodama_labels"]) == 40
+
+    embedding = kodama.RunKODAMAvisualization(
+        adata, method="UMAP", k=5, n_epochs=2, backend="cpu", n_cores=1
+    )
+    assert embedding.shape == (40, 2)
+    assert adata.obsm["X_kodama_umap"].dtype == np.float32
+
+    selected = kodama.RunSpatialFeatureSelection(
+        adata, sample_key="sample", n_cores=1
+    )
+    assert selected["score"].shape == (5,)
+    assert len(adata.var["kodama_spatial_features_score"]) == 5
+
+    sdata = _FakeSpatialData(adata)
+    copied = kodama.RunKODAMAgraph(
+        sdata, table_key="table", sample_key="sample", k=5,
+        backend="cpu", n_cores=1, copy=True, storage="matrix"
+    )
+    assert copied is not sdata
+    assert "kodama_graph" in copied.tables["table"].uns
+
+    adjacency = np.zeros((40, 40), dtype=np.float32)
+    for row in range(40):
+        adjacency[row, (row + 1) % 40] = 0.8
+        adjacency[row, (row + 2) % 40] = 0.4
+    adata.obsp["spatial_connectivities"] = _FakeCSR(adjacency)
+    squidpy_graph = kodama.graph_from_anndata(adata, k=2)
+    assert squidpy_graph["key"] == "spatial_connectivities"
+    assert squidpy_graph["indices"].shape == (40, 2)
+    assert np.all(np.isfinite(squidpy_graph["distances"]))
+
+
+def test_passing_message_python_binding():
+    rng = np.random.default_rng(73)
+    x = rng.normal(size=(24, 4)).astype(np.float32)
+    spatial = rng.normal(size=(24, 2)).astype(np.float32)
+    samples = np.repeat(["a", "b"], 12)
+    result = kodama.passing_message(
+        x, spatial, samples=samples, number_knn=5,
+        backend="cpu", n_cores=2
+    )
+    assert result["values"].shape == x.shape
+    assert result["backend"] == "cpu"
+    assert result["precision"] == "float32"
+
+
+def test_general_pls_and_rsvd_python_api():
+    rng = np.random.default_rng(79)
+    x = rng.normal(size=(64, 7)).astype(np.float32)
+    y = np.column_stack((1.2 * x[:, 0] - 0.4 * x[:, 2], x[:, 3] + x[:, 5])).astype(np.float32)
+    fit = kodama.pls(x, y, ncomp=4, backend="cpu", n_cores=2)
+    assert fit["weights"].shape == (7, 4)
+    assert fit["response_loadings"].shape == (2, 4)
+    assert fit["scores"].shape == (64, 4)
+    assert fit["coefficients"].shape == (7, 2)
+    assert fit["fitted"].shape == y.shape
+    assert fit["precision"] == "float32"
+    assert np.all(np.isfinite(fit["fitted"]))
+
+    decomposition = kodama.rsvd(x, ncomp=3, backend="cpu", seed=4)
+    assert decomposition["scores"].shape == (64, 3)
+    assert decomposition["loadings"].shape == (7, 3)
+    assert decomposition["precision"] == "float32"
+
+
+def test_first_class_umap_and_opentsne_aliases():
+    rng = np.random.default_rng(83)
+    x = rng.normal(size=(45, 5)).astype(np.float32)
+    umap = kodama.umap(
+        x, k=5, n_epochs=2, backend="cpu", n_cores=1, seed=4
+    )
+    tsne = kodama.opentsne(
+        x, k=5, perplexity=2, early_exaggeration_iter=1,
+        n_iter=2, backend="cpu", n_cores=1, seed=4
+    )
+    assert umap.shape == (45, 2)
+    assert tsne.shape == (45, 2)
+    assert np.all(np.isfinite(umap))
+    assert np.all(np.isfinite(tsne))
+
+
 def test_samples_reproduces_original_spatial_separation():
     rng = np.random.default_rng(11)
     x = rng.normal(size=(24, 4)).astype(np.float32)
@@ -520,6 +668,7 @@ def test_python_signatures_mirror_r_api():
         "spatial_resolution",
         "spatial_graph_mix",
         "spatial_constraint_mode",
+        "spatial_mode",
         "metric",
         "classifier",
         "backend",
@@ -533,6 +682,7 @@ def test_python_signatures_mirror_r_api():
     assert "_evolution_policy" not in matrix_signature.parameters
     assert matrix_signature.parameters["spatial_resolution"].default == 0.4
     assert matrix_signature.parameters["spatial_constraint_mode"].default == "kmeans"
+    assert matrix_signature.parameters["spatial_mode"].default == "standard"
     assert matrix_signature.parameters["return_graph"].default is False
     assert "n_cores" in matrix_signature.parameters
     assert "n_threads" not in matrix_signature.parameters
@@ -559,6 +709,7 @@ def test_python_signatures_mirror_r_api():
         "spatial_resolution",
         "spatial_graph_mix",
         "spatial_constraint_mode",
+        "spatial_mode",
         "classifier",
         "backend",
         "graph_feature_mode",
@@ -574,6 +725,7 @@ def test_python_signatures_mirror_r_api():
     assert "_evolution_policy" not in graph_signature.parameters
     assert graph_signature.parameters["spatial_resolution"].default == 0.4
     assert graph_signature.parameters["spatial_constraint_mode"].default == "kmeans"
+    assert graph_signature.parameters["spatial_mode"].default == "standard"
     assert graph_signature.parameters["return_graph"].default is False
     assert "n_cores" in graph_signature.parameters
 
@@ -662,10 +814,82 @@ def test_python_high_level_validation_matches_r_choices():
             spatial_constraint_mode=0,
             progress=False,
         )
+    with pytest.raises(ValueError, match="spatial_mode"):
+        kodama.matrix(
+            x,
+            M=1,
+            Tcycle=1,
+            spatial_mode="invalid",
+            progress=False,
+        )
     with pytest.raises(ValueError, match="method"):
         kodama.visualization(x, method="umap")
     with pytest.raises(TypeError):
         kodama.KNNCV(x, labels, n_threads=1)
+
+
+def test_population_spatial_mode_handles_repeated_coordinates():
+    rng = np.random.default_rng(31)
+    x = rng.normal(size=(60, 5)).astype(np.float32)
+    locations = np.array(
+        [[0, 0], [1, 0], [2, 0], [0, 1], [1, 1], [2, 1]],
+        dtype=np.float32,
+    )
+    spatial = locations[np.arange(x.shape[0]) % locations.shape[0]]
+    first = kodama.matrix(
+        x,
+        spatial=spatial,
+        spatial_mode="population",
+        M=1,
+        Tcycle=1,
+        landmarks=40,
+        splitting=6,
+        graph_neighbors=12,
+        knn_k=5,
+        seed=31,
+        visual_init=False,
+        progress=False,
+    )
+    second = kodama.matrix(
+        x,
+        spatial=spatial,
+        spatial_mode="population",
+        M=1,
+        Tcycle=1,
+        landmarks=40,
+        splitting=6,
+        graph_neighbors=12,
+        knn_k=5,
+        seed=31,
+        visual_init=False,
+        progress=False,
+    )
+    assert first["parameters"]["spatial_mode"] == "population"
+    np.testing.assert_array_equal(first["res"], second["res"])
+
+
+def test_spatial_feature_selection_recovers_multislide_signals():
+    signature = inspect.signature(kodama.spatial_feature_selection)
+    assert "backend" not in signature.parameters
+    assert "gpu_device" not in signature.parameters
+    rng = np.random.default_rng(2026)
+    n_per_slide = 120
+    spatial = np.vstack([
+        np.column_stack((np.linspace(0, 1, n_per_slide), np.zeros(n_per_slide))),
+        np.column_stack((np.linspace(0, 1, n_per_slide), np.ones(n_per_slide))),
+    ]).astype(np.float32)
+    data = rng.normal(size=(2 * n_per_slide, 24)).astype(np.float32)
+    data[:, 0] = spatial[:, 0]
+    data[:, 1] = np.sin(3.0 * spatial[:, 0]).astype(np.float32)
+    result = kodama.spatial_feature_selection(
+        data, spatial, samples=np.repeat(["a", "b"], n_per_slide),
+        n_cores=2,
+    )
+    assert set(result["ranking"][:2]) == {0, 1}
+    assert np.all(result["p_value"][:2] < 1e-4)
+    assert result["per_sample_score"].shape == (2, 24)
+    assert result["backend"] == "cpu"
+    assert result["precision"] == "float32"
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="Metal requires macOS")

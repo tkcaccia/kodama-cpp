@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+PKG_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MAKEVARS="$PKG_DIR/src/Makevars"
+MAKEVARS_WIN="$PKG_DIR/src/Makevars.win"
+
+# Portable release mode: compile the vendored MIT-licensed CPU core. This is
+# the default used by CRAN and Bioconductor builders and needs no system KODAMA
+# installation. Developers may opt into an externally built CUDA/Metal core by
+# setting both KODAMA_CPP_ROOT and KODAMA_CPP_BUILD_DIR.
+if [ -z "${KODAMA_CPP_ROOT:-}" ]; then
+  cat > "$MAKEVARS" <<'EOF'
+CXX_STD = CXX17
+PKG_CPPFLAGS = -I../inst/include -DKODAMA_DISABLE_NATIVE_PROGRESS
+PKG_LIBS = $(KODAMA_R_OPENMP_LIBS)
+EOF
+  cat > "$MAKEVARS_WIN" <<'EOF'
+CXX_STD = CXX17
+PKG_CPPFLAGS = -I../inst/include -DKODAMA_DISABLE_NATIVE_PROGRESS
+EOF
+  exit 0
+fi
+
+: "${KODAMA_CPP_BUILD_DIR:=$KODAMA_CPP_ROOT/build}"
+if [ ! -f "$KODAMA_CPP_ROOT/include/kodama/kodama.hpp" ]; then
+  echo "KODAMA_CPP_ROOT does not contain include/kodama/kodama.hpp." >&2
+  exit 1
+fi
+
+KODAMA_CPP_LIB=
+for candidate in \
+  "$KODAMA_CPP_BUILD_DIR/libkodama_cpp.a" \
+  "$KODAMA_CPP_BUILD_DIR/libkodama_cpp.dylib" \
+  "$KODAMA_CPP_BUILD_DIR/libkodama_cpp.so"; do
+  if [ -f "$candidate" ]; then
+    KODAMA_CPP_LIB="$candidate"
+    break
+  fi
+done
+if [ -z "$KODAMA_CPP_LIB" ]; then
+  echo "Cannot find libkodama_cpp in $KODAMA_CPP_BUILD_DIR." >&2
+  exit 1
+fi
+
+SYSTEM_NAME=$(uname -s 2>/dev/null || echo unknown)
+PKG_LIBS_VALUE="\"$KODAMA_CPP_LIB\""
+if [ "$SYSTEM_NAME" = "Darwin" ]; then
+  PKG_LIBS_VALUE="$PKG_LIBS_VALUE -framework Metal -framework MetalPerformanceShaders -framework Foundation"
+  if [ -f /opt/homebrew/opt/libomp/lib/libomp.dylib ]; then
+    PKG_LIBS_VALUE="$PKG_LIBS_VALUE /opt/homebrew/opt/libomp/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
+  fi
+else
+  for directory in \
+    "${CONDA_PREFIX:-}/lib" \
+    "${CONDA_PREFIX:-}/targets/x86_64-linux/lib" \
+    /usr/local/cuda/lib64 \
+    /usr/local/cuda-13.0/targets/x86_64-linux/lib; do
+    if [ -n "$directory" ] && [ -d "$directory" ]; then
+      PKG_LIBS_VALUE="$PKG_LIBS_VALUE -L\"$directory\" -Wl,-rpath,\"$directory\""
+    fi
+  done
+  PKG_LIBS_VALUE="$PKG_LIBS_VALUE ${KODAMA_R_CUDA_LIBS:-} ${KODAMA_R_OPENMP_LIBS:--lgomp}"
+fi
+
+# Do not compile the vendored core when an external archive is selected.
+VENDORED_OBJECTS='common.o core.o graph_cluster.o kodama_matrix.o knncv.o native_knn.o pca.o passing_message.o preprocessing.o plscv.o resident_ivf.o spatial_features.o visualization.o metal_backend_stub.o'
+cat > "$MAKEVARS" <<EOF
+CXX_STD = CXX17
+PKG_CPPFLAGS = -I"$KODAMA_CPP_ROOT/include"
+OBJECTS = RcppExports.o kodama_r.o
+PKG_LIBS = $PKG_LIBS_VALUE
+EOF
+cat > "$MAKEVARS_WIN" <<EOF
+CXX_STD = CXX17
+PKG_CPPFLAGS = -I"$KODAMA_CPP_ROOT/include"
+OBJECTS = RcppExports.o kodama_r.o
+PKG_LIBS = "$KODAMA_CPP_LIB"
+EOF
+
+rm -f "$PKG_DIR/src/.kodama-core.signature"

@@ -51,6 +51,8 @@ The public library also provides:
 - randomized PCA with float32 data and CPU, CUDA, and Metal entry points;
 - KODAMA-compatible float32 normalization and scaling with CPU, CUDA, and
   Metal entry points;
+- KODAMAextra-compatible spatial message passing with exact 2D/3D grid search,
+  deterministic ties, and independent sample/slide processing;
 - KNN graph construction, UMAP, openTSNE, and random-walk clustering;
 - thin R and Python bindings to the same C++ implementation.
 
@@ -98,8 +100,9 @@ OpenMP is optional. It defaults to off on macOS and on elsewhere; set
 
 ## Install the R wrapper
 
-The R package is named `kodamaR`. It compiles a small Rcpp bridge and links it
-to the `kodama-cpp` library built above.
+The R package is named `KODAMA`. Its source package contains a synchronized,
+MIT-licensed copy of the portable CPU core, so ordinary users do not need to
+build or install `kodama-cpp` separately.
 
 Install the R dependencies:
 
@@ -113,25 +116,16 @@ On macOS, install the build tools and OpenMP runtime first when needed:
 brew install cmake libomp
 ```
 
-From the `kodama-cpp` repository root, build the CPU core and install the
-embedded wrapper:
+From the `kodama-cpp` development repository, install the embedded wrapper:
 
 ```sh
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DKODAMA_ENABLE_CUDA=OFF \
-  -DKODAMA_ENABLE_METAL=OFF
-cmake --build build -j
-
-KODAMA_CPP_ROOT="$PWD" \
-KODAMA_CPP_BUILD_DIR="$PWD/build" \
-R CMD INSTALL split-repos/kodama-r
+R CMD INSTALL split-repos/KODAMA
 ```
 
 Verify the linked package:
 
 ```r
-library(kodamaR)
+library(KODAMA)
 KODAMA.diagnostics()
 ```
 
@@ -141,7 +135,7 @@ This example intentionally uses small `M` and `Tcycle` values so it finishes
 quickly as an installation test:
 
 ```r
-library(kodamaR)
+library(KODAMA)
 
 set.seed(1)
 x <- do.call(rbind, lapply(c(-2.5, 0, 2.5), function(mu) {
@@ -227,6 +221,16 @@ implementation. Spatial landmark strata, singleton repair, and final constraint
 IDs are additionally keyed by `samples`; consequently, no optimization block
 can contain rows from different slides. The transform and hard boundary are
 shared by CPU, CUDA, and Metal.
+
+For population-genetic data in which many individuals share one collection
+latitude/longitude, use `spatial.mode = "population"` in R or
+`spatial_mode="population"` in Python. Each independent `M` run applies the
+classic harmonic attraction/repulsion and within/between-location
+equalization before spatial constraint clustering. The default standard path
+is unchanged. A genetics-only run without spatial input should be retained as
+the primary control so geography does not define genetic structure by
+construction.
+
 `KODAMA.matrix()` reserves `data` for raw features and `graph` for a prepared
 object or bare `indices`/`distances` graph. Either argument can be supplied
 alone, or both can be supplied together. For graph-only PLS-LDA, self-tuning
@@ -295,15 +299,25 @@ fit_pls <- KODAMA.matrix(
 | Run complete KODAMA | `KODAMA.matrix()` |
 | Run KODAMA from KNN indices and distances | `KODAMA.matrix.graph()` |
 | Compute float32 PCA | `KODAMA.pca()` |
+| Apply spatial message passing | `passing.message()` |
+| Rank spatially variable features across slides | `spatial_feature_selection()` |
 | Build a reusable graph plus PCA starts | `KODAMA.graph()`, `makeSNNGraph()` |
 | Compute UMAP or openTSNE | `KODAMA.visualization()` |
 | Cluster a graph or embedding | `KODAMA.clustering()` |
 | Inspect runtime by step | `KODAMA.timing()` |
 
-Inside R, run `help(package = "kodamaR")` or open the help for a specific
+Inside R, run `help(package = "KODAMA")` or open the help for a specific
 function, for example `?KODAMA.matrix` or `?KODAMA.visualization`. The complete
 source-install guide is in
-[`split-repos/kodama-r/README.md`](split-repos/kodama-r/README.md).
+[`split-repos/KODAMA/README.md`](split-repos/KODAMA/README.md).
+
+`spatial_feature_selection()` is a package-owned, parameter-free low-rank
+spatial covariance screen. It processes each slide independently, tests fixed
+linear, smooth, and periodic coordinate bases, combines basis evidence, and
+returns per-slide and aggregate rankings. The expression and projection paths
+are float32; probability tails and BH adjustment use double precision. The
+screen is multicore CPU-only because accelerator dispatch did not improve its
+end-to-end runtime on the validation workloads.
 
 ## Accelerator builds
 
@@ -357,7 +371,7 @@ Install the R wrapper against this build by changing only the build directory:
 ```sh
 KODAMA_CPP_ROOT="$PWD" \
 KODAMA_CPP_BUILD_DIR="$PWD/build-cuda" \
-R CMD INSTALL split-repos/kodama-r
+R CMD INSTALL split-repos/KODAMA
 ```
 
 The R session must see the same CUDA runtime libraries used during the core
@@ -439,7 +453,7 @@ include/kodama/          Public C++ API
 src/                     CPU, CUDA, and Metal implementations
 examples/                Small runnable C++ programs
 tests/                   Backend, API, and float32 validation
-split-repos/kodama-r/    R wrapper package
+split-repos/KODAMA/      R wrapper package
 split-repos/kodama-python/ Python wrapper package
 docs/                    Backend and release-validation notes
 benchmarks/              Reproducible benchmark drivers

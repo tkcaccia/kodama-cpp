@@ -2,8 +2,10 @@
 
 Thin Python wrapper for the standalone `kodama-cpp` C++/CUDA/Metal library.
 
-The Python package exposes KODAMA optimization, float32 PCA, graph utilities,
-and UMAP/openTSNE while keeping numerical work in the standalone C++ core.
+The Python package exposes the complete public numerical surface of the
+standalone core: KODAMA optimization, KNN and PLS-LDA CV, general SIMPLS,
+randomized SVD, float32 PCA, preprocessing, graph utilities, UMAP, and
+openTSNE. Numerical work remains in C++/CUDA/Metal.
 
 ## R/Python API Parity
 
@@ -27,6 +29,17 @@ and returned KODAMA fields are shared across wrappers.
 | `KODAMA.clustering()` | `kodama.KODAMA.clustering()` or `kodama.clustering()` |
 | `KODAMA.timing()` | `kodama.KODAMA.timing()` or `kodama.timing()` |
 | `KODAMA.diagnostics()` | `kodama.KODAMA.diagnostics()` or `kodama.diagnostics()` |
+
+Python additionally exposes the broader standalone-core functions that are
+intentionally maintained in separate R packages:
+
+| Core capability | Python |
+|---|---|
+| General SIMPLS | `kodama.pls()` |
+| Randomized SVD | `kodama.rsvd()` |
+| PCA | `kodama.pca()` / `kodama.PCA()` |
+| UMAP | `kodama.umap()` |
+| openTSNE | `kodama.opentsne()` |
 
 The compiled `_core` module is an implementation detail and is not part of the
 public wrapper API.
@@ -111,6 +124,18 @@ analysis_x = scaled["newXtrain"]
 pc = kodama.PCA(analysis_x, ncomp=20, backend="cpu")
 assert pc["scores"].shape == (500, 20)
 
+response = np.column_stack((analysis_x[:, 0], analysis_x[:, 1]))
+pls_model = kodama.pls(analysis_x, response, ncomp=5, backend="cpu")
+decomposition = kodama.rsvd(analysis_x, ncomp=20, backend="cpu")
+
+coordinates = np.column_stack((np.linspace(0, 1, x.shape[0]), np.zeros(x.shape[0])))
+slide_ids = np.zeros(x.shape[0], dtype=np.int32)
+svg = kodama.spatial_feature_selection(
+    x, coordinates, samples=slide_ids,
+    n_cores=4,
+)
+top_features = svg["features"][:100]
+
 prepared = kodama.graph(analysis_x, k=30, backend="cpu")
 assert "data" not in prepared
 
@@ -136,6 +161,48 @@ um = kodama.visualization(
 )
 clu = kodama.clustering(um, n_iterations=10, random_walk_steps=4)
 ```
+
+## AnnData, Squidpy, and SpatialData
+
+The object adapters use the standard AnnData layout without importing the
+single-cell ecosystem at module import time:
+
+- expression is read from `adata.X` or a named `adata.layers` entry;
+- coordinates are read from `adata.obsm["spatial"]` by default;
+- slide identities can be read from a named `adata.obs` column;
+- prepared Scanpy/Squidpy graphs are read from `adata.obsp`, preferring
+  `spatial_distances`, `distances`, `spatial_connectivities`, or
+  `connectivities`;
+- KODAMA graphs and matrix results are stored in `adata.uns`, labels in
+  `adata.obs`, embeddings in `adata.obsm`, and spatial-feature statistics in
+  `adata.var`.
+
+For SpatialData, pass `table_key` when more than one AnnData table exists:
+
+```python
+import kodama
+
+kodama.RunKODAMAgraph(
+    adata, spatial_key="spatial", sample_key="slide", backend="cpu"
+)
+kodama.RunKODAMAmatrix(
+    adata, graph_key="kodama_graph", classifier="pls_lda",
+    M=100, Tcycle=100, backend="cpu"
+)
+kodama.RunKODAMAvisualization(
+    adata, result_key="kodama", embedding_key="X_kodama_umap",
+    method="UMAP", backend="cpu"
+)
+
+squidpy_graph = kodama.graph_from_anndata(adata, k=100)
+spatialdata_copy = kodama.RunKODAMAgraph(
+    sdata, table_key="table", sample_key="slide", copy=True
+)
+```
+
+Install optional object dependencies with `pip install .[singlecell]` or
+`pip install .[spatial]`. The adapters are duck typed and therefore remain
+usable with compatible versions of AnnData, Squidpy, and SpatialData.
 
 `kodama.matrix()` returns a `KodamaMatrixResult`, which is still a normal
 dictionary with the raw C++ fields (`res`, `acc`, `knn`, `timing`). Convenience
@@ -221,3 +288,9 @@ python benchmarks/run_nonspatial.py MetRef.npz \
 
 The CSV reports `KODAMA.graph`, KNN/PLS-LDA `KODAMA.matrix`, UMAP, openTSNE,
 and complete pipeline wall times separately for every requested backend.
+
+For population-genetic samples with repeated collection latitude/longitude,
+use `spatial_mode="population"`. The coordinate regularization is repeated
+independently in every `M` run and precedes spatial constraint clustering;
+`spatial_mode="standard"` remains the default. A genetics-only run without
+`spatial` should be reported as the primary control.

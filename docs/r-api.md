@@ -1,7 +1,9 @@
 # R API Map
 
-The R package in `split-repos/kodama-r` contains only conversion, validation,
-and S3 convenience code. Numerical work remains in `libkodama_cpp`.
+The R package in `split-repos/KODAMA` contains conversion, validation, and S3
+convenience code together with a synchronized portable CPU build of the
+standalone core. Optional developer builds can link CUDA or Metal
+`libkodama_cpp`.
 
 | R function | C++ entry point | Purpose |
 |---|---|---|
@@ -24,7 +26,7 @@ estimate. A positive value remains an explicit lane count. Results expose
 `n.cores`, `gpu_auto_workers`, `gpu_scheduler_enabled`,
 `gpu_scheduler_lanes`, and `gpu_worker_memory_estimate_mb`.
 
-Use `help(package = "kodamaR")` for argument-level R documentation. The
+Use `help(package = "KODAMA")` for argument-level R documentation. The
 wrapper preserves raw result fields such as `acc`, `res`, `knn`, and `timing`,
 and adds `best_labels`, `best_run`, `class_counts`, and `parameters`.
 Matrix results also preserve one `landmark_seconds` value per independent
