@@ -858,11 +858,11 @@ RunKODAMAvisualization.giotto <- function(
 
 #' Cluster KODAMA reductions in matrices and single-cell containers
 #'
-#' This object-aware wrapper extracts a stored dimensional reduction, delegates
-#' graph construction and Louvain, Leiden, or Walktrap clustering to
-#' [KODAMA.clustering()], and writes the resulting membership back to the
-#' container. The clustering algorithms themselves are implemented only by
-#' [fastEmbedR::graph_cluster()].
+#' This object-aware wrapper uses the corrected graph stored by
+#' [RunKODAMAmatrix()] by default and writes the resulting membership back to
+#' the container. A dimensional reduction is used only when
+#' `use.corrected.graph = FALSE`. UMAP and openTSNE therefore remain
+#' visualization methods and do not determine the clustering.
 #'
 #' @param object Numeric matrix, KODAMA result, `SingleCellExperiment`,
 #'   `SpatialExperiment`, Seurat object, Giotto object, or list of Seurat
@@ -894,18 +894,22 @@ RunKODAMAclustering.default <- function(object, graph = NULL, ...) {
 #' @param cluster.name Observation-metadata column used to store membership.
 #' @param graph.name Name of the KODAMA state entry used to store complete
 #'   clustering diagnostics.
+#' @param use.corrected.graph Use the all-M corrected KODAMA graph stored in the
+#'   object. This is the production default.
 #' @export
 RunKODAMAclustering.SingleCellExperiment <- function(
     object, reduction = "KODAMA", dims = 2L,
-    cluster.name = "KODAMA_clusters", graph.name = "KODAMA", ...) {
-  data <- .kodama_bioc_data(object, reduction, dims)
-  fit <- KODAMA.clustering(data, ...)
+    cluster.name = "KODAMA_clusters", graph.name = "KODAMA",
+    use.corrected.graph = TRUE, ...) {
+  state <- .kodama_bioc_state(object, graph.name)
+  input <- if (isTRUE(use.corrected.graph)) state$matrix else NULL
+  if (is.null(input)) input <- .kodama_bioc_data(object, reduction, dims)
+  fit <- KODAMA.clustering(input, ...)
   membership <- factor(fit$membership)
-  names(membership) <- rownames(data)
+  names(membership) <- colnames(object)
   column_data <- SummarizedExperiment::colData(object)
   column_data[[cluster.name]] <- membership
   SummarizedExperiment::colData(object) <- column_data
-  state <- .kodama_bioc_state(object, graph.name)
   if (is.null(state$clustering) || !is.list(state$clustering)) {
     state$clustering <- list()
   }
@@ -917,13 +921,15 @@ RunKODAMAclustering.SingleCellExperiment <- function(
 #' @export
 RunKODAMAclustering.SpatialExperiment <- function(
     object, reduction = "KODAMA", dims = 2L,
-    cluster.name = "KODAMA_clusters", graph.name = "KODAMA", ...) {
+    cluster.name = "KODAMA_clusters", graph.name = "KODAMA",
+    use.corrected.graph = TRUE, ...) {
   RunKODAMAclustering.SingleCellExperiment(
     object,
     reduction = reduction,
     dims = dims,
     cluster.name = cluster.name,
     graph.name = graph.name,
+    use.corrected.graph = use.corrected.graph,
     ...
   )
 }
@@ -933,15 +939,17 @@ RunKODAMAclustering.SpatialExperiment <- function(
 #' @export
 RunKODAMAclustering.Seurat <- function(
     object, reduction = "KODAMA", dims = 2L,
-    cluster.name = "KODAMA_clusters", reduction.save = "KODAMA", ...) {
-  data <- .kodama_seurat_data(object, reduction, dims)
-  fit <- KODAMA.clustering(data, ...)
+    cluster.name = "KODAMA_clusters", reduction.save = "KODAMA",
+    use.corrected.graph = TRUE, ...) {
+  state <- .kodama_seurat_state(object, reduction.save)
+  input <- if (isTRUE(use.corrected.graph)) state$matrix else NULL
+  if (is.null(input)) input <- .kodama_seurat_data(object, reduction, dims)
+  fit <- KODAMA.clustering(input, ...)
   membership <- factor(fit$membership)
-  names(membership) <- rownames(data)
+  names(membership) <- colnames(object)
   object <- SeuratObject::AddMetaData(
     object, metadata = membership, col.name = cluster.name
   )
-  state <- .kodama_seurat_state(object, reduction.save)
   if (is.null(state$clustering) || !is.list(state$clustering)) {
     state$clustering <- list()
   }
@@ -953,11 +961,18 @@ RunKODAMAclustering.Seurat <- function(
 #' @export
 RunKODAMAclustering.giotto <- function(
     object, reduction = "KODAMA", dims = 2L,
-    cluster.name = "KODAMA_clusters", reduction.save = "KODAMA", ...) {
-  data <- .kodama_giotto_data(object, reduction, dims)
-  fit <- KODAMA.clustering(data, ...)
+    cluster.name = "KODAMA_clusters", reduction.save = "KODAMA",
+    use.corrected.graph = TRUE, ...) {
+  state <- .kodama_giotto_state(object, reduction.save)
+  input <- if (isTRUE(use.corrected.graph)) state$matrix else NULL
+  data <- NULL
+  if (is.null(input)) {
+    data <- .kodama_giotto_data(object, reduction, dims)
+    input <- data
+  }
+  fit <- KODAMA.clustering(input, ...)
   membership <- factor(fit$membership)
-  names(membership) <- rownames(data)
+  if (!is.null(data)) names(membership) <- rownames(data)
   .kodama_export("Giotto", "addCellMetadata")(
     object,
     new_metadata = membership,

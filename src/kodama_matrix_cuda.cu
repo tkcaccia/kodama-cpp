@@ -127,6 +127,22 @@ __global__ void project_landmark_labels_kernel(
     }
   }
   if (accepted == 0) {
+    for (int first_rank = 0; first_rank < neighbors; ++first_rank) {
+      const int first = graph_indices[base + static_cast<std::size_t>(first_rank)];
+      if (first < 0 || first >= samples || first == query) continue;
+      const std::size_t second_base =
+        static_cast<std::size_t>(first) * static_cast<std::size_t>(neighbors);
+      for (int second_rank = 0; second_rank < neighbors; ++second_rank) {
+        const int second = graph_indices[
+          second_base + static_cast<std::size_t>(second_rank)
+        ];
+        if (second >= 0 && second < samples &&
+            landmark_epoch[second] == epoch) {
+          projected[query] = labels[second];
+          return;
+        }
+      }
+    }
     projected[query] = fallback_label;
     return;
   }

@@ -7,6 +7,14 @@ test_that("KNN classifier defaults are benchmark-selected without changing graph
   expect_identical(formals(kodama_matrix_graph)$knn.k, 30L)
   expect_identical(formals(KODAMA.graph)$k, 100L)
   expect_identical(formals(KODAMA.visualization)$k, 30L)
+  expect_identical(
+    eval(formals(kodama_matrix)$spatial.constraint.mode),
+    c("kmeans", "graph", "auto")
+  )
+  expect_identical(
+    eval(formals(kodama_matrix_graph)$spatial.constraint.mode),
+    c("kmeans", "graph", "auto")
+  )
 })
 
 test_that("samples reproduces original KODAMA spatial separation", {
@@ -559,13 +567,14 @@ test_that("progress checkpoints are written to a caller-visible file", {
   set.seed(49)
   x <- matrix(rnorm(80 * 4), 80, 4)
   path <- tempfile(fileext = ".log")
+  path <- file.path(normalizePath(dirname(path), mustWork = TRUE), basename(path))
   result <- KODAMA.matrix(
     x, M = 2L, Tcycle = 3L, landmarks = 50L, splitting = 6L,
     graph.neighbors = 10L, knn.k = 5L, backend = "cpu", n.cores = 2L,
     progress = TRUE, progress.file = path, visual.init = FALSE
   )
-  expect_identical(result$progress_file, normalizePath(path))
-  lines <- readLines(path)
+  expect_identical(result$progress_file, path)
+  lines <- readLines(result$progress_file)
   expect_true(any(grepl("M 1/2 Tcycle 0/3", lines, fixed = TRUE)))
   expect_true(any(grepl("M 2/2 Tcycle 3/3", lines, fixed = TRUE)))
 })

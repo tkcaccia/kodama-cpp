@@ -322,6 +322,8 @@ struct CoreResult {
   std::vector<double> vect_acc;
   std::vector<double> vect_score;
   std::vector<int> proposal_size;
+  std::vector<int> proposal_sample_mass;
+  std::vector<double> temperature;
   std::vector<int> active_classes;
   std::vector<unsigned char> accepted;
   std::vector<unsigned char> improving_acceptance;
@@ -539,7 +541,7 @@ struct KODAMAMatrixOptions {
   int folds = 5;
   int n_threads = 1;
   int spatial_cols = 0;
-  double spatial_resolution = 0.4;
+  double spatial_resolution = 0.3;
   bool spatial_graph_mix = false;
   int spatial_constraint_mode = 0;
   SpatialCoordinateMode spatial_coordinate_mode = SpatialCoordinateMode::Standard;
@@ -569,6 +571,8 @@ struct CoreCycleDiagnostic {
   int run = 0;
   int cycle = 0;
   int proposal_size = 0;
+  int proposal_sample_mass = 0;
+  double temperature = 0.0;
   int active_classes = 0;
   unsigned char accepted = 0;
   unsigned char improving_acceptance = 0;
@@ -585,6 +589,15 @@ struct CoreRunDiagnostic {
   int pls_coarsening_attempted = 0;
   int pls_coarsening_accepted = 0;
   int cv_evaluations = 0;
+  int constraint_groups = 0;
+  int constraint_min_size = 0;
+  int constraint_max_size = 0;
+  int fold_min_samples = 0;
+  int fold_max_samples = 0;
+  int landmark_uncovered_groups_before = 0;
+  int landmark_uncovered_groups_after = 0;
+  int projection_expanded_rows = 0;
+  int projection_fallback_rows = 0;
   std::uint64_t landmark_rows_hash = 0;
   std::uint64_t initial_labels_hash = 0;
   std::uint64_t fold_assignments_hash = 0;
@@ -657,6 +670,9 @@ struct KODAMAMatrixResult {
   double dissimilarity_seconds = 0.0;
   double peak_memory_mb = 0.0;
   std::uint64_t graph_storage_bytes = 0;
+  std::uint64_t corrected_finite_edges = 0;
+  std::uint64_t corrected_zero_agreement_edges = 0;
+  int corrected_graph_components = 0;
 };
 
 struct UMAPOptions {

@@ -2,14 +2,15 @@
 % Please edit documentation in R/kodama.R
 \name{KODAMA.clustering}
 \alias{KODAMA.clustering}
-\title{Cluster a graph or embedding with fastEmbedR}
+\title{Cluster a corrected graph or an embedding}
 \usage{
 KODAMA.clustering(
   x,
-  method = c("leiden", "louvain", "walktrap"),
+  method = c("walktrap", "leiden", "louvain"),
+  n.clusters = NULL,
   k = 30L,
   metric = c("euclidean", "cosine", "correlation"),
-  weight = c("snn", "distance", "binary"),
+  weight = c("distance", "snn", "binary"),
   mutual = FALSE,
   prune = 0,
   graph.backend = NULL,
@@ -26,9 +27,12 @@ KODAMA.clustering(
 \item{x}{Input embedding matrix, KODAMA result, KNN graph, or
 \code{fastEmbedR_graph}.}
 
-\item{method}{Clustering method: \code{"leiden"}, \code{"louvain"}, or \code{"walktrap"}.}
+\item{method}{Clustering method. The production default is \code{"walktrap"}.}
 
-\item{k}{Number of neighbors used when a graph must be built from a matrix.}
+\item{n.clusters}{Optional exact number of Walktrap clusters. Disconnected
+graph components are never joined to reach this count.}
+
+\item{k}{Number of neighbors when a graph must be built from a matrix.}
 
 \item{metric}{Distance metric used only when neighbors must be calculated.}
 
@@ -36,7 +40,7 @@ KODAMA.clustering(
 
 \item{mutual}{Keep only reciprocal KNN edges.}
 
-\item{prune}{Remove graph edges with weight less than or equal to this value.}
+\item{prune}{Remove graph edges with weight at most this value.}
 
 \item{graph.backend}{Backend used to construct a graph from a matrix.}
 
@@ -59,14 +63,14 @@ A \code{fastEmbedR_graph_cluster} result containing one-based membership,
 modularity, implementation metadata, and timing.
 }
 \description{
-This is a KODAMA adapter around \code{\link[fastEmbedR:knn_graph]{fastEmbedR::knn_graph()}} and
-\code{\link[fastEmbedR:graph_cluster]{fastEmbedR::graph_cluster()}}. It does not maintain a second clustering
-implementation. KODAMA and precomputed KNN graphs are converted once to
-fastEmbedR's compact graph representation before clustering.
+KODAMA results are clustered from their all-M corrected graph. Matrix inputs
+are first converted to a KNN graph by \code{\link[fastEmbedR:knn_graph]{fastEmbedR::knn_graph()}}. The default
+is one deterministic Walktrap hierarchy; UMAP and openTSNE are not used for
+clustering.
 }
 \examples{
 set.seed(1)
 x <- rbind(matrix(rnorm(40, -2), 20, 2), matrix(rnorm(40, 2), 20, 2))
-fit <- KODAMA.clustering(x, method = "leiden", k = 5, n.cores = 1)
+fit <- KODAMA.clustering(x, k = 5, n.clusters = 2, n.cores = 1)
 table(fit$membership)
 }

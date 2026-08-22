@@ -560,81 +560,392 @@ double modularity(const CsrGraph& g, const std::vector<int>& membership) {
   return internal / two_m - expected / (two_m * two_m);
 }
 
-std::vector<int> split_disconnected(const CsrGraph& g, const std::vector<int>& membership) {
-  std::vector<int> refined(static_cast<std::size_t>(g.n), -1);
-  std::vector<char> seen(static_cast<std::size_t>(g.n), 0);
-  std::queue<int> q;
-  int next = 0;
-  for (int start = 0; start < g.n; ++start) {
-    if (seen[static_cast<std::size_t>(start)]) continue;
-    const int comm = membership[static_cast<std::size_t>(start)];
-    seen[static_cast<std::size_t>(start)] = 1;
-    refined[static_cast<std::size_t>(start)] = next;
-    q.push(start);
-    while (!q.empty()) {
-      const int u = q.front();
-      q.pop();
-      for (int p = g.ptr[static_cast<std::size_t>(u)]; p < g.ptr[static_cast<std::size_t>(u + 1)]; ++p) {
-        const int v = g.to[static_cast<std::size_t>(p)];
-        if (!seen[static_cast<std::size_t>(v)] && membership[static_cast<std::size_t>(v)] == comm) {
-          seen[static_cast<std::size_t>(v)] = 1;
-          refined[static_cast<std::size_t>(v)] = next;
-          q.push(v);
-        }
-      }
-    }
-    ++next;
+using SparseWalkDistribution = std::vector<std::pair<int, float>>;
+
+struct WalkNeighbor {
+  double delta = 0.0;
+  double edge_weight = 0.0;
+};
+
+struct WalkCommunity {
+  bool active = false;
+  int size = 0;
+  double degree = 0.0;
+  SparseWalkDistribution probability;
+  std::unordered_map<int, WalkNeighbor> neighbors;
+};
+
+struct WalkCandidate {
+  double delta = 0.0;
+  int left = -1;
+  int right = -1;
+};
+
+struct WalkCandidateGreater {
+  bool operator()(const WalkCandidate& left, const WalkCandidate& right) const {
+    if (left.delta != right.delta) return left.delta > right.delta;
+    if (left.left != right.left) return left.left > right.left;
+    return left.right > right.right;
   }
-  return compact(std::move(refined));
+};
+
+double walk_distance_squared(
+  const SparseWalkDistribution& left,
+  const SparseWalkDistribution& right,
+  const std::vector<double>& degree
+) {
+  std::size_t i = 0;
+  std::size_t j = 0;
+  double distance = 0.0;
+  while (i < left.size() || j < right.size()) {
+    int vertex = -1;
+    double difference = 0.0;
+    if (j == right.size() ||
+        (i < left.size() && left[i].first < right[j].first)) {
+      vertex = left[i].first;
+      difference = left[i].second;
+      ++i;
+    } else if (i == left.size() || right[j].first < left[i].first) {
+      vertex = right[j].first;
+      difference = -right[j].second;
+      ++j;
+    } else {
+      vertex = left[i].first;
+      difference = static_cast<double>(left[i].second) - right[j].second;
+      ++i;
+      ++j;
+    }
+    distance += difference * difference /
+      std::max(degree[static_cast<std::size_t>(vertex)], 1e-30);
+  }
+  return distance;
 }
 
-std::vector<int> random_walk_cluster(const CsrGraph& g, int steps, int max_iter, int n_threads) {
-  std::vector<int> labels(static_cast<std::size_t>(g.n));
-  std::iota(labels.begin(), labels.end(), 0);
-  if (g.total_weight <= 0.0) return labels;
-  steps = std::max(1, steps);
-  max_iter = std::max(1, max_iter);
-  n_threads = std::max(1, n_threads);
-  for (int iter = 0; iter < max_iter; ++iter) {
-    std::vector<int> proposed = labels;
-    int changed = 0;
+SparseWalkDistribution merge_walk_distributions(
+  const SparseWalkDistribution& left,
+  int left_size,
+  const SparseWalkDistribution& right,
+  int right_size
+) {
+  SparseWalkDistribution merged;
+  merged.reserve(left.size() + right.size());
+  const double denominator = static_cast<double>(left_size + right_size);
+  std::size_t i = 0;
+  std::size_t j = 0;
+  while (i < left.size() || j < right.size()) {
+    int vertex = -1;
+    double value = 0.0;
+    if (j == right.size() ||
+        (i < left.size() && left[i].first < right[j].first)) {
+      vertex = left[i].first;
+      value = static_cast<double>(left_size) * left[i].second;
+      ++i;
+    } else if (i == left.size() || right[j].first < left[i].first) {
+      vertex = right[j].first;
+      value = static_cast<double>(right_size) * right[j].second;
+      ++j;
+    } else {
+      vertex = left[i].first;
+      value = static_cast<double>(left_size) * left[i].second +
+        static_cast<double>(right_size) * right[j].second;
+      ++i;
+      ++j;
+    }
+    value /= denominator;
+    if (value > 0.0) merged.emplace_back(vertex, static_cast<float>(value));
+  }
+  return merged;
+}
+
+std::vector<SparseWalkDistribution> walk_probabilities(
+  const CsrGraph& g,
+  const std::vector<double>& self_weight,
+  const std::vector<double>& walk_degree,
+  int steps,
+  int n_threads
+) {
+  (void)n_threads;
+  std::vector<SparseWalkDistribution> probability(static_cast<std::size_t>(g.n));
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(n_threads) schedule(dynamic, 256) reduction(+:changed)
+#pragma omp parallel num_threads(n_threads)
 #endif
-    for (int u = 0; u < g.n; ++u) {
-      std::unordered_map<int, double> score;
-      std::unordered_map<int, double> frontier;
-      frontier[u] = 1.0;
+  {
+    std::vector<double> current_value(static_cast<std::size_t>(g.n), 0.0);
+    std::vector<double> next_value(static_cast<std::size_t>(g.n), 0.0);
+    std::vector<int> current;
+    std::vector<int> next;
+    current.reserve(static_cast<std::size_t>(g.n));
+    next.reserve(static_cast<std::size_t>(g.n));
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 8)
+#endif
+    for (int source = 0; source < g.n; ++source) {
+      current.clear();
+      current.push_back(source);
+      current_value[static_cast<std::size_t>(source)] = 1.0;
       for (int step = 0; step < steps; ++step) {
-        std::unordered_map<int, double> next;
-        next.reserve(frontier.size() * 2 + 1);
-        for (const auto& item : frontier) {
-          const int x = item.first;
-          const double mass = item.second;
-          const double deg = g.degree[static_cast<std::size_t>(x)];
-          if (deg <= 0.0) continue;
-          for (int p = g.ptr[static_cast<std::size_t>(x)]; p < g.ptr[static_cast<std::size_t>(x + 1)]; ++p) {
-            next[g.to[static_cast<std::size_t>(p)]] += mass * g.weight[static_cast<std::size_t>(p)] / deg;
+        next.clear();
+        for (int state : current) {
+          const double normalized = current_value[static_cast<std::size_t>(state)] /
+            walk_degree[static_cast<std::size_t>(state)];
+          auto add_mass = [&](int vertex, double mass) {
+            double& slot = next_value[static_cast<std::size_t>(vertex)];
+            if (slot == 0.0) next.push_back(vertex);
+            slot += mass;
+          };
+          add_mass(state, normalized * self_weight[static_cast<std::size_t>(state)]);
+          for (int p = g.ptr[static_cast<std::size_t>(state)];
+               p < g.ptr[static_cast<std::size_t>(state + 1)]; ++p) {
+            add_mass(
+              g.to[static_cast<std::size_t>(p)],
+              normalized * g.weight[static_cast<std::size_t>(p)]
+            );
           }
         }
-        frontier.swap(next);
-        for (const auto& item : frontier) score[labels[static_cast<std::size_t>(item.first)]] += item.second;
+        for (int state : current) current_value[static_cast<std::size_t>(state)] = 0.0;
+        current.swap(next);
+        current_value.swap(next_value);
       }
-      int best = labels[static_cast<std::size_t>(u)];
-      double best_score = -1.0;
-      for (const auto& kv : score) {
-        if (kv.second > best_score + 1e-15 || (std::abs(kv.second - best_score) <= 1e-15 && kv.first < best)) {
-          best_score = kv.second;
-          best = kv.first;
-        }
+      std::sort(current.begin(), current.end());
+      SparseWalkDistribution& row = probability[static_cast<std::size_t>(source)];
+      row.reserve(current.size());
+      for (int state : current) {
+        const double value = current_value[static_cast<std::size_t>(state)];
+        if (value > 0.0) row.emplace_back(state, static_cast<float>(value));
+        current_value[static_cast<std::size_t>(state)] = 0.0;
       }
-      proposed[static_cast<std::size_t>(u)] = best;
-      if (best != labels[static_cast<std::size_t>(u)]) ++changed;
     }
-    labels = compact(std::move(proposed));
-    if (changed == 0) break;
   }
-  return split_disconnected(g, labels);
+  return probability;
+}
+
+std::vector<int> replay_walk_partition(
+  int n,
+  const std::vector<std::pair<int, int>>& merges,
+  int merge_count
+) {
+  DisjointSet sets(n);
+  std::vector<int> representative(static_cast<std::size_t>(2 * n - 1), -1);
+  std::iota(representative.begin(), representative.begin() + n, 0);
+  merge_count = std::min(merge_count, static_cast<int>(merges.size()));
+  for (int step = 0; step < merge_count; ++step) {
+    const int left = merges[static_cast<std::size_t>(step)].first;
+    const int right = merges[static_cast<std::size_t>(step)].second;
+    const int left_root = representative[static_cast<std::size_t>(left)];
+    const int right_root = representative[static_cast<std::size_t>(right)];
+    sets.unite(left_root, right_root);
+    representative[static_cast<std::size_t>(n + step)] = sets.find(left_root);
+  }
+  std::vector<int> membership(static_cast<std::size_t>(n), 0);
+  std::unordered_map<int, int> labels;
+  labels.reserve(static_cast<std::size_t>(n));
+  int next = 0;
+  for (int vertex = 0; vertex < n; ++vertex) {
+    const int root = sets.find(vertex);
+    auto inserted = labels.emplace(root, next);
+    if (inserted.second) ++next;
+    membership[static_cast<std::size_t>(vertex)] = inserted.first->second;
+  }
+  return membership;
+}
+
+// Independent sparse implementation of the adjacent-community random-walk
+// agglomeration of Pons and Latapy. A requested count is a direct hierarchy
+// cut; without one, the maximum-modularity cut is returned.
+std::vector<int> random_walk_cluster(
+  const CsrGraph& g,
+  int steps,
+  int max_iter,
+  int n_threads,
+  int target_clusters
+) {
+  (void)max_iter;
+  std::vector<int> singleton(static_cast<std::size_t>(g.n));
+  std::iota(singleton.begin(), singleton.end(), 0);
+  if (g.total_weight <= 0.0 || g.n < 2) return singleton;
+  steps = std::max(1, steps);
+  n_threads = std::max(1, n_threads);
+
+  std::vector<double> self_weight(static_cast<std::size_t>(g.n), 1.0);
+  std::vector<double> walk_degree(static_cast<std::size_t>(g.n), 1.0);
+  for (int vertex = 0; vertex < g.n; ++vertex) {
+    const int edge_count = g.ptr[static_cast<std::size_t>(vertex + 1)] -
+      g.ptr[static_cast<std::size_t>(vertex)];
+    if (edge_count > 0) {
+      self_weight[static_cast<std::size_t>(vertex)] =
+        g.degree[static_cast<std::size_t>(vertex)] / edge_count;
+    }
+    walk_degree[static_cast<std::size_t>(vertex)] =
+      g.degree[static_cast<std::size_t>(vertex)] +
+      self_weight[static_cast<std::size_t>(vertex)];
+  }
+
+  std::vector<SparseWalkDistribution> probability = walk_probabilities(
+    g, self_weight, walk_degree, steps, n_threads
+  );
+  const int maximum_communities = 2 * g.n - 1;
+  std::vector<WalkCommunity> communities(static_cast<std::size_t>(maximum_communities));
+  for (int vertex = 0; vertex < g.n; ++vertex) {
+    WalkCommunity& community = communities[static_cast<std::size_t>(vertex)];
+    community.active = true;
+    community.size = 1;
+    community.degree = g.degree[static_cast<std::size_t>(vertex)];
+    community.probability = std::move(probability[static_cast<std::size_t>(vertex)]);
+    const int edge_count = g.ptr[static_cast<std::size_t>(vertex + 1)] -
+      g.ptr[static_cast<std::size_t>(vertex)];
+    community.neighbors.reserve(static_cast<std::size_t>(edge_count) * 2U + 1U);
+  }
+
+  std::vector<int> edge_left;
+  std::vector<int> edge_right;
+  std::vector<double> edge_weight;
+  for (int left = 0; left < g.n; ++left) {
+    for (int p = g.ptr[static_cast<std::size_t>(left)];
+         p < g.ptr[static_cast<std::size_t>(left + 1)]; ++p) {
+      const int right = g.to[static_cast<std::size_t>(p)];
+      if (left < right) {
+        edge_left.push_back(left);
+        edge_right.push_back(right);
+        edge_weight.push_back(g.weight[static_cast<std::size_t>(p)]);
+      }
+    }
+  }
+  std::vector<double> edge_delta(edge_left.size(), 0.0);
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(n_threads) schedule(dynamic, 64)
+#endif
+  for (std::ptrdiff_t edge = 0;
+       edge < static_cast<std::ptrdiff_t>(edge_left.size()); ++edge) {
+    const int left = edge_left[static_cast<std::size_t>(edge)];
+    const int right = edge_right[static_cast<std::size_t>(edge)];
+    edge_delta[static_cast<std::size_t>(edge)] = walk_distance_squared(
+      communities[static_cast<std::size_t>(left)].probability,
+      communities[static_cast<std::size_t>(right)].probability,
+      walk_degree
+    ) / (2.0 * g.n);
+  }
+
+  std::priority_queue<
+    WalkCandidate, std::vector<WalkCandidate>, WalkCandidateGreater
+  > heap;
+  for (std::size_t edge = 0; edge < edge_left.size(); ++edge) {
+    const int left = edge_left[edge];
+    const int right = edge_right[edge];
+    const WalkNeighbor neighbor{edge_delta[edge], edge_weight[edge]};
+    communities[static_cast<std::size_t>(left)].neighbors.emplace(right, neighbor);
+    communities[static_cast<std::size_t>(right)].neighbors.emplace(left, neighbor);
+    heap.push(WalkCandidate{edge_delta[edge], left, right});
+  }
+
+  const double two_m = 2.0 * g.total_weight;
+  double modularity_value = 0.0;
+  for (double degree : g.degree) {
+    modularity_value -= degree * degree / (two_m * two_m);
+  }
+  double best_modularity = modularity_value;
+  int best_merge_count = 0;
+  std::vector<std::pair<int, int>> merges;
+  merges.reserve(static_cast<std::size_t>(g.n - 1));
+  int next_id = g.n;
+
+  while (!heap.empty()) {
+    const WalkCandidate candidate = heap.top();
+    heap.pop();
+    const int left = candidate.left;
+    const int right = candidate.right;
+    if (left < 0 || right < 0 || left >= next_id || right >= next_id) continue;
+    WalkCommunity& left_community = communities[static_cast<std::size_t>(left)];
+    WalkCommunity& right_community = communities[static_cast<std::size_t>(right)];
+    if (!left_community.active || !right_community.active) continue;
+    const auto current = left_community.neighbors.find(right);
+    if (current == left_community.neighbors.end()) continue;
+    const double tolerance = 1e-12 * std::max(1.0, std::abs(current->second.delta));
+    if (std::abs(current->second.delta - candidate.delta) > tolerance) continue;
+
+    const WalkNeighbor between = current->second;
+    const int merged = next_id++;
+    WalkCommunity& merged_community = communities[static_cast<std::size_t>(merged)];
+    merged_community.active = true;
+    merged_community.size = left_community.size + right_community.size;
+    merged_community.degree = left_community.degree + right_community.degree;
+    merged_community.probability = merge_walk_distributions(
+      left_community.probability, left_community.size,
+      right_community.probability, right_community.size
+    );
+
+    std::vector<int> adjacent;
+    adjacent.reserve(left_community.neighbors.size() + right_community.neighbors.size());
+    for (const auto& item : left_community.neighbors) {
+      if (item.first != right) adjacent.push_back(item.first);
+    }
+    for (const auto& item : right_community.neighbors) {
+      if (item.first != left) adjacent.push_back(item.first);
+    }
+    std::sort(adjacent.begin(), adjacent.end());
+    adjacent.erase(std::unique(adjacent.begin(), adjacent.end()), adjacent.end());
+    merged_community.neighbors.reserve(adjacent.size() * 2U + 1U);
+
+    for (int other : adjacent) {
+      WalkCommunity& other_community = communities[static_cast<std::size_t>(other)];
+      if (!other_community.active) continue;
+      const auto left_it = left_community.neighbors.find(other);
+      const auto right_it = right_community.neighbors.find(other);
+      const bool has_left = left_it != left_community.neighbors.end();
+      const bool has_right = right_it != right_community.neighbors.end();
+      double delta = 0.0;
+      if (has_left && has_right) {
+        const double other_size = static_cast<double>(other_community.size);
+        delta =
+          ((left_community.size + other_size) * left_it->second.delta +
+           (right_community.size + other_size) * right_it->second.delta -
+           other_size * between.delta) /
+          (left_community.size + right_community.size + other_size);
+      } else {
+        const double distance = walk_distance_squared(
+          merged_community.probability,
+          other_community.probability,
+          walk_degree
+        );
+        delta = (1.0 / g.n) *
+          (static_cast<double>(merged_community.size) * other_community.size /
+           (merged_community.size + other_community.size)) * distance;
+      }
+      if (delta < 0.0 && delta > -1e-14) delta = 0.0;
+      const double joined_weight =
+        (has_left ? left_it->second.edge_weight : 0.0) +
+        (has_right ? right_it->second.edge_weight : 0.0);
+      const WalkNeighbor neighbor{delta, joined_weight};
+      merged_community.neighbors.emplace(other, neighbor);
+      other_community.neighbors.erase(left);
+      other_community.neighbors.erase(right);
+      other_community.neighbors.emplace(merged, neighbor);
+      heap.push(WalkCandidate{
+        delta, std::min(merged, other), std::max(merged, other)
+      });
+    }
+
+    modularity_value += between.edge_weight / g.total_weight -
+      left_community.degree * right_community.degree * 2.0 /
+      (two_m * two_m);
+    merges.emplace_back(left, right);
+    if (modularity_value > best_modularity + 1e-12) {
+      best_modularity = modularity_value;
+      best_merge_count = static_cast<int>(merges.size());
+    }
+
+    left_community.active = false;
+    right_community.active = false;
+    left_community.neighbors.clear();
+    right_community.neighbors.clear();
+    left_community.probability.clear();
+    left_community.probability.shrink_to_fit();
+    right_community.probability.clear();
+    right_community.probability.shrink_to_fit();
+  }
+
+  const int merge_count = target_clusters > 0 ?
+    g.n - std::min(target_clusters, g.n) : best_merge_count;
+  return replay_walk_partition(g.n, merges, merge_count);
 }
 
 std::vector<int> merge_communities_to_target(
@@ -647,9 +958,6 @@ std::vector<int> merge_communities_to_target(
   for (int label : membership) communities = std::max(communities, label + 1);
   if (communities == target) return membership;
 
-  // A target cut is a graph coarsening operation. If random-walk refinement
-  // has already crossed below the requested cut, restart from singleton
-  // communities so that the target remains exact and deterministic.
   if (communities < target) {
     membership.resize(static_cast<std::size_t>(g.n));
     std::iota(membership.begin(), membership.end(), 0);
@@ -663,8 +971,11 @@ std::vector<int> merge_communities_to_target(
     for (int u = 0; u < g.n; ++u) {
       const int cu = membership[static_cast<std::size_t>(u)];
       volume[static_cast<std::size_t>(cu)] += g.degree[static_cast<std::size_t>(u)];
-      for (int p = g.ptr[static_cast<std::size_t>(u)]; p < g.ptr[static_cast<std::size_t>(u + 1)]; ++p) {
-        const int cv = membership[static_cast<std::size_t>(g.to[static_cast<std::size_t>(p)])];
+      for (int p = g.ptr[static_cast<std::size_t>(u)];
+           p < g.ptr[static_cast<std::size_t>(u + 1)]; ++p) {
+        const int cv = membership[static_cast<std::size_t>(
+          g.to[static_cast<std::size_t>(p)]
+        )];
         if (cu == cv) continue;
         const std::uint32_t lo = static_cast<std::uint32_t>(std::min(cu, cv));
         const std::uint32_t hi = static_cast<std::uint32_t>(std::max(cu, cv));
@@ -679,10 +990,11 @@ std::vector<int> merge_communities_to_target(
     for (const auto& item : between) {
       const int a = static_cast<int>(item.first >> 32);
       const int b = static_cast<int>(item.first & 0xffffffffULL);
-      const double denom = std::sqrt(
-        std::max(volume[static_cast<std::size_t>(a)] *
-                 volume[static_cast<std::size_t>(b)], 1e-30)
-      );
+      const double denom = std::sqrt(std::max(
+        volume[static_cast<std::size_t>(a)] *
+        volume[static_cast<std::size_t>(b)],
+        1e-30
+      ));
       const double score = item.second / denom;
       if (score > best + 1e-15 ||
           (std::abs(score - best) <= 1e-15 &&
@@ -694,18 +1006,9 @@ std::vector<int> merge_communities_to_target(
     }
 
     if (merge_a < 0) {
-      // Disconnected components have no cross-edge. Join the two smallest
-      // communities only when an exact user-requested cut requires it.
-      std::vector<int> size(static_cast<std::size_t>(communities), 0);
-      for (int label : membership) ++size[static_cast<std::size_t>(label)];
-      for (int c = 0; c < communities; ++c) {
-        if (merge_a < 0 || size[static_cast<std::size_t>(c)] < size[static_cast<std::size_t>(merge_a)]) {
-          merge_b = merge_a;
-          merge_a = c;
-        } else if (merge_b < 0 || size[static_cast<std::size_t>(c)] < size[static_cast<std::size_t>(merge_b)]) {
-          merge_b = c;
-        }
-      }
+      throw std::runtime_error(
+        "Exact-K clustering cannot merge disconnected communities."
+      );
     }
 
     for (int& label : membership) {
@@ -737,12 +1040,43 @@ GraphClusterResult make_result(const CsrGraph& g, const std::vector<int>& member
   return out;
 }
 
+int connected_component_count(const CsrGraph& graph) {
+  std::vector<unsigned char> visited(static_cast<std::size_t>(graph.n), 0);
+  std::vector<int> stack;
+  int components = 0;
+  for (int root = 0; root < graph.n; ++root) {
+    if (visited[static_cast<std::size_t>(root)]) continue;
+    ++components;
+    stack.clear();
+    stack.push_back(root);
+    visited[static_cast<std::size_t>(root)] = 1;
+    while (!stack.empty()) {
+      const int vertex = stack.back();
+      stack.pop_back();
+      for (int edge = graph.ptr[static_cast<std::size_t>(vertex)];
+           edge < graph.ptr[static_cast<std::size_t>(vertex + 1)]; ++edge) {
+        const int neighbor = graph.to[static_cast<std::size_t>(edge)];
+        if (visited[static_cast<std::size_t>(neighbor)]) continue;
+        visited[static_cast<std::size_t>(neighbor)] = 1;
+        stack.push_back(neighbor);
+      }
+    }
+  }
+  return components;
+}
+
 GraphClusterResult run_cpu_cluster(const EdgeList& edge_list, const GraphClusterOptions& options, double elapsed_start = 0.0) {
   Timer timer;
   CsrGraph g = csr_from_edges(edge_list);
   if (g.n == 0) throw std::invalid_argument("empty graph.");
   if (options.target_clusters > g.n) {
     throw std::invalid_argument("target_clusters cannot exceed number of graph vertices.");
+  }
+  const int graph_components = connected_component_count(g);
+  if (options.target_clusters > 0 && options.target_clusters < graph_components) {
+    throw std::invalid_argument(
+      "target_clusters cannot be smaller than the number of disconnected graph components."
+    );
   }
 
   GraphClusterOptions opts = options;
@@ -753,10 +1087,13 @@ GraphClusterResult run_cpu_cluster(const EdgeList& edge_list, const GraphCluster
     g,
     opts.random_walk_steps,
     opts.n_iterations,
-    opts.n_threads
+    opts.n_threads,
+    opts.target_clusters
   );
   if (opts.target_clusters > 0) {
-    membership = merge_communities_to_target(g, std::move(membership), opts.target_clusters);
+    membership = merge_communities_to_target(
+      g, std::move(membership), opts.target_clusters
+    );
   }
   GraphClusterResult out = make_result(
     g,

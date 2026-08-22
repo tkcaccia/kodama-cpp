@@ -21,6 +21,7 @@
 #include <mutex>
 #include <numeric>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1033,6 +1034,93 @@ std::vector<int> majority_by_constrain(const std::vector<int>& values, const std
   return out;
 }
 
+struct GroupCoverage {
+  int groups = 0;
+  int minimum_size = 0;
+  int maximum_size = 0;
+  int missing_before = 0;
+  int missing_after = 0;
+};
+
+GroupCoverage ensure_group_landmark_coverage(
+  std::vector<int>& landmarks,
+  const std::vector<int>& groups,
+  std::mt19937_64& rng
+) {
+  GroupCoverage summary;
+  if (landmarks.empty() || groups.empty()) return summary;
+
+  std::map<int, std::vector<int>> rows_by_group;
+  for (std::size_t row = 0; row < groups.size(); ++row) {
+    rows_by_group[groups[row]].push_back(static_cast<int>(row));
+  }
+  summary.groups = static_cast<int>(rows_by_group.size());
+  summary.minimum_size = static_cast<int>(groups.size());
+  for (const auto& item : rows_by_group) {
+    const int size = static_cast<int>(item.second.size());
+    summary.minimum_size = std::min(summary.minimum_size, size);
+    summary.maximum_size = std::max(summary.maximum_size, size);
+  }
+
+  if (landmarks.size() < rows_by_group.size()) {
+    summary.missing_before = summary.missing_after =
+      static_cast<int>(rows_by_group.size() - landmarks.size());
+    throw std::invalid_argument(
+      "landmarks must be at least the number of spatial constraint blocks "
+      "to guarantee one landmark per block."
+    );
+  }
+
+  std::map<int, int> selected_per_group;
+  for (int row : landmarks) ++selected_per_group[groups[static_cast<std::size_t>(row)]];
+  std::vector<int> missing_groups;
+  for (const auto& item : rows_by_group) {
+    if (selected_per_group[item.first] == 0) missing_groups.push_back(item.first);
+  }
+  summary.missing_before = static_cast<int>(missing_groups.size());
+  if (missing_groups.empty()) return summary;
+
+  std::vector<std::size_t> donor_positions;
+  donor_positions.reserve(landmarks.size());
+  for (std::size_t position = 0; position < landmarks.size(); ++position) {
+    const int group = groups[static_cast<std::size_t>(landmarks[position])];
+    if (selected_per_group[group] > 1) donor_positions.push_back(position);
+  }
+  std::shuffle(donor_positions.begin(), donor_positions.end(), rng);
+  if (donor_positions.size() < missing_groups.size()) {
+    throw std::runtime_error(
+      "Landmark coverage could not reserve one sample for every constraint group."
+    );
+  }
+
+  for (std::size_t i = 0; i < missing_groups.size(); ++i) {
+    const int group = missing_groups[i];
+    const auto& candidates = rows_by_group[group];
+    std::uniform_int_distribution<std::size_t> choose(0, candidates.size() - 1);
+    const std::size_t donor_position = donor_positions[i];
+    const int donor_group = groups[static_cast<std::size_t>(landmarks[donor_position])];
+    --selected_per_group[donor_group];
+    landmarks[donor_position] = candidates[choose(rng)];
+    ++selected_per_group[group];
+  }
+  std::sort(landmarks.begin(), landmarks.end());
+  summary.missing_after = 0;
+  return summary;
+}
+
+std::pair<int, int> fold_load_range(
+  const std::vector<int>& folds,
+  int requested_folds
+) {
+  if (folds.empty() || requested_folds < 1) return {0, 0};
+  std::vector<int> load(static_cast<std::size_t>(requested_folds), 0);
+  for (int fold : folds) {
+    if (fold >= 0 && fold < requested_folds) ++load[static_cast<std::size_t>(fold)];
+  }
+  const auto bounds = std::minmax_element(load.begin(), load.end());
+  return {*bounds.first, *bounds.second};
+}
+
 struct DisjointSet {
   std::vector<int> parent;
   std::vector<int> size;
@@ -1059,6 +1147,42 @@ struct DisjointSet {
     return true;
   }
 };
+
+struct CorrectedGraphDiagnostics {
+  std::uint64_t finite_edges = 0;
+  std::uint64_t nonfinite_edges = 0;
+  int components = 0;
+};
+
+CorrectedGraphDiagnostics corrected_graph_diagnostics(
+  const NeighborGraph& graph,
+  int samples
+) {
+  CorrectedGraphDiagnostics out;
+  if (samples < 1 || graph.neighbors < 1) return out;
+  const bool one_based = graph.index_base == GraphIndexBase::One;
+  DisjointSet sets(samples);
+  for (int row = 0; row < samples; ++row) {
+    const std::size_t base =
+      static_cast<std::size_t>(row) * static_cast<std::size_t>(graph.neighbors);
+    for (int rank = 0; rank < graph.neighbors; ++rank) {
+      const std::size_t offset = base + static_cast<std::size_t>(rank);
+      int neighbor = graph.indices[offset];
+      if (one_based && neighbor > 0) --neighbor;
+      if (neighbor < 0 || neighbor >= samples || neighbor == row) continue;
+      if (std::isfinite(graph.distances[offset])) {
+        ++out.finite_edges;
+        sets.unite(row, neighbor);
+      } else {
+        ++out.nonfinite_edges;
+      }
+    }
+  }
+  std::set<int> roots;
+  for (int row = 0; row < samples; ++row) roots.insert(sets.find(row));
+  out.components = static_cast<int>(roots.size());
+  return out;
+}
 
 std::vector<int> spatial_graph_components(
   const std::vector<float>& spatial,
@@ -1129,6 +1253,142 @@ std::vector<int> spatial_graph_components(
     out[static_cast<std::size_t>(i)] = it->second;
   }
   return out;
+}
+
+std::vector<int> balanced_spatial_graph_regions(
+  const std::vector<float>& spatial,
+  int n,
+  int dims,
+  double resolution,
+  int n_threads,
+  Backend backend,
+  int gpu_device,
+  const std::vector<int>& sample_ids
+) {
+  if (!sample_ids.empty() && sample_ids.size() != static_cast<std::size_t>(n)) {
+    throw std::invalid_argument("samples size must match spatial graph rows.");
+  }
+  // Preserve the established resolution meaning: n * resolution regions,
+  // hence an expected region mass of 1 / resolution samples. Connectivity
+  // changes the shape of a region, not its dimension-dependent target mass.
+  const int target_size = std::max(
+    1,
+    static_cast<int>(std::ceil(1.0 / std::max(resolution, 1.0e-9)))
+  );
+  if (target_size == 1) {
+    std::vector<int> singleton(static_cast<std::size_t>(n));
+    std::iota(singleton.begin(), singleton.end(), 1);
+    return singleton;
+  }
+
+  const int k = std::max(2, std::min(n, 32));
+  const NeighborGraph graph = self_knn_graph(
+    spatial,
+    n,
+    dims,
+    k,
+    DistanceMetric::Euclidean,
+    n_threads,
+    backend,
+    gpu_device,
+    true,
+    KNNIndexType::MetalExact,
+    0,
+    0
+  );
+  struct Edge {
+    float distance;
+    int a;
+    int b;
+  };
+  std::vector<Edge> edges;
+  edges.reserve(static_cast<std::size_t>(n) * static_cast<std::size_t>(k));
+  for (int row = 0; row < n; ++row) {
+    const std::size_t base =
+      static_cast<std::size_t>(row) * static_cast<std::size_t>(graph.neighbors);
+    for (int rank = 0; rank < graph.neighbors; ++rank) {
+      const std::size_t offset = base + static_cast<std::size_t>(rank);
+      const int neighbor = graph.indices[offset];
+      if (neighbor < 0 || neighbor >= n || neighbor == row) continue;
+      if (!sample_ids.empty() &&
+          sample_ids[static_cast<std::size_t>(row)] !=
+            sample_ids[static_cast<std::size_t>(neighbor)]) {
+        continue;
+      }
+      const int a = std::min(row, neighbor);
+      const int b = std::max(row, neighbor);
+      edges.push_back(Edge{graph.distances[offset], a, b});
+    }
+  }
+  std::sort(edges.begin(), edges.end(), [](const Edge& left, const Edge& right) {
+    if (left.a != right.a) return left.a < right.a;
+    if (left.b != right.b) return left.b < right.b;
+    return left.distance < right.distance;
+  });
+  edges.erase(
+    std::unique(edges.begin(), edges.end(), [](const Edge& left, const Edge& right) {
+      return left.a == right.a && left.b == right.b;
+    }),
+    edges.end()
+  );
+  std::sort(edges.begin(), edges.end(), [](const Edge& left, const Edge& right) {
+    if (left.distance != right.distance) return left.distance < right.distance;
+    if (left.a != right.a) return left.a < right.a;
+    return left.b < right.b;
+  });
+
+  DisjointSet forest(n);
+  std::vector<std::vector<int>> tree(static_cast<std::size_t>(n));
+  for (const Edge& edge : edges) {
+    if (!forest.unite(edge.a, edge.b)) continue;
+    tree[static_cast<std::size_t>(edge.a)].push_back(edge.b);
+    tree[static_cast<std::size_t>(edge.b)].push_back(edge.a);
+  }
+
+  std::vector<int> labels(static_cast<std::size_t>(n), 0);
+  std::vector<char> visited(static_cast<std::size_t>(n), 0);
+  std::vector<int> parent(static_cast<std::size_t>(n), -1);
+  std::vector<std::vector<int>> pending(static_cast<std::size_t>(n));
+  int next_label = 1;
+  for (int root = 0; root < n; ++root) {
+    if (visited[static_cast<std::size_t>(root)]) continue;
+    std::vector<int> order;
+    order.push_back(root);
+    visited[static_cast<std::size_t>(root)] = 1;
+    for (std::size_t cursor = 0; cursor < order.size(); ++cursor) {
+      const int vertex = order[cursor];
+      for (int neighbor : tree[static_cast<std::size_t>(vertex)]) {
+        if (visited[static_cast<std::size_t>(neighbor)]) continue;
+        visited[static_cast<std::size_t>(neighbor)] = 1;
+        parent[static_cast<std::size_t>(neighbor)] = vertex;
+        order.push_back(neighbor);
+      }
+    }
+    for (auto it = order.rbegin(); it != order.rend(); ++it) {
+      const int vertex = *it;
+      auto& region = pending[static_cast<std::size_t>(vertex)];
+      region.push_back(vertex);
+      for (int neighbor : tree[static_cast<std::size_t>(vertex)]) {
+        if (parent[static_cast<std::size_t>(neighbor)] != vertex) continue;
+        auto& child = pending[static_cast<std::size_t>(neighbor)];
+        region.insert(region.end(), child.begin(), child.end());
+        child.clear();
+      }
+      if (static_cast<int>(region.size()) >= target_size &&
+          parent[static_cast<std::size_t>(vertex)] >= 0) {
+        for (int row : region) labels[static_cast<std::size_t>(row)] = next_label;
+        ++next_label;
+        region.clear();
+      }
+    }
+    auto& remainder = pending[static_cast<std::size_t>(root)];
+    if (!remainder.empty()) {
+      for (int row : remainder) labels[static_cast<std::size_t>(row)] = next_label;
+      ++next_label;
+      remainder.clear();
+    }
+  }
+  return labels;
 }
 
 std::vector<float> spatial_jitter_from_graph(
@@ -2191,16 +2451,16 @@ class DeviceResidentKODAMAGraph {
     return false;
   }
 
-  void prepare_results(int runs) {
+  void prepare_results(int runs, int lanes) {
 #if defined(KODAMA_ENABLE_CUDA)
     if (backend_ == Backend::CUDA && cuda_) {
-      detail::cuda_resident_prepare_results(*cuda_, runs);
+      detail::cuda_resident_prepare_results(*cuda_, runs, lanes);
       return;
     }
 #endif
 #if defined(KODAMA_ENABLE_METAL)
     if (backend_ == Backend::Metal && metal_) {
-      detail::metal_prepare_resident_results(*metal_, runs);
+      detail::metal_prepare_resident_results(*metal_, runs, lanes);
       return;
     }
 #endif
@@ -2992,11 +3252,19 @@ IterationResult run_iteration(
     progress_stream() << " in " << landmark_seconds << "s" << std::endl;
   }
   detail::Timer constraint_timer;
+  GroupCoverage group_coverage;
   const std::vector<int>* run_constrain_ptr = &constrain;
   bool run_constrain_is_identity = constrain_is_identity;
   if (spatial_flag) {
     const int spatial_dims = options.spatial_cols;
-    const int nspatialclusters = std::max(1, static_cast<int>(std::llround(static_cast<double>(landmarks) * options.spatial_resolution)));
+    const bool automatic_connected_constraints = options.spatial_constraint_mode < 0;
+    const int spatial_scale_rows = automatic_connected_constraints ? n : landmarks;
+    const int nspatialclusters = std::max(
+      1,
+      static_cast<int>(std::llround(
+        static_cast<double>(spatial_scale_rows) * options.spatial_resolution
+      ))
+    );
     const std::vector<float>* spatial_for_clustering = nullptr;
     if (options.spatial_coordinate_mode == SpatialCoordinateMode::Population) {
       regularize_population_coordinates(
@@ -3015,8 +3283,18 @@ IterationResult run_iteration(
       }
       spatial_for_clustering = &scratch.spatial_jittered;
     }
-    const bool use_graph_spatial_constraints = options.spatial_constraint_mode == 1;
-    if (use_graph_spatial_constraints) {
+    if (automatic_connected_constraints) {
+      scratch.spatial_clusters = balanced_spatial_graph_regions(
+        *spatial_for_clustering,
+        n,
+        spatial_dims,
+        options.spatial_resolution,
+        options.n_threads,
+        options.backend,
+        kmeans_gpu_device,
+        options.samples
+      );
+    } else if (options.spatial_constraint_mode == 1) {
       scratch.spatial_clusters = spatial_graph_components(
         *spatial_for_clustering,
         n,
@@ -3051,11 +3329,29 @@ IterationResult run_iteration(
       majority_by_constrain(scratch.spatial_clusters, sample_constrain);
     scratch.run_constrain = intersect_groupings(
       scratch.run_constrain, options.samples);
+    if (!options.samples.empty()) {
+      std::map<int, int> block_sample;
+      for (int row = 0; row < n; ++row) {
+        const int block = scratch.run_constrain[static_cast<std::size_t>(row)];
+        const int sample = options.samples[static_cast<std::size_t>(row)];
+        const auto inserted = block_sample.emplace(block, sample);
+        if (!inserted.second && inserted.first->second != sample) {
+          throw std::runtime_error(
+            "A spatial constraint block spans more than one sample."
+          );
+        }
+      }
+    }
     run_constrain_ptr = &scratch.run_constrain;
     run_constrain_is_identity = is_identity_constrain(*run_constrain_ptr);
   }
-  const double constraint_seconds = constraint_timer.seconds();
   const std::vector<int>& run_constrain = *run_constrain_ptr;
+  if (!run_constrain_is_identity) {
+    group_coverage = ensure_group_landmark_coverage(
+      scratch.landpoints, run_constrain, rng
+    );
+  }
+  const double constraint_seconds = constraint_timer.seconds();
   const std::vector<int>& landpoints = scratch.landpoints;
 
   detail::Timer prepare_timer;
@@ -3221,12 +3517,13 @@ IterationResult run_iteration(
   if (!tpoints.empty()) {
     if (options.classifier == CoreClassifier::KNN) {
       const int projection_k = std::max(1, options.knn.k);
+      const int fallback_label = majority_label(core_result.clbest);
       if (resident_graph != nullptr && resident_graph->valid()) {
         resident_graph->project_to_result(
           landpoints,
           core_result.clbest,
           projection_k,
-          core_result.clbest.front(),
+          fallback_label,
           run_id - 1,
           worker_lane
         );
@@ -3247,6 +3544,7 @@ IterationResult run_iteration(
         scratch.projection_votes.clear();
         scratch.projection_votes.reserve(static_cast<std::size_t>(projection_k));
         for (std::size_t i = 0; i < tpoints.size(); ++i) {
+          const int query = tpoints[i];
           const std::size_t row_offset = static_cast<std::size_t>(tpoints[i]) * static_cast<std::size_t>(global_graph.neighbors);
           scratch.projection_votes.clear();
           for (int j = 0; j < global_graph.neighbors && static_cast<int>(scratch.projection_votes.size()) < projection_k; ++j) {
@@ -3255,8 +3553,38 @@ IterationResult run_iteration(
             const int local = scratch.global_to_local[static_cast<std::size_t>(global_neighbor)];
             if (local >= 0) scratch.projection_votes.push_back(core_result.clbest[static_cast<std::size_t>(local)]);
           }
-          out.res[static_cast<std::size_t>(tpoints[i])] =
-            scratch.projection_votes.empty() ? core_result.clbest.front() : majority_label(scratch.projection_votes);
+          if (scratch.projection_votes.empty()) {
+            bool expanded = false;
+            for (int first_rank = 0; first_rank < global_graph.neighbors && !expanded; ++first_rank) {
+              const int first = global_graph.indices[
+                row_offset + static_cast<std::size_t>(first_rank)
+              ];
+              if (first < 0 || first >= n || first == query) continue;
+              const std::size_t second_offset =
+                static_cast<std::size_t>(first) * static_cast<std::size_t>(global_graph.neighbors);
+              for (int second_rank = 0; second_rank < global_graph.neighbors; ++second_rank) {
+                const int second = global_graph.indices[
+                  second_offset + static_cast<std::size_t>(second_rank)
+                ];
+                if (second < 0 || second >= n) continue;
+                const int local = scratch.global_to_local[static_cast<std::size_t>(second)];
+                if (local < 0) continue;
+                scratch.projection_votes.push_back(
+                  core_result.clbest[static_cast<std::size_t>(local)]
+                );
+                expanded = true;
+                break;
+              }
+            }
+            if (expanded) ++out.run_diagnostic.projection_expanded_rows;
+          }
+          if (scratch.projection_votes.empty()) {
+            ++out.run_diagnostic.projection_fallback_rows;
+            out.res[static_cast<std::size_t>(query)] = fallback_label;
+          } else {
+            out.res[static_cast<std::size_t>(query)] =
+              majority_label(scratch.projection_votes);
+          }
         }
       }
     } else {
@@ -3299,6 +3627,18 @@ IterationResult run_iteration(
   out.run_diagnostic.pls_coarsening_attempted = core_result.pls_coarsening_attempted;
   out.run_diagnostic.pls_coarsening_accepted = core_result.pls_coarsening_accepted;
   out.run_diagnostic.cv_evaluations = core_result.cv_evaluations;
+  out.run_diagnostic.constraint_groups = group_coverage.groups;
+  out.run_diagnostic.constraint_min_size = group_coverage.minimum_size;
+  out.run_diagnostic.constraint_max_size = group_coverage.maximum_size;
+  out.run_diagnostic.landmark_uncovered_groups_before =
+    group_coverage.missing_before;
+  out.run_diagnostic.landmark_uncovered_groups_after =
+    group_coverage.missing_after;
+  const auto fold_load = fold_load_range(
+    core_result.fold_assignments, options.folds
+  );
+  out.run_diagnostic.fold_min_samples = fold_load.first;
+  out.run_diagnostic.fold_max_samples = fold_load.second;
   out.run_diagnostic.landmark_rows_hash = hash_integer_vector(landpoints);
   out.run_diagnostic.initial_labels_hash = hash_integer_vector(scratch.xw);
   out.run_diagnostic.fold_assignments_hash = hash_integer_vector(core_result.fold_assignments);
@@ -3308,6 +3648,9 @@ IterationResult run_iteration(
     diagnostic.run = run_id;
     diagnostic.cycle = cycle + 1;
     diagnostic.proposal_size = core_result.proposal_size[static_cast<std::size_t>(cycle)];
+    diagnostic.proposal_sample_mass =
+      core_result.proposal_sample_mass[static_cast<std::size_t>(cycle)];
+    diagnostic.temperature = core_result.temperature[static_cast<std::size_t>(cycle)];
     diagnostic.active_classes = core_result.active_classes[static_cast<std::size_t>(cycle)];
     diagnostic.accepted = core_result.accepted[static_cast<std::size_t>(cycle)];
     diagnostic.improving_acceptance =
@@ -3656,7 +3999,7 @@ KODAMAMatrixResult run_kodama_matrix(
     }
   }
   if (resident_graph.valid()) {
-    resident_graph.prepare_results(options.runs);
+    resident_graph.prepare_results(options.runs, workers);
   }
   execution_context.pca_initialization = result.has_visual_init ? &result.visual_init : nullptr;
   if (options.spatial.empty()) {
@@ -3929,6 +4272,9 @@ KODAMAMatrixResult run_kodama_matrix(
     result.spatial_graph_seconds = spatial_graph_timer.seconds();
   }
 
+  const CorrectedGraphDiagnostics base_graph_diagnostic =
+    global_graph.indices.empty() ? CorrectedGraphDiagnostics{} :
+      corrected_graph_diagnostics(global_graph, static_cast<int>(x.rows));
   if (options.apply_kodama_dissimilarity && options.materialize_graph) {
     if (options.progress) {
       progress_stream() << "[kodama] applying KODAMA dissimilarity to KNN graph" << std::endl;
@@ -3971,6 +4317,13 @@ KODAMAMatrixResult run_kodama_matrix(
       );
     }
     result.knn_is_kodama_corrected = true;
+    const CorrectedGraphDiagnostics corrected_diagnostic =
+      corrected_graph_diagnostics(global_graph, static_cast<int>(x.rows));
+    result.corrected_finite_edges = corrected_diagnostic.finite_edges;
+    result.corrected_graph_components = corrected_diagnostic.components;
+    result.corrected_zero_agreement_edges =
+      corrected_diagnostic.nonfinite_edges >= base_graph_diagnostic.nonfinite_edges ?
+        corrected_diagnostic.nonfinite_edges - base_graph_diagnostic.nonfinite_edges : 0;
     result.dissimilarity_seconds = dissimilarity_timer.seconds();
   } else {
     if (options.materialize_graph && global_graph.indices.empty() && resident_graph.valid()) {

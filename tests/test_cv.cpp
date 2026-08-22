@@ -70,6 +70,18 @@ void check_constrained_folds(const std::vector<int>& constrain, const std::vecto
   }
 }
 
+std::pair<int, int> fold_load_bounds(const std::vector<int>& folds, int n_folds) {
+  std::vector<int> load(static_cast<std::size_t>(n_folds), 0);
+  for (int fold : folds) {
+    if (fold < 0 || fold >= n_folds) {
+      throw std::runtime_error("Fold assignment is outside the requested range.");
+    }
+    ++load[static_cast<std::size_t>(fold)];
+  }
+  const auto bounds = std::minmax_element(load.begin(), load.end());
+  return {*bounds.first, *bounds.second};
+}
+
 void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
 }
@@ -1337,6 +1349,15 @@ void check_graph_cluster_contracts() {
 
   rejected = false;
   try {
+    options.target_clusters = 1;
+    (void)kodama::KODAMAGraphCluster_CPU(graph, 6, options);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  require(rejected, "Clustering merged disconnected components to reach target K.");
+
+  rejected = false;
+  try {
     options.target_clusters = 0;
     options.backend = kodama::Backend::Metal;
     (void)kodama::KODAMAGraphCluster(graph, 6, options);
@@ -1417,6 +1438,73 @@ void check_spatial_grid_graph() {
   require(clustered.membership.size() == 6, "Random-walk clustering membership size mismatch.");
   require(clustered.n_communities == 2, "Random-walk clustering did not preserve two disconnected groups.");
   require(clustered.backend == kodama::Backend::CPU, "Random-walk clustering did not report CPU backend.");
+
+  {
+    constexpr int walk_n = 12;
+    constexpr int walk_k = 4;
+    kodama::NeighborGraph walk_graph;
+    walk_graph.neighbors = walk_k;
+    walk_graph.index_base = kodama::GraphIndexBase::One;
+    walk_graph.indices.assign(static_cast<std::size_t>(walk_n * walk_k), -1);
+    walk_graph.distances.assign(
+      static_cast<std::size_t>(walk_n * walk_k),
+      std::numeric_limits<float>::infinity()
+    );
+    std::vector<int> cursor(static_cast<std::size_t>(walk_n), 0);
+    auto add_walk_edge = [&](int left, int right, float weight) {
+      const float distance = 1.0f / weight - 1.0f;
+      for (const auto direction : {
+             std::pair<int, int>{left, right},
+             std::pair<int, int>{right, left}
+           }) {
+        const std::size_t offset = static_cast<std::size_t>(
+          direction.first * walk_k + cursor[static_cast<std::size_t>(direction.first)]++
+        );
+        walk_graph.indices[offset] = direction.second + 1;
+        walk_graph.distances[offset] = distance;
+      }
+    };
+    for (int block = 0; block < 3; ++block) {
+      for (int left = 0; left < 4; ++left) {
+        for (int right = left + 1; right < 4; ++right) {
+          add_walk_edge(4 * block + left, 4 * block + right, 1.0f);
+        }
+      }
+    }
+    add_walk_edge(3, 4, 0.08f);
+    add_walk_edge(7, 8, 0.04f);
+
+    cluster_options.weight_type = kodama::GraphWeightType::Distance;
+    cluster_options.random_walk_steps = 4;
+    cluster_options.target_clusters = 3;
+    const auto walk_three = kodama::KODAMAGraphCluster_CPU(
+      walk_graph, walk_n, cluster_options
+    );
+    require(walk_three.target_exact && walk_three.n_communities == 3,
+            "Random-walk hierarchy did not reach the requested three-cluster cut.");
+    for (int block = 0; block < 3; ++block) {
+      for (int vertex = 4 * block + 1; vertex < 4 * block + 4; ++vertex) {
+        require(walk_three.membership[static_cast<std::size_t>(vertex)] ==
+                  walk_three.membership[static_cast<std::size_t>(4 * block)],
+                "Random-walk hierarchy split a dense block at the three-cluster cut.");
+      }
+    }
+    require(walk_three.membership[0] != walk_three.membership[4] &&
+              walk_three.membership[4] != walk_three.membership[8] &&
+              walk_three.membership[0] != walk_three.membership[8],
+            "Random-walk hierarchy merged distinct dense blocks.");
+
+    cluster_options.target_clusters = 4;
+    const auto walk_four = kodama::KODAMAGraphCluster_CPU(
+      walk_graph, walk_n, cluster_options
+    );
+    require(walk_four.target_exact && walk_four.n_communities == 4,
+            "Random-walk hierarchy did not reach the requested four-cluster cut.");
+    require(walk_four.membership[0] == walk_four.membership[1] &&
+              walk_four.membership[1] == walk_four.membership[2] &&
+              walk_four.membership[2] != walk_four.membership[3],
+            "Random-walk four-cluster hierarchy disagrees with the reference cut.");
+  }
 
   for (int i = 0; i < 8; ++i) {
     std::vector<std::pair<float, int>> expected;
@@ -1767,6 +1855,9 @@ int main() {
   require(kres.predicted_labels.size() == d.y.size(), "KNNCV prediction size mismatch.");
   require(kres.fold_assignments.size() == d.y.size(), "KNNCV fold size mismatch.");
   check_constrained_folds(d.constrain, kres.fold_assignments);
+  const auto knn_fold_load = fold_load_bounds(kres.fold_assignments, knn.cv.folds);
+  require(knn_fold_load.first == knn_fold_load.second,
+          "Grouped KNN folds are not balanced by sample count.");
   require(kres.global_accuracy > 0.95, "KNNCV accuracy unexpectedly low.");
   require(kres.confusion.n_labels == 3, "KNNCV confusion matrix label count mismatch.");
   require(kres.parameters.index_type == kodama::KNNIndexType::NativeHNSW, "KNNCV CPU did not use native HNSW by default.");
@@ -2344,6 +2435,10 @@ int main() {
   );
   require(km_res.knn.index_base == kodama::GraphIndexBase::One, "KODAMAMatrix graph index-base metadata is incorrect.");
   require(km_res.knn_is_kodama_corrected, "KODAMAMatrix did not mark its corrected graph.");
+  require(km_res.corrected_finite_edges > 0,
+          "KODAMAMatrix did not report corrected finite edges.");
+  require(km_res.corrected_graph_components > 0,
+          "KODAMAMatrix did not report corrected graph components.");
   require(
     km_res.graph_storage_bytes >=
       km_res.knn.indices.size() * sizeof(int) +
@@ -2493,6 +2588,8 @@ int main() {
       three_dimensional);
   }, "Population spatial mode accepted coordinates other than latitude/longitude.");
   kodama::KODAMAMatrixOptions km_multislide_options = km_spatial_options;
+  km_multislide_options.spatial_constraint_mode = -1;
+  km_multislide_options.landmarks = d.n;
   km_multislide_options.samples.resize(static_cast<std::size_t>(d.n));
   for (int row = 0; row < d.n; ++row) {
     km_multislide_options.samples[static_cast<std::size_t>(row)] =
@@ -2502,6 +2599,17 @@ int main() {
     kodama::KODAMAMatrix_CPU(
       fview, std::vector<int>(), std::vector<int>(), fixed,
       km_multislide_options);
+  require(!km_multislide_res.run_diagnostics.empty(),
+          "Automatic spatial blocks did not report run diagnostics.");
+  const auto& spatial_diagnostic = km_multislide_res.run_diagnostics.front();
+  require(spatial_diagnostic.constraint_groups > 0 &&
+            spatial_diagnostic.constraint_min_size > 0 &&
+            spatial_diagnostic.constraint_max_size >= spatial_diagnostic.constraint_min_size,
+          "Automatic spatial block-size diagnostics are invalid.");
+  require(spatial_diagnostic.landmark_uncovered_groups_after == 0,
+          "Automatic spatial blocks were not all represented by landmarks.");
+  require(spatial_diagnostic.fold_max_samples >= spatial_diagnostic.fold_min_samples,
+          "Automatic spatial fold-load diagnostics are invalid.");
   for (int run = 0; run < km_multislide_res.res_constrain_rows; ++run) {
     std::map<int, int> group_sample;
     for (int row = 0; row < d.n; ++row) {

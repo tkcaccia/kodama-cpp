@@ -21,7 +21,7 @@ kodama_matrix(
   n.cores = NULL,
   graph.neighbors = NULL,
   knn.k = 30L,
-  spatial.resolution = 0.4,
+  spatial.resolution = 0.3,
   spatial.graph.mix = FALSE,
   spatial.constraint.mode = c("kmeans", "graph", "auto"),
   spatial.mode = c("standard", "population"),

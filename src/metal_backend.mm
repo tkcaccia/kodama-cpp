@@ -984,6 +984,21 @@ kernel void project_landmark_labels(
     }
   }
   if (accepted == 0) {
+    for (uint first_rank = 0; first_rank < params.neighbors; ++first_rank) {
+      const int first = graph_indices[base + first_rank];
+      if (first < 0 || uint(first) >= params.samples || uint(first) == query) {
+        continue;
+      }
+      const uint second_base = uint(first) * params.neighbors;
+      for (uint second_rank = 0; second_rank < params.neighbors; ++second_rank) {
+        const int second = graph_indices[second_base + second_rank];
+        if (second >= 0 && uint(second) < params.samples &&
+            landmark_epoch[second] == int(params.epoch)) {
+          projected[query] = labels[second];
+          return;
+        }
+      }
+    }
     projected[query] = params.fallback_label;
     return;
   }

@@ -3,12 +3,30 @@ set -eu
 
 PKG_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 MAKEVARS="$PKG_DIR/src/Makevars"
+SIGNATURE_FILE="$PKG_DIR/src/.kodama-core.signature"
+
+refresh_wrapper_objects() {
+  new_signature=$1
+  old_signature=
+  if [ -f "$SIGNATURE_FILE" ]; then
+    old_signature=$(cat "$SIGNATURE_FILE")
+  fi
+  if [ "$old_signature" != "$new_signature" ]; then
+    rm -f \
+      "$PKG_DIR/src/"*.o \
+      "$PKG_DIR/src/KODAMA.so" \
+      "$PKG_DIR/src/KODAMA.dylib" \
+      "$PKG_DIR/src/KODAMA.dll"
+    printf '%s\n' "$new_signature" > "$SIGNATURE_FILE"
+  fi
+}
 
 # Portable release mode: compile the vendored MIT-licensed CPU core. This is
 # the default used by CRAN and Bioconductor builders and needs no system KODAMA
 # installation. Developers may opt into an externally built CUDA/Metal core by
 # setting both KODAMA_CPP_ROOT and KODAMA_CPP_BUILD_DIR.
 if [ -z "${KODAMA_CPP_ROOT:-}" ]; then
+  refresh_wrapper_objects "vendored-cpu-core"
   cat > "$MAKEVARS" <<'EOF'
 CXX_STD = CXX17
 PKG_CPPFLAGS = -I../inst/include -DKODAMA_DISABLE_NATIVE_PROGRESS
@@ -37,6 +55,8 @@ if [ -z "$KODAMA_CPP_LIB" ]; then
   echo "Cannot find libkodama_cpp in $KODAMA_CPP_BUILD_DIR." >&2
   exit 1
 fi
+KODAMA_CPP_LIB_CHECKSUM=$(cksum "$KODAMA_CPP_LIB" | awk '{print $1 ":" $2}')
+refresh_wrapper_objects "external:$KODAMA_CPP_ROOT:$KODAMA_CPP_BUILD_DIR:$KODAMA_CPP_LIB:$KODAMA_CPP_LIB_CHECKSUM"
 
 SYSTEM_NAME=$(uname -s 2>/dev/null || echo unknown)
 PKG_LIBS_VALUE="\"$KODAMA_CPP_LIB\""
@@ -66,4 +86,3 @@ PKG_CPPFLAGS = -I"$KODAMA_CPP_ROOT/include"
 OBJECTS = RcppExports.o kodama_r.o
 PKG_LIBS = $PKG_LIBS_VALUE
 EOF
-rm -f "$PKG_DIR/src/.kodama-core.signature"

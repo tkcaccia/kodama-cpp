@@ -428,7 +428,7 @@ kodama_matrix <- function(data = NULL,
                           n.cores = NULL,
                           graph.neighbors = NULL,
                           knn.k = 30L,
-                          spatial.resolution = 0.4,
+                          spatial.resolution = 0.3,
                           spatial.graph.mix = FALSE,
                           spatial.constraint.mode = c("kmeans", "graph", "auto"),
                           spatial.mode = c("standard", "population"),
@@ -676,7 +676,7 @@ kodama_matrix_graph <- function(indices,
                                 n.cores = 4L,
                                 graph.neighbors = NULL,
                                 knn.k = 30L,
-                                spatial.resolution = 0.4,
+                                spatial.resolution = 0.3,
                                 spatial.graph.mix = FALSE,
                                 spatial.constraint.mode = c("kmeans", "graph", "auto"),
                                 spatial.mode = c("standard", "population"),
@@ -1259,21 +1259,70 @@ KODAMA.visualization <- function(x,
   )
 }
 
-#' Cluster a graph or embedding with fastEmbedR
+.kodama_walktrap_cut <- function(fit, n.vertices, n.clusters) {
+  n.vertices <- as.integer(n.vertices)
+  n.clusters <- as.integer(n.clusters)
+  if (length(n.clusters) != 1L || is.na(n.clusters) ||
+      n.clusters < 1L || n.clusters > n.vertices) {
+    stop("n.clusters must be between 1 and the graph vertex count.", call. = FALSE)
+  }
+  merges <- as.matrix(fit$merges)
+  minimum <- n.vertices - nrow(merges)
+  if (n.clusters < minimum) {
+    stop(
+      "n.clusters cannot be smaller than the number of disconnected graph components (",
+      minimum, ").", call. = FALSE
+    )
+  }
+  merge.count <- n.vertices - n.clusters
+  parent <- seq_len(n.vertices)
+  size <- rep.int(1L, n.vertices)
+  representative <- rep.int(NA_integer_, 2L * n.vertices - 1L)
+  representative[seq_len(n.vertices)] <- seq_len(n.vertices)
+  find.root <- function(vertex) {
+    while (parent[[vertex]] != vertex) vertex <- parent[[vertex]]
+    vertex
+  }
+  if (merge.count > 0L) {
+    for (step in seq_len(merge.count)) {
+      left <- find.root(representative[[merges[step, 1L]]])
+      right <- find.root(representative[[merges[step, 2L]]])
+      if (size[[left]] < size[[right]]) {
+        swap <- left
+        left <- right
+        right <- swap
+      }
+      parent[[right]] <- left
+      size[[left]] <- size[[left]] + size[[right]]
+      representative[[n.vertices + step]] <- left
+    }
+  }
+  roots <- vapply(seq_len(n.vertices), find.root, integer(1))
+  fit$membership <- match(roots, unique(roots))
+  fit$n_communities <- length(unique(roots))
+  fit$target_clusters <- n.clusters
+  fit$target_exact <- identical(fit$n_communities, n.clusters)
+  fit$best_merge_count <- merge.count
+  fit
+}
+
+#' Cluster a corrected graph or an embedding
 #'
-#' This is a KODAMA adapter around [fastEmbedR::knn_graph()] and
-#' [fastEmbedR::graph_cluster()]. It does not maintain a second clustering
-#' implementation. KODAMA and precomputed KNN graphs are converted once to
-#' fastEmbedR's compact graph representation before clustering.
+#' KODAMA results are clustered directly from their all-M corrected graph with
+#' the package-owned sparse Pons-Latapy random-walk hierarchy. Matrix inputs are
+#' first converted to a KNN graph. The default is one deterministic hierarchy;
+#' UMAP and openTSNE are not used for clustering.
 #'
 #' @param x Input embedding matrix, KODAMA result, KNN graph, or
 #'   `fastEmbedR_graph`.
-#' @param method Clustering method: `"leiden"`, `"louvain"`, or `"walktrap"`.
-#' @param k Number of neighbors used when a graph must be built from a matrix.
+#' @param method Clustering method. The production default is `"walktrap"`.
+#' @param n.clusters Optional exact number of Walktrap clusters. Disconnected
+#'   graph components are never joined to reach this count.
+#' @param k Number of neighbors when a graph must be built from a matrix.
 #' @param metric Distance metric used only when neighbors must be calculated.
 #' @param weight Graph edge weighting used during graph construction.
 #' @param mutual Keep only reciprocal KNN edges.
-#' @param prune Remove graph edges with weight less than or equal to this value.
+#' @param prune Remove graph edges with weight at most this value.
 #' @param graph.backend Backend used to construct a graph from a matrix.
 #' @param backend Backend used by Louvain or Leiden. Walktrap is CPU-only.
 #' @param resolution Modularity resolution for Louvain and Leiden.
@@ -1287,14 +1336,15 @@ KODAMA.visualization <- function(x,
 #' @examples
 #' set.seed(1)
 #' x <- rbind(matrix(rnorm(40, -2), 20, 2), matrix(rnorm(40, 2), 20, 2))
-#' fit <- KODAMA.clustering(x, method = "leiden", k = 5, n.cores = 1)
+#' fit <- KODAMA.clustering(x, k = 5, n.clusters = 2, n.cores = 1)
 #' table(fit$membership)
 #' @export
 KODAMA.clustering <- function(x,
-                              method = c("leiden", "louvain", "walktrap"),
+                              method = c("walktrap", "leiden", "louvain"),
+                              n.clusters = NULL,
                               k = 30L,
                               metric = c("euclidean", "cosine", "correlation"),
-                              weight = c("snn", "distance", "binary"),
+                              weight = c("distance", "snn", "binary"),
                               mutual = FALSE,
                               prune = 0,
                               graph.backend = NULL,
@@ -1310,14 +1360,51 @@ KODAMA.clustering <- function(x,
   metric <- match.arg(metric)
   n.cores <- kodama_resolve_n_cores(n.cores, default = 1L)
   graph_input <- extract_kodama_graph(x)
+  compacted_edges <- 0L
   if (!is.null(graph_input)) {
+    if (identical(method, "walktrap")) {
+      requested <- if (is.null(n.clusters)) 0L else as.integer(n.clusters)
+      if (kodama_graph_is_handle(graph_input)) {
+        fit <- kodama_graph_handle_cluster_cpp(
+          graph_input$handle, weight = weight, n_threads = as.integer(n.cores),
+          n_iterations = as.integer(n.iterations),
+          random_walk_steps = as.integer(steps), n_clusters = requested,
+          prune = prune, mutual = mutual
+        )
+      } else {
+        indices <- as.matrix(graph_input$indices)
+        distances <- as.matrix(graph_input$distances)
+        compacted_edges <- sum(!is.finite(distances) | distances < 0)
+        fit <- kodama_graph_cluster_cpp(
+          indices, distances, weight = weight, n_threads = as.integer(n.cores),
+          n_iterations = as.integer(n.iterations),
+          random_walk_steps = as.integer(steps), n_clusters = requested,
+          prune = prune, mutual = mutual
+        )
+      }
+      fit$method <- "walktrap"
+      fit$implementation <- "kodama_sparse_pons_latapy_walktrap"
+      fit$clustering_input <- "kodama_corrected_graph"
+      fit$compacted_nonfinite_edges <- compacted_edges
+      class(fit) <- unique(c("fastEmbedR_graph_cluster", class(fit)))
+      return(fit)
+    }
     if (kodama_graph_is_handle(graph_input)) {
       graph_input <- KODAMA.graph.materialize(graph_input)
     }
-    x <- list(
-      indices = graph_input$indices,
-      distances = graph_input$distances
-    )
+    indices <- as.matrix(graph_input$indices)
+    distances <- as.matrix(graph_input$distances)
+    invalid <- !is.finite(distances) | distances < 0
+    compacted_edges <- sum(invalid)
+    if (compacted_edges > 0L) {
+      finite.indices <- indices[!invalid & !is.na(indices)]
+      one.based <- length(finite.indices) > 0L &&
+        min(finite.indices) >= 1L && max(finite.indices) <= nrow(indices)
+      self <- row(indices) - if (one.based) 0L else 1L
+      indices[invalid] <- self[invalid]
+      distances[invalid] <- 0
+    }
+    x <- list(indices = indices, distances = distances)
   }
   graph <- fastEmbedR::knn_graph(
     x,
@@ -1329,7 +1416,7 @@ KODAMA.clustering <- function(x,
     prune = prune,
     n.cores = n.cores
   )
-  fastEmbedR::graph_cluster(
+  fit <- fastEmbedR::graph_cluster(
     graph,
     method = method,
     backend = backend,
@@ -1339,4 +1426,13 @@ KODAMA.clustering <- function(x,
     steps = steps,
     seed = seed
   )
+  if (!is.null(n.clusters)) {
+    if (!identical(method, "walktrap")) {
+      stop("Exact n.clusters requires method = \"walktrap\".", call. = FALSE)
+    }
+    fit <- .kodama_walktrap_cut(fit, graph$n_vertices, n.clusters)
+  }
+  fit$clustering_input <- if (is.null(graph_input)) "constructed_graph" else "kodama_corrected_graph"
+  fit$compacted_nonfinite_edges <- compacted_edges
+  fit
 }

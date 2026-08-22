@@ -13,11 +13,8 @@
 #include <limits>
 #include <map>
 #include <memory>
-#if defined(KODAMA_DISABLE_NATIVE_PROGRESS)
 #include <fstream>
-#else
 #include <iostream>
-#endif
 #include <mutex>
 #include <numeric>
 #include <random>
@@ -68,12 +65,12 @@ std::mutex& core_progress_mutex() {
 }
 
 void emit_core_progress(const std::string& message) {
-#if defined(KODAMA_DISABLE_NATIVE_PROGRESS)
   const char* path = std::getenv("KODAMA_PROGRESS_FILE");
-  if (path == nullptr || path[0] == '\0') return;
-  std::ofstream output(path, std::ios::out | std::ios::app);
-  if (output) output << message << '\n';
-#else
+  if (path != nullptr && path[0] != '\0') {
+    std::ofstream output(path, std::ios::out | std::ios::app);
+    if (output) output << message << '\n';
+  }
+#if !defined(KODAMA_DISABLE_NATIVE_PROGRESS)
   std::cerr << message << std::endl;
 #endif
 }
@@ -1284,6 +1281,8 @@ CoreResult maximize_core(
   result.vect_acc.assign(static_cast<std::size_t>(options.cycles), -1.0);
   result.vect_score.assign(static_cast<std::size_t>(options.cycles), -1.0);
   result.proposal_size.assign(static_cast<std::size_t>(options.cycles), 0);
+  result.proposal_sample_mass.assign(static_cast<std::size_t>(options.cycles), 0);
+  result.temperature.assign(static_cast<std::size_t>(options.cycles), 0.0);
   result.active_classes.assign(static_cast<std::size_t>(options.cycles), 0);
   result.accepted.assign(static_cast<std::size_t>(options.cycles), 0);
   result.improving_acceptance.assign(static_cast<std::size_t>(options.cycles), 0);
@@ -1293,6 +1292,7 @@ CoreResult maximize_core(
   const std::vector<int> fixed_flags = normalized_fixed(fixed, x.rows);
 
   std::vector<int> groups;
+  std::vector<int> group_movable_mass;
   std::vector<const std::vector<int>*> group_member_refs;
   std::map<int, std::vector<int>> group_members;
   const bool singleton_groups = constrain.empty();
@@ -1300,6 +1300,7 @@ CoreResult maximize_core(
     groups.reserve(x.rows);
     for (std::size_t i = 0; i < x.rows; ++i) {
       groups.push_back(static_cast<int>(i));
+      group_movable_mass.push_back(fixed_flags[i] == 1 ? 0 : 1);
     }
   } else {
     for (std::size_t i = 0; i < group_id.size(); ++i) {
@@ -1310,6 +1311,11 @@ CoreResult maximize_core(
     for (const auto& kv : group_members) {
       groups.push_back(static_cast<int>(groups.size()));
       group_member_refs.push_back(&kv.second);
+      int movable = 0;
+      for (int row : kv.second) {
+        if (fixed_flags[static_cast<std::size_t>(row)] != 1) ++movable;
+      }
+      group_movable_mass.push_back(movable);
     }
   }
   std::mt19937_64 rng(options.seed);
@@ -1345,7 +1351,6 @@ CoreResult maximize_core(
   eligible.reserve(x.rows);
   candidate_labels.reserve(x.rows);
   candidate_counts.reserve(x.rows);
-
   for (int cycle = 0; cycle < options.cycles; ++cycle) {
     std::vector<int> cl = options.evolutionary_search ? current_cl : result.clbest;
     std::vector<int> cl_dirty = cl;
@@ -1359,10 +1364,17 @@ CoreResult maximize_core(
         options.adaptive_proposal_size && options.evolution.adaptive_proposal_size,
         rng
       );
-      result.proposal_size[static_cast<std::size_t>(cycle)] = n_to_sample;
       sampled_groups = groups;
       std::shuffle(sampled_groups.begin(), sampled_groups.end(), rng);
       sampled_groups.resize(static_cast<std::size_t>(n_to_sample));
+      int affected_sample_mass = 0;
+      for (int group : sampled_groups) {
+        affected_sample_mass += group_movable_mass[static_cast<std::size_t>(group)];
+      }
+      result.proposal_size[static_cast<std::size_t>(cycle)] =
+        n_to_sample;
+      result.proposal_sample_mass[static_cast<std::size_t>(cycle)] =
+        affected_sample_mass;
 
       std::vector<int> empirical_labels;
       std::vector<int> empirical_counts;
@@ -1428,7 +1440,9 @@ CoreResult maximize_core(
     const bool attempt_absorption = allow_transition && options.many_to_one_absorption;
     if (attempt_pls_coarsening || attempt_absorption) {
       ++result.transition_attempted;
-      transition_stats = build_class_transition_stats(cl, proposal_predictions, fixed_flags);
+      transition_stats = build_class_transition_stats(
+        cl, proposal_predictions, fixed_flags
+      );
     }
     if (attempt_pls_coarsening) {
       ++result.pls_coarsening_attempted;
@@ -1484,7 +1498,11 @@ CoreResult maximize_core(
     if (options.evolutionary_search) {
       const double cooling = 1.0 - static_cast<double>(cycle + 1) /
         static_cast<double>(std::max(1, options.cycles));
-      const double temperature = std::max(1.0e-9, 0.10 * std::max(0.0, 1.0 - current_acc) * cooling);
+      const double temperature = std::max(
+        1.0e-9,
+        0.10 * std::max(0.0, 1.0 - current_acc) * cooling
+      );
+      result.temperature[static_cast<std::size_t>(cycle)] = temperature;
       bool accept_current = score >= current_score;
       improving_accept = accept_current;
       if (!accept_current && options.evolution.stochastic_acceptance &&

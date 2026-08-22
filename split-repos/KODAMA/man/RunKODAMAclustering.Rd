@@ -19,6 +19,7 @@ RunKODAMAclustering(object, ...)
   dims = 2L,
   cluster.name = "KODAMA_clusters",
   graph.name = "KODAMA",
+  use.corrected.graph = TRUE,
   ...
 )
 
@@ -28,6 +29,7 @@ RunKODAMAclustering(object, ...)
   dims = 2L,
   cluster.name = "KODAMA_clusters",
   graph.name = "KODAMA",
+  use.corrected.graph = TRUE,
   ...
 )
 
@@ -37,6 +39,7 @@ RunKODAMAclustering(object, ...)
   dims = 2L,
   cluster.name = "KODAMA_clusters",
   reduction.save = "KODAMA",
+  use.corrected.graph = TRUE,
   ...
 )
 
@@ -46,6 +49,7 @@ RunKODAMAclustering(object, ...)
   dims = 2L,
   cluster.name = "KODAMA_clusters",
   reduction.save = "KODAMA",
+  use.corrected.graph = TRUE,
   ...
 )
 }
@@ -69,6 +73,9 @@ dimensions.}
 \item{graph.name}{Name of the KODAMA state entry used to store complete
 clustering diagnostics.}
 
+\item{use.corrected.graph}{Use the all-M corrected KODAMA graph stored in the
+object. This is the production default.}
+
 \item{reduction.save}{Name of the Seurat or Giotto KODAMA state entry.}
 }
 \value{
@@ -77,9 +84,9 @@ otherwise the updated container with cluster membership stored in its
 observation metadata.
 }
 \description{
-This object-aware wrapper extracts a stored dimensional reduction, delegates
-graph construction and Louvain, Leiden, or Walktrap clustering to
-\code{\link[=KODAMA.clustering]{KODAMA.clustering()}}, and writes the resulting membership back to the
-container. The clustering algorithms themselves are implemented only by
-\code{\link[fastEmbedR:graph_cluster]{fastEmbedR::graph_cluster()}}.
+This object-aware wrapper uses the corrected graph stored by
+\code{\link[=RunKODAMAmatrix]{RunKODAMAmatrix()}} by default and writes the resulting membership back to
+the container. A dimensional reduction is used only when
+\code{use.corrected.graph = FALSE}. UMAP and openTSNE therefore remain
+visualization methods and do not determine the clustering.
 }

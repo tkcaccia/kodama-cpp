@@ -341,6 +341,10 @@ Rcpp::List core_to_r(const kodama::CoreResult& result) {
     Rcpp::Named("vect_acc") = Rcpp::NumericVector(result.vect_acc.begin(), result.vect_acc.end()),
     Rcpp::Named("vect_score") = Rcpp::NumericVector(result.vect_score.begin(), result.vect_score.end()),
     Rcpp::Named("proposal_size") = Rcpp::IntegerVector(result.proposal_size.begin(), result.proposal_size.end()),
+    Rcpp::Named("proposal_sample_mass") = Rcpp::IntegerVector(
+      result.proposal_sample_mass.begin(), result.proposal_sample_mass.end()),
+    Rcpp::Named("temperature") = Rcpp::NumericVector(
+      result.temperature.begin(), result.temperature.end()),
     Rcpp::Named("active_classes") = Rcpp::IntegerVector(result.active_classes.begin(), result.active_classes.end()),
     Rcpp::Named("accepted") = Rcpp::LogicalVector(result.accepted.begin(), result.accepted.end()),
     Rcpp::Named("improving_acceptance") = Rcpp::LogicalVector(result.improving_acceptance.begin(), result.improving_acceptance.end()),
@@ -560,6 +564,15 @@ Rcpp::List kodama_matrix_result_to_r(
   Rcpp::IntegerVector pls_coarsening_attempted(result.run_diagnostics.size());
   Rcpp::IntegerVector pls_coarsening_accepted(result.run_diagnostics.size());
   Rcpp::IntegerVector cv_evaluations(result.run_diagnostics.size());
+  Rcpp::IntegerVector constraint_groups(result.run_diagnostics.size());
+  Rcpp::IntegerVector constraint_min_size(result.run_diagnostics.size());
+  Rcpp::IntegerVector constraint_max_size(result.run_diagnostics.size());
+  Rcpp::IntegerVector fold_min_samples(result.run_diagnostics.size());
+  Rcpp::IntegerVector fold_max_samples(result.run_diagnostics.size());
+  Rcpp::IntegerVector landmark_uncovered_before(result.run_diagnostics.size());
+  Rcpp::IntegerVector landmark_uncovered_after(result.run_diagnostics.size());
+  Rcpp::IntegerVector projection_expanded_rows(result.run_diagnostics.size());
+  Rcpp::IntegerVector projection_fallback_rows(result.run_diagnostics.size());
   Rcpp::CharacterVector landmark_rows_hash(result.run_diagnostics.size());
   Rcpp::CharacterVector initial_labels_hash(result.run_diagnostics.size());
   Rcpp::CharacterVector fold_assignments_hash(result.run_diagnostics.size());
@@ -574,6 +587,15 @@ Rcpp::List kodama_matrix_result_to_r(
     pls_coarsening_attempted[i] = diagnostic.pls_coarsening_attempted;
     pls_coarsening_accepted[i] = diagnostic.pls_coarsening_accepted;
     cv_evaluations[i] = diagnostic.cv_evaluations;
+    constraint_groups[i] = diagnostic.constraint_groups;
+    constraint_min_size[i] = diagnostic.constraint_min_size;
+    constraint_max_size[i] = diagnostic.constraint_max_size;
+    fold_min_samples[i] = diagnostic.fold_min_samples;
+    fold_max_samples[i] = diagnostic.fold_max_samples;
+    landmark_uncovered_before[i] = diagnostic.landmark_uncovered_groups_before;
+    landmark_uncovered_after[i] = diagnostic.landmark_uncovered_groups_after;
+    projection_expanded_rows[i] = diagnostic.projection_expanded_rows;
+    projection_fallback_rows[i] = diagnostic.projection_fallback_rows;
     std::ostringstream landmark_stream;
     std::ostringstream label_stream;
     std::ostringstream fold_stream;
@@ -594,6 +616,15 @@ Rcpp::List kodama_matrix_result_to_r(
     Rcpp::Named("pls_coarsening_attempted") = pls_coarsening_attempted,
     Rcpp::Named("pls_coarsening_accepted") = pls_coarsening_accepted,
     Rcpp::Named("cv_evaluations") = cv_evaluations,
+    Rcpp::Named("constraint_groups") = constraint_groups,
+    Rcpp::Named("constraint_min_size") = constraint_min_size,
+    Rcpp::Named("constraint_max_size") = constraint_max_size,
+    Rcpp::Named("fold_min_samples") = fold_min_samples,
+    Rcpp::Named("fold_max_samples") = fold_max_samples,
+    Rcpp::Named("landmark_uncovered_groups_before") = landmark_uncovered_before,
+    Rcpp::Named("landmark_uncovered_groups_after") = landmark_uncovered_after,
+    Rcpp::Named("projection_expanded_rows") = projection_expanded_rows,
+    Rcpp::Named("projection_fallback_rows") = projection_fallback_rows,
     Rcpp::Named("landmark_rows_hash") = landmark_rows_hash,
     Rcpp::Named("initial_labels_hash") = initial_labels_hash,
     Rcpp::Named("fold_assignments_hash") = fold_assignments_hash
@@ -601,6 +632,8 @@ Rcpp::List kodama_matrix_result_to_r(
   Rcpp::IntegerVector cycle_run(result.cycle_diagnostics.size());
   Rcpp::IntegerVector cycle_number(result.cycle_diagnostics.size());
   Rcpp::IntegerVector proposal_size(result.cycle_diagnostics.size());
+  Rcpp::IntegerVector proposal_sample_mass(result.cycle_diagnostics.size());
+  Rcpp::NumericVector temperature(result.cycle_diagnostics.size());
   Rcpp::IntegerVector active_classes(result.cycle_diagnostics.size());
   Rcpp::LogicalVector accepted(result.cycle_diagnostics.size());
   Rcpp::LogicalVector improving_acceptance(result.cycle_diagnostics.size());
@@ -610,6 +643,8 @@ Rcpp::List kodama_matrix_result_to_r(
     cycle_run[i] = diagnostic.run;
     cycle_number[i] = diagnostic.cycle;
     proposal_size[i] = diagnostic.proposal_size;
+    proposal_sample_mass[i] = diagnostic.proposal_sample_mass;
+    temperature[i] = diagnostic.temperature;
     active_classes[i] = diagnostic.active_classes;
     accepted[i] = diagnostic.accepted != 0;
     improving_acceptance[i] = diagnostic.improving_acceptance != 0;
@@ -619,6 +654,8 @@ Rcpp::List kodama_matrix_result_to_r(
     Rcpp::Named("run") = cycle_run,
     Rcpp::Named("cycle") = cycle_number,
     Rcpp::Named("proposal_size") = proposal_size,
+    Rcpp::Named("proposal_sample_mass") = proposal_sample_mass,
+    Rcpp::Named("temperature") = temperature,
     Rcpp::Named("active_classes") = active_classes,
     Rcpp::Named("accepted") = accepted,
     Rcpp::Named("improving_acceptance") = improving_acceptance,
@@ -633,6 +670,11 @@ Rcpp::List kodama_matrix_result_to_r(
     Rcpp::Named("knn_is_kodama_corrected") = result.knn_is_kodama_corrected,
     Rcpp::Named("graph_storage_bytes") =
       static_cast<double>(result.graph_storage_bytes),
+    Rcpp::Named("corrected_finite_edges") =
+      static_cast<double>(result.corrected_finite_edges),
+    Rcpp::Named("corrected_zero_agreement_edges") =
+      static_cast<double>(result.corrected_zero_agreement_edges),
+    Rcpp::Named("corrected_graph_components") = result.corrected_graph_components,
     Rcpp::Named("visual_init") = visual_init,
     Rcpp::Named("res_constrain") = res_constrain,
     Rcpp::Named("run_diagnostics") = run_diagnostics,
@@ -743,7 +785,7 @@ Rcpp::List kodama_matrix_cpp(
   int n_cores = 4,
   int graph_neighbors = 100,
   int knn_k = 30,
-  double spatial_resolution = 0.4,
+  double spatial_resolution = 0.3,
   bool spatial_graph_mix = false,
   int spatial_constraint_mode = 0,
   int spatial_coordinate_mode = 0,

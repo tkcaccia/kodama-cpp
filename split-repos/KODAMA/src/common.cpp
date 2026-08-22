@@ -187,21 +187,42 @@ std::vector<int> make_folds(
     for (auto& kv : by_label) {
       auto& ids = kv.second;
       std::shuffle(ids.begin(), ids.end(), rng);
-      std::fill(fold_load.begin(), fold_load.end(), 0);
-      for (std::size_t pos = 0; pos < ids.size(); ++pos) {
-        const int fold = static_cast<int>(
-          std::min_element(fold_load.begin(), fold_load.end()) - fold_load.begin()
-        );
-        group_fold[ids[pos]] = fold;
-        fold_load[static_cast<std::size_t>(fold)] += groups[ids[pos]].size;
+      std::stable_sort(ids.begin(), ids.end(), [&](std::size_t left, std::size_t right) {
+        return groups[left].size > groups[right].size;
+      });
+      std::vector<int> label_load(static_cast<std::size_t>(options.folds), 0);
+      for (std::size_t id : ids) {
+        int fold = 0;
+        for (int candidate = 1; candidate < options.folds; ++candidate) {
+          const auto candidate_load = std::pair<int, int>{
+            label_load[static_cast<std::size_t>(candidate)],
+            fold_load[static_cast<std::size_t>(candidate)]
+          };
+          const auto best_load = std::pair<int, int>{
+            label_load[static_cast<std::size_t>(fold)],
+            fold_load[static_cast<std::size_t>(fold)]
+          };
+          if (candidate_load < best_load) fold = candidate;
+        }
+        group_fold[id] = fold;
+        label_load[static_cast<std::size_t>(fold)] += groups[id].size;
+        fold_load[static_cast<std::size_t>(fold)] += groups[id].size;
       }
     }
   } else {
     std::vector<std::size_t> order(groups.size());
     std::iota(order.begin(), order.end(), 0);
     std::shuffle(order.begin(), order.end(), rng);
-    for (std::size_t i = 0; i < order.size(); ++i) {
-      group_fold[order[i]] = static_cast<int>(i % static_cast<std::size_t>(options.folds));
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
+      return groups[left].size > groups[right].size;
+    });
+    std::vector<int> fold_load(static_cast<std::size_t>(options.folds), 0);
+    for (std::size_t id : order) {
+      const int fold = static_cast<int>(
+        std::min_element(fold_load.begin(), fold_load.end()) - fold_load.begin()
+      );
+      group_fold[id] = fold;
+      fold_load[static_cast<std::size_t>(fold)] += groups[id].size;
     }
   }
 

@@ -6,7 +6,6 @@ Authors@R: c(
            email = "stefano.cacciatore@icgeb.org",
            comment = c(ORCID = "0000-0001-7052-7156"))
   )
-Author: Stefano Cacciatore [aut, cre]
 Maintainer: Stefano Cacciatore <stefano.cacciatore@icgeb.org>
 Description: Knowledge Discovery by Accuracy Maximization using KNN or
     SIMPLS followed by latent-space LDA. The portable source package vendors
