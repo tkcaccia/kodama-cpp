@@ -90,6 +90,30 @@ kodama_best_run <- function(acc) {
   as.integer(which.max(acc))
 }
 
+kodama_begin_progress <- function(progress, progress.file = NULL) {
+  if (!isTRUE(progress)) return(list(path = NULL, previous = NULL))
+  path <- progress.file
+  if (is.null(path)) {
+    path <- tempfile("kodama-progress-", fileext = ".log")
+  }
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  path <- file.path(normalizePath(dirname(path), mustWork = TRUE), basename(path))
+  previous <- Sys.getenv("KODAMA_PROGRESS_FILE", unset = NA_character_)
+  Sys.setenv(KODAMA_PROGRESS_FILE = path)
+  message("KODAMA progress file: ", path)
+  list(path = path, previous = previous)
+}
+
+kodama_end_progress <- function(state) {
+  if (is.null(state$path)) return(invisible(NULL))
+  if (is.na(state$previous)) {
+    Sys.unsetenv("KODAMA_PROGRESS_FILE")
+  } else {
+    Sys.setenv(KODAMA_PROGRESS_FILE = state$previous)
+  }
+  invisible(NULL)
+}
+
 as_kodama_matrix_result <- function(result, parameters, visual_init = NULL) {
   counts <- kodama_class_counts(result$res)
   best_run <- kodama_best_run(result$acc)
@@ -124,6 +148,14 @@ as_kodama_matrix_result <- function(result, parameters, visual_init = NULL) {
 #' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
+#' @return A cross-validation result containing predictions, truth, fold
+#'   assignments, fold and global accuracy, confusion matrix, timing, and
+#'   backend diagnostics.
+#' @examples
+#' x <- as.matrix(iris[, 1:4])
+#' y <- as.integer(iris$Species)
+#' fit <- KNNCV(x, y, folds = 3, k = 5, backend = "cpu")
+#' fit$accuracy
 #' @export
 KNNCV <- function(data,
                   labels,
@@ -133,11 +165,11 @@ KNNCV <- function(data,
                   seed = 1L,
                   k = 10L,
                   metric = c("cosine", "inner_product", "euclidean"),
-                  backend = c("cpu", "cuda", "metal"),
+                  backend = NULL,
                   n.cores = 1L,
                   gpu.device = 0L) {
   metric <- match.arg(metric)
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
   knncv_cpp(
     as_kodama_matrix(data),
     as_kodama_labels(labels),
@@ -168,6 +200,14 @@ KNNCV <- function(data,
 #' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
 #' @param n.cores Number of CPU worker threads requested by the wrapper.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
+#' @return A cross-validation result containing predictions, truth, fold
+#'   assignments, fold and global accuracy, confusion matrix, timing, and
+#'   backend diagnostics.
+#' @examples
+#' x <- as.matrix(iris[, 1:4])
+#' y <- as.integer(iris$Species)
+#' fit <- PLSLDACV(x, y, folds = 3, ncomp = 2, backend = "cpu")
+#' fit$accuracy
 #' @export
 PLSLDACV <- function(data,
                      labels,
@@ -178,10 +218,10 @@ PLSLDACV <- function(data,
                      ncomp = min(50L, ncol(data)),
                      center = TRUE,
                      scale = TRUE,
-                     backend = c("cpu", "cuda", "metal"),
+                     backend = NULL,
                      n.cores = 1L,
                      gpu.device = 0L) {
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
   plsldacv_cpp(
     as_kodama_matrix(data),
     as_kodama_labels(labels),
@@ -217,6 +257,11 @@ PLSLDACV <- function(data,
 #' @return A list containing the best labels and predictions, accuracy and score
 #'   traces, plus explicit proposal, acceptance, rejection, coarsening, and
 #'   absorption counters for optimizer-state diagnostics.
+#' @examples
+#' x <- as.matrix(iris[, 1:4])
+#' y <- rep(1:3, each = 50)
+#' fit <- CoreKNN(x, y, cycles = 1, folds = 3, k = 5, n.cores = 1)
+#' fit$accuracy
 #' @export
 CoreKNN <- function(data,
                     labels,
@@ -228,11 +273,11 @@ CoreKNN <- function(data,
                     seed = 1L,
                     k = 30L,
                     metric = c("euclidean", "cosine", "inner_product"),
-                    backend = c("cpu", "cuda", "metal"),
+                    backend = NULL,
                     n.cores = 4L,
                     gpu.device = 0L) {
   metric <- match.arg(metric)
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
   core_knn_cpp(
     as_kodama_matrix(data),
     as_kodama_labels(labels),
@@ -268,6 +313,11 @@ CoreKNN <- function(data,
 #' @return A list containing the best labels and predictions, accuracy and score
 #'   traces, plus explicit proposal, acceptance, rejection, coarsening, and
 #'   absorption counters for optimizer-state diagnostics.
+#' @examples
+#' x <- as.matrix(iris[, 1:4])
+#' y <- rep(1:3, each = 50)
+#' fit <- CorePLSLDA(x, y, cycles = 1, folds = 3, ncomp = 2, n.cores = 1)
+#' fit$accuracy
 #' @export
 CorePLSLDA <- function(data,
                        labels,
@@ -278,10 +328,10 @@ CorePLSLDA <- function(data,
                        stratified = TRUE,
                        seed = 1L,
                        ncomp = min(50L, ncol(data)),
-                       backend = c("cpu", "cuda", "metal"),
+                       backend = NULL,
                        n.cores = 4L,
                        gpu.device = 0L) {
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
   core_plslda_cpp(
     as_kodama_matrix(data),
     as_kodama_labels(labels),
@@ -316,8 +366,9 @@ CorePLSLDA <- function(data,
 #' @param ncomp Number of PLS components for the PLS-LDA classifier.
 #' @param landmarks Maximum number of samples optimized directly in each run.
 #' @param splitting Initial number of label classes used for each run.
-#' @param n.cores CPU worker count. For CUDA or Metal matrix optimization,
-#'   `0` enables backend-specific automatic independent-run lane selection.
+#' @param n.cores CPU worker count. `NULL` uses `options(n.cores = ...)`, then
+#'   `N_CORES`, and otherwise 4. For CUDA or Metal matrix optimization, an
+#'   explicit `0` enables backend-specific automatic independent-run lanes.
 #' @param graph.neighbors Number of neighbors retained in the returned graph.
 #' @param knn.k Number of neighbors used by the KNN classifier.
 #' @param spatial.resolution Resolution parameter for constrained grouping when
@@ -335,6 +386,9 @@ CorePLSLDA <- function(data,
 #'   PCA and stores both UMAP and openTSNE initializations for reuse by
 #'   `KODAMA.visualization`.
 #' @param progress Whether the C++ core prints run/cycle progress.
+#' @param progress.file Optional progress-log path. When `progress=TRUE`, the
+#'   native workers append M/Tcycle checkpoints here. A temporary path is
+#'   created and announced when this is `NULL`.
 #' @param folds Number of cross-validation folds used by the classifier.
 #' @param ... Reserved internal controls for reproducibility experiments.
 #' @param apply.kodama.dissimilarity Whether to return the KODAMA-corrected
@@ -349,6 +403,14 @@ CorePLSLDA <- function(data,
 #'   retained in `landmark_seconds`; their sum, mean, and median are also
 #'   reported in `timing` so landmark construction is not conflated with the
 #'   classifier core.
+#' @examples
+#' x <- as.matrix(iris[, 1:4])
+#' fit <- KODAMA.matrix(
+#'   data = x, classifier = "knn", M = 1, Tcycle = 1,
+#'   landmarks = 100, splitting = 10, knn.k = 5, n.cores = 1,
+#'   return.graph = FALSE
+#' )
+#' fit$acc
 #' @aliases KODAMA.matrix
 #' @export
 kodama_matrix <- function(data = NULL,
@@ -363,7 +425,7 @@ kodama_matrix <- function(data = NULL,
                           ncomp = NULL,
                           landmarks = 10000L,
                           splitting = NULL,
-                          n.cores = 4L,
+                          n.cores = NULL,
                           graph.neighbors = NULL,
                           knn.k = 30L,
                           spatial.resolution = 0.4,
@@ -372,11 +434,12 @@ kodama_matrix <- function(data = NULL,
                           spatial.mode = c("standard", "population"),
                           metric = "euclidean",
                           classifier = c("knn", "pls_lda"),
-                          backend = c("cpu", "cuda", "metal"),
+                          backend = NULL,
                           seed = 1234L,
                           folds = 5L,
                           visual.init = TRUE,
                           progress = TRUE,
+                          progress.file = NULL,
                           apply.kodama.dissimilarity = TRUE,
                           return.graph = FALSE,
                           ...) {
@@ -390,9 +453,9 @@ kodama_matrix <- function(data = NULL,
   } else {
     experimental$.evolution.policy
   }
-  backend_was_missing <- missing(backend)
   classifier <- match.arg(classifier)
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
+  n.cores <- kodama_resolve_n_cores(n.cores, default = 4L, allow.zero = TRUE)
   spatial.constraint.mode <- match.arg(spatial.constraint.mode)
   spatial.mode <- match.arg(spatial.mode)
   .evolution.policy <- match.arg(.evolution.policy, c(
@@ -408,9 +471,6 @@ kodama_matrix <- function(data = NULL,
     }
     if (!is.null(data) && !is.null(extract_kodama_graph(data))) {
       stop("data must be the raw numeric matrix; pass graph inputs through graph.")
-    }
-    if (backend_was_missing && !is.null(graph$backend)) {
-      backend <- match.arg(as.character(graph$backend), c("cpu", "cuda", "metal"))
     }
     raw_data <- if (is.null(data)) NULL else as_kodama_matrix(data)
     n_samples <- kodama_graph_samples(graph_input)
@@ -448,6 +508,7 @@ kodama_matrix <- function(data = NULL,
       folds = folds,
       visual.init = visual.init,
       progress = progress,
+      progress.file = progress.file,
       apply.kodama.dissimilarity = apply.kodama.dissimilarity,
       return.graph = return.graph,
       .evolution.policy = .evolution.policy
@@ -488,9 +549,12 @@ kodama_matrix <- function(data = NULL,
     folds = as.integer(folds),
     evolution.policy = .evolution.policy,
     visual.init = isTRUE(visual.init),
+    progress.file = progress.file,
     apply.kodama.dissimilarity = isTRUE(apply.kodama.dissimilarity),
     return.graph = if (graph_output == 2L) "handle" else graph_output == 1L
   )
+  progress_state <- kodama_begin_progress(progress, progress.file)
+  on.exit(kodama_end_progress(progress_state), add = TRUE)
   result <- kodama_matrix_cpp(
     data = data_matrix,
     spatial = if (is.null(spatial)) NULL else as_kodama_matrix(spatial),
@@ -521,7 +585,9 @@ kodama_matrix <- function(data = NULL,
     folds = as.integer(folds),
     evolution_policy = .evolution.policy
   )
-  as_kodama_matrix_result(result, parameters)
+  result <- as_kodama_matrix_result(result, parameters)
+  result$progress_file <- progress_state$path
+  result
 }
 
 #' @export
@@ -571,12 +637,27 @@ KODAMA.matrix <- kodama_matrix
 #' @param folds Number of cross-validation folds used by the classifier.
 #' @param visual.init Whether to propagate the PCA starts stored in a
 #'   `KODAMA.graph` object.
-#' @param progress Whether the C++ core prints progress.
+#' @param progress Whether the C++ core records progress.
+#' @param progress.file Optional progress-log path. When `progress=TRUE`, the
+#'   native workers append M/Tcycle checkpoints here. A temporary path is
+#'   created and announced when this is `NULL`.
 #' @param apply.kodama.dissimilarity Whether to return the KODAMA-corrected
 #'   graph.
 #' @param return.graph `FALSE` omits the graph, `TRUE` materializes matrices,
 #'   and `"handle"` returns a reusable external C++ graph pointer.
 #' @param ... Reserved internal controls for reproducibility experiments.
+#' @return A `kodama_matrix` result with evolved labels, accuracy traces,
+#'   diagnostics, timing, and the corrected graph or graph handle when
+#'   requested.
+#' @examples
+#' x <- as.matrix(iris[, 1:4])
+#' g <- KODAMA.graph(x, k = 10, storage = "matrix", n.cores = 1)
+#' fit <- KODAMA.matrix.graph(
+#'   g$indices, g$distances, data = x, M = 1, Tcycle = 1,
+#'   landmarks = 100, splitting = 10, knn.k = 5, n.cores = 1,
+#'   return.graph = FALSE
+#' )
+#' fit$acc
 #' @aliases KODAMA.matrix.graph
 #' @export
 kodama_matrix_graph <- function(indices,
@@ -600,7 +681,7 @@ kodama_matrix_graph <- function(indices,
                                 spatial.constraint.mode = c("kmeans", "graph", "auto"),
                                 spatial.mode = c("standard", "population"),
                                 classifier = c("knn", "pls_lda"),
-                                backend = c("cpu", "cuda", "metal"),
+                                backend = NULL,
                                 graph.feature.mode = "laplacian_self_tuning",
                                 graph.feature.components = 0L,
                                 graph.feature.steps = 3L,
@@ -608,6 +689,7 @@ kodama_matrix_graph <- function(indices,
                                 folds = 5L,
                                 visual.init = TRUE,
                                 progress = TRUE,
+                                progress.file = NULL,
                                 apply.kodama.dissimilarity = TRUE,
                                 return.graph = FALSE,
                                 ...) {
@@ -624,7 +706,6 @@ kodama_matrix_graph <- function(indices,
   graph_object <- if (is.list(indices)) indices else NULL
   supplied_graph <- extract_kodama_graph(indices)
   graph_handle <- NULL
-  backend_was_missing <- missing(backend)
   if (!is.null(supplied_graph)) {
     if (kodama_graph_is_handle(supplied_graph)) {
       graph_handle <- supplied_graph$handle
@@ -637,11 +718,8 @@ kodama_matrix_graph <- function(indices,
     stop("indices and distances, or a KODAMA graph handle, are required.")
   }
   classifier <- match.arg(classifier)
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
   graph_output <- kodama_graph_output_mode(return.graph)
-  if (backend_was_missing && !is.null(graph_object$backend)) {
-    backend <- match.arg(as.character(graph_object$backend), c("cpu", "cuda", "metal"))
-  }
   if (is.null(ncomp)) ncomp <- if (is.null(data)) 50L else min(50L, ncol(data))
   n_samples <- if (is.null(graph_handle)) nrow(indices) else kodama_graph_samples(supplied_graph)
   neighbors <- if (is.null(graph_handle)) ncol(indices) else kodama_graph_neighbors(supplied_graph)
@@ -695,6 +773,7 @@ kodama_matrix_graph <- function(indices,
     folds = as.integer(folds),
     evolution.policy = .evolution.policy,
     visual.init = isTRUE(visual.init),
+    progress.file = progress.file,
     apply.kodama.dissimilarity = isTRUE(apply.kodama.dissimilarity),
     return.graph = if (graph_output == 2L) "handle" else graph_output == 1L
   )
@@ -729,6 +808,8 @@ kodama_matrix_graph <- function(indices,
     folds = as.integer(folds),
     evolution_policy = .evolution.policy
   )
+  progress_state <- kodama_begin_progress(progress, progress.file)
+  on.exit(kodama_end_progress(progress_state), add = TRUE)
   result <- if (is.null(graph_handle)) {
     do.call(kodama_matrix_graph_cpp, c(list(
       indices = as.matrix(indices),
@@ -747,7 +828,9 @@ kodama_matrix_graph <- function(indices,
       graph_handle = graph_handle
     ), common_args))
   }
-  as_kodama_matrix_result(result, parameters, visual_init = visual_init)
+  result <- as_kodama_matrix_result(result, parameters, visual_init = visual_init)
+  result$progress_file <- progress_state$path
+  result
 }
 
 #' @export
@@ -758,6 +841,10 @@ KODAMA.matrix.graph <- kodama_matrix_graph
 #' @param x A `kodama_matrix` result or compatible list with timing fields.
 #'   Matrix results include separate landmark-selection aggregates and
 #'   classifier optimization timings.
+#' @return A data frame with analysis steps, elapsed seconds, and percentage
+#'   of the recorded total runtime.
+#' @examples
+#' KODAMA.timing(list(timing = list(graph = 0.5, runtime_seconds = 2)))
 #' @aliases kodama_timing
 #' @export
 KODAMA.timing <- function(x) {
@@ -784,6 +871,11 @@ kodama_timing <- KODAMA.timing
 #'
 #' @param all If `TRUE`, return all linked shared libraries reported by the
 #'   platform linker tool. If `FALSE`, keep only likely runtime dependencies.
+#' @return A `kodama_diagnostics` list describing the package version,
+#'   platform, linked libraries, relevant environment variables, and any
+#'   recommended runtime preload libraries.
+#' @examples
+#' KODAMA.diagnostics()
 #' @aliases kodama_diagnostics
 #' @export
 KODAMA.diagnostics <- function(all = FALSE) {
@@ -865,8 +957,8 @@ print.kodama_diagnostics <- function(x, ...) {
 #' @param k Number of nearest neighbors to retain.
 #' @param metric Distance or similarity metric.
 #' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
-#' @param n.cores Number of CPU worker threads used for native HNSW
-#'   construction and graph querying.
+#' @param n.cores Number of worker threads. `NULL` uses
+#'   `options(n.cores = ...)`, then `N_CORES`, and otherwise 4.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
 #' @param seed Integer seed used by the backend-specific PCA initialization.
 #' @param storage Graph representation. `"matrix"` returns conventional R
@@ -876,19 +968,23 @@ print.kodama_diagnostics <- function(x, ...) {
 #' @return A `kodama_graph` object containing either graph matrices or a graph
 #'   handle, plus PCA starts for UMAP and openTSNE. Raw data are not retained.
 #' @aliases KODAMA.makeSNNGraph makeSNNGraph
+#' @examples
+#' g <- KODAMA.graph(as.matrix(iris[, 1:4]), k = 5, n.cores = 1)
+#' g$parameters
 #' @export
 KODAMA.graph <- function(data,
                          spatial = NULL,
                          samples = NULL,
                          k = 100L,
                          metric = c("euclidean", "cosine", "inner_product"),
-                         backend = c("cpu", "cuda", "metal"),
-                         n.cores = 4L,
+                         backend = NULL,
+                         n.cores = NULL,
                          gpu.device = 0L,
                          seed = 1234L,
                          storage = c("handle", "matrix")) {
   metric <- match.arg(metric)
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
+  n.cores <- kodama_resolve_n_cores(n.cores, default = 4L)
   storage <- match.arg(storage)
   data_matrix <- as_kodama_matrix(data)
   sample_ids <- as_kodama_samples(samples, nrow(data_matrix))
@@ -925,6 +1021,10 @@ KODAMA.graph <- function(data,
 #'   KODAMA result whose `knn` member uses handle storage.
 #' @return A graph list containing R index and distance matrices.
 #'   Materialized graphs can be serialized normally.
+#' @examples
+#' g <- KODAMA.graph(as.matrix(iris[, 1:4]), k = 5, storage = "handle")
+#' materialized <- KODAMA.graph.materialize(g)
+#' dim(materialized$indices)
 #' @export
 KODAMA.graph.materialize <- function(graph) {
   graph <- extract_kodama_graph(graph)
@@ -951,27 +1051,32 @@ makeSNNGraph <- KODAMA.graph
 #' @param center Whether to center columns.
 #' @param scale Whether to scale centered columns to unit sample standard deviation.
 #' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"`.
-#' @param n.cores Number of CPU worker threads.
+#' @param n.cores Number of worker threads. `NULL` uses
+#'   `options(n.cores = ...)`, then `N_CORES`, and otherwise 1.
 #' @param gpu.device Accelerator device id.
 #' @param seed Random seed for the Gaussian subspace sketch.
 #' @param oversample Optional randomized-SVD oversampling width. `NULL` uses the
-#'   backend policy from fastEmbedR.
-#' @param power Optional randomized-SVD power count. `NULL` uses the backend
-#'   policy from fastEmbedR.
+#'   standalone backend's automatic policy.
+#' @param power Optional randomized-SVD power count. `NULL` uses the standalone
+#'   backend's automatic policy.
 #' @return A list containing scores, loadings, singular values, explained
 #'   variance, preprocessing vectors, backend metadata, and runtime.
+#' @examples
+#' fit <- KODAMA.pca(as.matrix(iris[, 1:4]), ncomp = 2)
+#' dim(fit$scores)
 #' @export
 kodama_pca <- function(data,
                        ncomp = 2L,
                        center = TRUE,
                        scale = FALSE,
-                       backend = c("cpu", "cuda", "metal"),
-                       n.cores = 1L,
+                       backend = NULL,
+                       n.cores = NULL,
                        gpu.device = 0L,
                        seed = 4L,
                        oversample = NULL,
                        power = NULL) {
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
+  n.cores <- kodama_resolve_n_cores(n.cores, default = 1L)
   kodama_pca_cpp(
     as_kodama_matrix(data),
     ncomp = as.integer(ncomp),
@@ -1006,7 +1111,8 @@ KODAMA.pca <- kodama_pca
 #' @param metric Distance or similarity metric used when `x` is a matrix.
 #' @param backend Execution backend: `"cpu"`, `"cuda"`, or `"metal"` for
 #'   UMAP and openTSNE.
-#' @param n.cores Number of CPU worker threads requested by the wrapper.
+#' @param n.cores Number of worker threads. `NULL` uses
+#'   `options(n.cores = ...)`, then `N_CORES`, and otherwise 4.
 #' @param gpu.device CUDA device id when `backend = "cuda"`.
 #' @param graph.mode UMAP graph weighting mode. `"fuzzy"` is the default;
 #'   `"binary"` remains available as an explicit compatibility mode.
@@ -1028,8 +1134,8 @@ KODAMA.visualization <- function(x,
                                  initialize.from.raw = TRUE,
                                  k = 30L,
                                  metric = c("euclidean", "cosine", "inner_product"),
-                                 backend = c("cpu", "cuda", "metal"),
-                                 n.cores = 4L,
+                                 backend = NULL,
+                                 n.cores = NULL,
                                  gpu.device = 0L,
                                  n.epochs = 200L,
                                  n.iter = 500L,
@@ -1039,7 +1145,8 @@ KODAMA.visualization <- function(x,
                                  ...) {
   method <- match.arg(method)
   metric <- match.arg(metric)
-  backend <- match.arg(backend)
+  backend <- kodama_resolve_backend(backend)
+  n.cores <- kodama_resolve_n_cores(n.cores, default = 4L)
   graph.mode <- match.arg(graph.mode)
   raw_matrix <- if (!is.null(raw.data)) {
     as_kodama_matrix(raw.data)
@@ -1152,72 +1259,84 @@ KODAMA.visualization <- function(x,
   )
 }
 
-#' Cluster a graph or embedding with random walks
+#' Cluster a graph or embedding with fastEmbedR
 #'
-#' @param x Input embedding matrix, KODAMA result, or KNN graph list.
-#' @param n.clusters Optional target number of clusters. Random-walk clustering
-#'   reports an error when it cannot produce the requested count exactly.
-#' @param weight Graph edge-weighting rule.
-#' @param k Number of neighbors used when `x` is an embedding matrix.
-#' @param metric Distance or similarity metric used when `x` is a matrix.
-#' @param graph.backend Backend used to construct a graph from an embedding:
-#'   `"cpu"`, `"cuda"`, or `"metal"`. Clustering itself runs on CPU.
-#' @param n.cores Number of CPU worker threads requested by the wrapper.
-#' @param n.iterations Number of clustering refinement iterations.
-#' @param random.walk.steps Number of random-walk steps.
-#' @param gpu.device CUDA device id when `graph.backend = "cuda"`.
+#' This is a KODAMA adapter around [fastEmbedR::knn_graph()] and
+#' [fastEmbedR::graph_cluster()]. It does not maintain a second clustering
+#' implementation. KODAMA and precomputed KNN graphs are converted once to
+#' fastEmbedR's compact graph representation before clustering.
+#'
+#' @param x Input embedding matrix, KODAMA result, KNN graph, or
+#'   `fastEmbedR_graph`.
+#' @param method Clustering method: `"leiden"`, `"louvain"`, or `"walktrap"`.
+#' @param k Number of neighbors used when a graph must be built from a matrix.
+#' @param metric Distance metric used only when neighbors must be calculated.
+#' @param weight Graph edge weighting used during graph construction.
+#' @param mutual Keep only reciprocal KNN edges.
+#' @param prune Remove graph edges with weight less than or equal to this value.
+#' @param graph.backend Backend used to construct a graph from a matrix.
+#' @param backend Backend used by Louvain or Leiden. Walktrap is CPU-only.
+#' @param resolution Modularity resolution for Louvain and Leiden.
+#' @param n.iterations Maximum local-moving iterations.
+#' @param n.runs Independent seeded Louvain or Leiden runs.
+#' @param steps Random-walk length for Walktrap.
+#' @param n.cores CPU workers used to construct the graph.
+#' @param seed Reproducible seed for Louvain and Leiden.
+#' @return A `fastEmbedR_graph_cluster` result containing one-based membership,
+#'   modularity, implementation metadata, and timing.
+#' @examples
+#' set.seed(1)
+#' x <- rbind(matrix(rnorm(40, -2), 20, 2), matrix(rnorm(40, 2), 20, 2))
+#' fit <- KODAMA.clustering(x, method = "leiden", k = 5, n.cores = 1)
+#' table(fit$membership)
 #' @export
 KODAMA.clustering <- function(x,
-                              n.clusters = 0L,
-                              weight = c("distance", "snn", "adaptive", "binary"),
+                              method = c("leiden", "louvain", "walktrap"),
                               k = 30L,
-                              metric = c("euclidean", "cosine", "inner_product"),
-                              graph.backend = c("cpu", "cuda", "metal"),
-                              n.cores = 4L,
+                              metric = c("euclidean", "cosine", "correlation"),
+                              weight = c("snn", "distance", "binary"),
+                              mutual = FALSE,
+                              prune = 0,
+                              graph.backend = NULL,
+                              backend = NULL,
+                              resolution = 1,
                               n.iterations = 10L,
-                              random.walk.steps = 4L,
-                              gpu.device = 0L) {
+                              n.runs = 1L,
+                              steps = 4L,
+                              n.cores = NULL,
+                              seed = 1L) {
+  method <- match.arg(method)
   weight <- match.arg(weight)
   metric <- match.arg(metric)
-  graph.backend <- match.arg(graph.backend)
-  graph <- extract_kodama_graph(x)
-  if (!is.null(graph)) {
-    if (kodama_graph_is_handle(graph)) {
-      return(kodama_graph_handle_cluster_cpp(
-        graph$handle,
-        weight,
-        as.integer(n.cores),
-        as.integer(n.iterations),
-        as.integer(random.walk.steps),
-        as.integer(n.clusters),
-        0,
-        FALSE
-      ))
+  n.cores <- kodama_resolve_n_cores(n.cores, default = 1L)
+  graph_input <- extract_kodama_graph(x)
+  if (!is.null(graph_input)) {
+    if (kodama_graph_is_handle(graph_input)) {
+      graph_input <- KODAMA.graph.materialize(graph_input)
     }
-    return(kodama_graph_cluster_cpp(
-      graph$indices,
-      graph$distances,
-      weight,
-      as.integer(n.cores),
-      as.integer(n.iterations),
-      as.integer(random.walk.steps),
-      as.integer(n.clusters),
-      0,
-      FALSE
-    ))
+    x <- list(
+      indices = graph_input$indices,
+      distances = graph_input$distances
+    )
   }
-  kodama_embedding_cluster_cpp(
-    as_kodama_matrix(x),
-    graph.backend,
-    weight,
-    metric,
-    as.integer(k),
-    as.integer(n.cores),
-    as.integer(n.iterations),
-    as.integer(random.walk.steps),
-    as.integer(n.clusters),
-    0,
-    FALSE,
-    as.integer(gpu.device)
+  graph <- fastEmbedR::knn_graph(
+    x,
+    k = k,
+    backend = graph.backend,
+    metric = metric,
+    weight = weight,
+    mutual = mutual,
+    prune = prune,
+    n.cores = n.cores
+  )
+  fastEmbedR::graph_cluster(
+    graph,
+    method = method,
+    backend = backend,
+    resolution = resolution,
+    n_iterations = n.iterations,
+    n_runs = n.runs,
+    steps = steps,
+    seed = seed
   )
 }

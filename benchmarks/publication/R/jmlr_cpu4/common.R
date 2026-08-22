@@ -153,21 +153,103 @@ load_dataset <- function(dataset, representation, data_root, pca_path = NULL) {
 }
 
 matrix_call <- function(x, graph, classifier, M, Tcycle, folds, ncomp, landmarks,
-                        splitting, k, seed, policy, progress = FALSE) {
-  do.call(kodamaR::KODAMA.matrix, list(
+                        splitting, k, seed, policy, progress = FALSE,
+                        progress_file = NULL) {
+  do.call(KODAMA::KODAMA.matrix, list(
     data = x, graph = graph, M = as.integer(M), Tcycle = as.integer(Tcycle),
     folds = as.integer(folds), ncomp = as.integer(ncomp), landmarks = as.integer(landmarks),
     splitting = as.integer(splitting), n.cores = 4L, graph.neighbors = 100L,
     knn.k = as.integer(k), classifier = classifier, backend = "cpu", seed = as.integer(seed),
-    visual.init = TRUE, progress = progress, .evolution.policy = policy
+    visual.init = TRUE, progress = progress, progress.file = progress_file,
+    return.graph = "handle",
+    .evolution.policy = policy
   ))
 }
 
+assert_visualizable_fit <- function(fit) {
+  if (!is.list(fit) || is.null(fit$knn)) {
+    stop(
+      "KODAMA.matrix did not retain its corrected graph; ",
+      "the benchmark requires return.graph = 'handle'."
+    )
+  }
+  invisible(fit)
+}
+
+flatten_numeric <- function(x) {
+  if (is.null(x)) return(numeric())
+  as.numeric(unlist(x, recursive = TRUE, use.names = FALSE))
+}
+
+as_run_matrix <- function(x, expected_runs = NULL, expected_samples = NULL) {
+  if (is.null(x)) return(matrix(integer(), 0L, 0L))
+  if (is.data.frame(x) || is.matrix(x)) {
+    out <- as.matrix(x)
+  } else if (is.list(x)) {
+    rows <- lapply(x, function(z) unlist(z, recursive = TRUE, use.names = FALSE))
+    lengths <- lengths(rows)
+    if (length(rows) && !any(lengths == 0L) && length(unique(lengths)) == 1L) {
+      out <- do.call(rbind, rows)
+    } else {
+      values <- unlist(rows, recursive = TRUE, use.names = FALSE)
+      out <- matrix(values, nrow = 1L)
+    }
+  } else {
+    out <- matrix(x, nrow = 1L)
+  }
+  if (!is.null(expected_samples) && ncol(out) != expected_samples) {
+    if (nrow(out) == expected_samples) {
+      out <- t(out)
+    } else if (length(out) %% expected_samples == 0L) {
+      out <- matrix(unlist(out, use.names = FALSE), ncol = expected_samples,
+                    byrow = TRUE)
+    } else {
+      stop("KODAMA result labels do not match the sample count")
+    }
+  }
+  if (!is.null(expected_runs) && nrow(out) != expected_runs)
+    stop("KODAMA result labels do not match M")
+  storage.mode(out) <- "integer"
+  out
+}
+
+as_diagnostic_frame <- function(x) {
+  if (is.null(x)) return(data.frame())
+  if (is.data.frame(x)) return(x)
+  if (is.matrix(x)) return(as.data.frame(x, stringsAsFactors = FALSE))
+  if (is.list(x) && length(x) && all(vapply(x, is.data.frame, logical(1))))
+    return(do.call(rbind, x))
+  tryCatch(as.data.frame(x, stringsAsFactors = FALSE),
+           error = function(e) data.frame())
+}
+
+normalize_fit_result <- function(fit, expected_runs, expected_samples) {
+  if (!is.list(fit)) stop("KODAMA.matrix returned a non-list result")
+  fit$acc <- flatten_numeric(fit$acc)
+  if (length(fit$acc) != expected_runs)
+    stop("KODAMA accuracies do not match M")
+  fit$res <- as_run_matrix(fit$res, expected_runs, expected_samples)
+  fit$run_diagnostics <- as_diagnostic_frame(fit$run_diagnostics)
+  fit$cycle_diagnostics <- as_diagnostic_frame(fit$cycle_diagnostics)
+  fit$best_labels <- as.integer(flatten_numeric(fit$best_labels))
+  if (length(fit$best_labels) != expected_samples)
+    fit$best_labels <- as.integer(fit$res[which.max(fit$acc), ])
+  peak <- flatten_numeric(fit$peak_memory_mb)
+  fit$peak_memory_mb <- if (length(peak)) peak[[1L]] else NA_real_
+  timing <- unlist(fit$timing %||% fit$timings %||% list(), recursive = TRUE)
+  fit$timing <- as.list(as.numeric(timing))
+  names(fit$timing) <- names(timing)
+  fit
+}
+
 check_protocol_api <- function(strict = TRUE) {
-  if (!requireNamespace("kodamaR", quietly = TRUE)) stop("kodamaR is not installed")
-  f <- names(formals(kodamaR::KODAMA.matrix))
+  if (!requireNamespace("KODAMA", quietly = TRUE)) {
+    stop("The canonical KODAMA package is not installed; legacy kodamaR is not supported by this benchmark")
+  }
+  f <- names(formals(KODAMA::KODAMA.matrix))
   required <- c("data", "graph", "M", "Tcycle", "folds", "ncomp", "landmarks", "splitting",
-                "n.cores", "graph.neighbors", "knn.k", "classifier", "backend", "seed")
+                "n.cores", "graph.neighbors", "knn.k", "classifier", "backend", "seed",
+                "progress.file")
   hidden_policy <- "..." %in% f
   status <- data.frame(requirement = c(required, "hidden native evolution policy"),
                        available = c(required %in% f, hidden_policy), stringsAsFactors = FALSE)
@@ -198,12 +280,61 @@ information_metrics <- function(a, b) {
 }
 purity <- function(truth, cluster) sum(apply(table(cluster, truth), 1L, max)) / length(truth)
 
-silhouette_summary <- function(layout, labels, max_n = 5000L, seed = 4L) {
-  if (!requireNamespace("cluster", quietly = TRUE) || length(unique(labels)) < 2L) return(c(silhouette = NA_real_, silhouette_class_min = NA_real_))
-  set.seed(seed + 313L); rows <- if (nrow(layout) <= max_n) seq_len(nrow(layout)) else sort(sample.int(nrow(layout), max_n))
-  s <- cluster::silhouette(as.integer(factor(labels[rows])), dist(layout[rows,,drop=FALSE]))[, "sil_width"]
-  means <- tapply(s, labels[rows], mean)
-  c(silhouette = mean(s), silhouette_class_min = min(means))
+silhouette_summary <- function(layout, labels, max_n = 5000L, seed = 4L,
+                               block_size = 256L) {
+  x <- as.matrix(layout)
+  keep <- apply(is.finite(x), 1L, all) & !is.na(labels)
+  x <- x[keep, , drop = FALSE]
+  labels <- labels[keep]
+  if (nrow(x) < 2L || length(unique(labels)) < 2L) {
+    return(c(silhouette = NA_real_, silhouette_class_min = NA_real_))
+  }
+
+  set.seed(seed + 313L)
+  rows <- if (nrow(x) <= max_n) seq_len(nrow(x)) else {
+    sort(sample.int(nrow(x), max_n))
+  }
+  x <- x[rows, , drop = FALSE]
+  groups <- droplevels(factor(labels[rows]))
+  group_id <- as.integer(groups)
+  group_size <- tabulate(group_id, nbins = nlevels(groups))
+  n <- nrow(x)
+  block_size <- max(1L, as.integer(block_size))
+  widths <- numeric(n)
+
+  # Exact silhouette values, accumulated in row blocks to avoid materializing
+  # the complete n x n distance matrix used by cluster::silhouette().
+  for (first in seq.int(1L, n, by = block_size)) {
+    last <- min(n, first + block_size - 1L)
+    query <- x[first:last, , drop = FALSE]
+    query_sq <- rowSums(query * query)
+    reference_sq <- rowSums(x * x)
+    distance_sq <- outer(query_sq, reference_sq, "+") -
+      2 * tcrossprod(query, x)
+    distances <- sqrt(pmax(distance_sq, 0))
+    block_groups <- group_id[first:last]
+
+    sums <- vapply(seq_len(nlevels(groups)), function(g) {
+      rowSums(distances[, group_id == g, drop = FALSE])
+    }, numeric(nrow(query)))
+    if (is.null(dim(sums))) sums <- matrix(sums, nrow = nrow(query))
+
+    for (i in seq_len(nrow(query))) {
+      own <- block_groups[[i]]
+      if (group_size[[own]] <= 1L) {
+        widths[[first + i - 1L]] <- 0
+        next
+      }
+      means <- sums[i, ] / group_size
+      a <- sums[i, own] / (group_size[[own]] - 1L)
+      means[[own]] <- Inf
+      b <- min(means)
+      widths[[first + i - 1L]] <- if (max(a, b) > 0) (b - a) / max(a, b) else 0
+    }
+  }
+
+  class_means <- tapply(widths, groups, mean)
+  c(silhouette = mean(widths), silhouette_class_min = min(class_means))
 }
 
 cluster_geometry_metrics <- function(layout, labels, seed=4L, dunn_max_n=2000L) {
@@ -232,9 +363,19 @@ agreement_prefix_metrics <- function(res, graph, seed, max_edges=1000000L) {
   res <- as.matrix(res); idx <- as.matrix(graph$indices %||% graph$index)
   if(!nrow(res)||is.null(idx)) return(data.frame())
   n <- ncol(res); if(nrow(idx)!=n) stop("Agreement graph/result sample mismatch")
-  from <- rep.int(seq_len(n),ncol(idx)); to <- as.integer(idx)
-  valid <- is.finite(to)&to>=1L&to<=n&to!=from; from<-from[valid];to<-to[valid]
-  set.seed(seed+9091L); if(length(from)>max_edges){take<-sort(sample.int(length(from),max_edges));from<-from[take];to<-to[take]}
+  edge_count <- as.double(n) * ncol(idx)
+  set.seed(seed + 9091L)
+  edge_position <- if (edge_count > max_edges) {
+    sort(sample.int(edge_count, max_edges))
+  } else {
+    seq_len(edge_count)
+  }
+  # R matrices are column-major, so a sampled linear position identifies the
+  # source row without materializing the complete n-by-k edge list.
+  from <- as.integer((edge_position - 1) %% n + 1)
+  to <- as.integer(idx[edge_position])
+  valid <- is.finite(to) & to >= 1L & to <= n & to != from
+  from <- from[valid]; to <- to[valid]
   acc <- numeric(length(from)); prefixes <- unique(pmin(c(10L,20L,50L,100L),nrow(res))); out <- list(); previous<-0L
   for(prefix in prefixes){for(m in seq.int(previous+1L,prefix))acc<-acc+(res[m,from]==res[m,to]);out[[length(out)+1L]]<-data.frame(prefix=prefix,edges=length(from),mean_agreement=mean(acc/prefix),sd_agreement=sd(acc/prefix));previous<-prefix}
   do.call(rbind,out)
@@ -295,10 +436,11 @@ embedding_quality <- function(x, layout, truth, seed, max_n=5000L) {
 
 release_info <- function(image) {
   package_version <- function(x) if (requireNamespace(x, quietly=TRUE)) as.character(packageVersion(x)) else NA_character_
-  so <- tryCatch(getLoadedDLLs()[["kodamaR"]][["path"]], error = function(e) NA_character_)
+  loadNamespace("KODAMA")
+  so <- tryCatch(getLoadedDLLs()[["KODAMA"]][["path"]], error = function(e) NA_character_)
   list(created = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"), image = normalizePath(image), image_sha256 = sha256(image),
-       image_bytes = file.info(image)$size, kodamaR_version = package_version("kodamaR"), fastEmbedR_version = package_version("fastEmbedR"),
-       kodamaR_shared_library = so, kodamaR_shared_library_sha256 = if (!is.na(so)) sha256(so) else NA_character_,
+       image_bytes = file.info(image)$size, KODAMA_version = package_version("KODAMA"), fastEmbedR_version = package_version("fastEmbedR"),
+       KODAMA_shared_library = so, KODAMA_shared_library_sha256 = if (!is.na(so)) sha256(so) else NA_character_,
        r_version = R.version.string, host = unname(Sys.info()[["nodename"]]), os = paste(Sys.info()[c("sysname","release","machine")], collapse=" "),
        cpu = paste(system2("sh", c("-c", shQuote("lscpu 2>/dev/null | tr '\\n' ';'")), stdout=TRUE), collapse=""),
        threads = as.list(Sys.getenv(c("OMP_NUM_THREADS","RCPP_PARALLEL_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","VECLIB_MAXIMUM_THREADS","NUMEXPR_NUM_THREADS"), unset="")))

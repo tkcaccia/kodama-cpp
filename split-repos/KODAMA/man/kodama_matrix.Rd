@@ -18,7 +18,7 @@ kodama_matrix(
   ncomp = NULL,
   landmarks = 10000L,
   splitting = NULL,
-  n.cores = 4L,
+  n.cores = NULL,
   graph.neighbors = NULL,
   knn.k = 30L,
   spatial.resolution = 0.4,
@@ -27,11 +27,12 @@ kodama_matrix(
   spatial.mode = c("standard", "population"),
   metric = "euclidean",
   classifier = c("knn", "pls_lda"),
-  backend = c("cpu", "cuda", "metal"),
+  backend = NULL,
   seed = 1234L,
   folds = 5L,
   visual.init = TRUE,
   progress = TRUE,
+  progress.file = NULL,
   apply.kodama.dissimilarity = TRUE,
   return.graph = FALSE,
   ...
@@ -66,8 +67,9 @@ KODAMA implementation before spatial graph and constraint construction.}
 
 \item{splitting}{Initial number of label classes used for each run.}
 
-\item{n.cores}{CPU worker count. For CUDA or Metal matrix optimization,
-\code{0} enables backend-specific automatic independent-run lane selection.}
+\item{n.cores}{CPU worker count. \code{NULL} uses \code{options(n.cores = ...)}, then
+\code{N_CORES}, and otherwise 4. For CUDA or Metal matrix optimization, an
+explicit \code{0} enables backend-specific automatic independent-run lanes.}
 
 \item{graph.neighbors}{Number of neighbors retained in the returned graph.}
 
@@ -100,6 +102,10 @@ PCA and stores both UMAP and openTSNE initializations for reuse by
 
 \item{progress}{Whether the C++ core prints run/cycle progress.}
 
+\item{progress.file}{Optional progress-log path. When \code{progress=TRUE}, the
+native workers append M/Tcycle checkpoints here. A temporary path is
+created and announced when this is \code{NULL}.}
+
 \item{apply.kodama.dissimilarity}{Whether to return the KODAMA-corrected
 neighbor graph rather than only the base graph.}
 
@@ -120,4 +126,13 @@ classifier core.
 }
 \description{
 Run KODAMA matrix optimization
+}
+\examples{
+x <- as.matrix(iris[, 1:4])
+fit <- KODAMA.matrix(
+  data = x, classifier = "knn", M = 1, Tcycle = 1,
+  landmarks = 100, splitting = 10, knn.k = 5, n.cores = 1,
+  return.graph = FALSE
+)
+fit$acc
 }

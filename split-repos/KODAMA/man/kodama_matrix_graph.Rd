@@ -27,7 +27,7 @@ kodama_matrix_graph(
   spatial.constraint.mode = c("kmeans", "graph", "auto"),
   spatial.mode = c("standard", "population"),
   classifier = c("knn", "pls_lda"),
-  backend = c("cpu", "cuda", "metal"),
+  backend = NULL,
   graph.feature.mode = "laplacian_self_tuning",
   graph.feature.components = 0L,
   graph.feature.steps = 3L,
@@ -35,6 +35,7 @@ kodama_matrix_graph(
   folds = 5L,
   visual.init = TRUE,
   progress = TRUE,
+  progress.file = NULL,
   apply.kodama.dissimilarity = TRUE,
   return.graph = FALSE,
   ...
@@ -111,7 +112,11 @@ graph-only initialization. The standard path is
 \item{visual.init}{Whether to propagate the PCA starts stored in a
 \code{KODAMA.graph} object.}
 
-\item{progress}{Whether the C++ core prints progress.}
+\item{progress}{Whether the C++ core records progress.}
+
+\item{progress.file}{Optional progress-log path. When \code{progress=TRUE}, the
+native workers append M/Tcycle checkpoints here. A temporary path is
+created and announced when this is \code{NULL}.}
 
 \item{apply.kodama.dissimilarity}{Whether to return the KODAMA-corrected
 graph.}
@@ -121,6 +126,21 @@ and \code{"handle"} returns a reusable external C++ graph pointer.}
 
 \item{...}{Reserved internal controls for reproducibility experiments.}
 }
+\value{
+A \code{kodama_matrix} result with evolved labels, accuracy traces,
+diagnostics, timing, and the corrected graph or graph handle when
+requested.
+}
 \description{
 KODAMA matrix from a precomputed KNN graph
+}
+\examples{
+x <- as.matrix(iris[, 1:4])
+g <- KODAMA.graph(x, k = 10, storage = "matrix", n.cores = 1)
+fit <- KODAMA.matrix.graph(
+  g$indices, g$distances, data = x, M = 1, Tcycle = 1,
+  landmarks = 100, splitting = 10, knn.k = 5, n.cores = 1,
+  return.graph = FALSE
+)
+fit$acc
 }

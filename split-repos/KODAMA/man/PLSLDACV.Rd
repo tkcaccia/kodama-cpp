@@ -14,7 +14,7 @@ PLSLDACV(
   ncomp = min(50L, ncol(data)),
   center = TRUE,
   scale = TRUE,
-  backend = c("cpu", "cuda", "metal"),
+  backend = NULL,
   n.cores = 1L,
   gpu.device = 0L
 )
@@ -45,6 +45,17 @@ fold groups.}
 
 \item{gpu.device}{CUDA device id when \code{backend = "cuda"}.}
 }
+\value{
+A cross-validation result containing predictions, truth, fold
+assignments, fold and global accuracy, confusion matrix, timing, and
+backend diagnostics.
+}
 \description{
 Cross-validated SIMPLS + PLS-LDA classification
+}
+\examples{
+x <- as.matrix(iris[, 1:4])
+y <- as.integer(iris$Species)
+fit <- PLSLDACV(x, y, folds = 3, ncomp = 2, backend = "cpu")
+fit$accuracy
 }

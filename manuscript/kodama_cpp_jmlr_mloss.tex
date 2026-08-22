@@ -29,11 +29,16 @@
 \name Dupe Ojo$^{1}$ \email dupe.ojo@icgeb.org\\
 \name Alessia Vignoli$^{3,4}$ \email vignoli@cerm.unifi.it\\
 \name Leonardo Tenori$^{3,4,\dagger}$ \email tenori@cerm.unifi.it\\
+\name Dinesh Gupta$^{20}$\\
+\name Silvano Piazza$^{21,22}$\\
 \name Stefano Cacciatore$^{1,2,\dagger}$ \email stefano.cacciatore@icgeb.org\\
 \addr $^1$Bioinformatics Unit, International Centre for Genetic Engineering and Biotechnology (ICGEB), Cape Town 7925, South Africa\\
 \addr $^2$Department of Integrative Biomedical Sciences, Institute of Infectious Disease \& Molecular Medicine (IDM), University of Cape Town, Cape Town 7925, South Africa\\
 \addr $^3$Department of Chemistry ``Ugo Schiff'', University of Florence, Sesto Fiorentino, Italy\\
 \addr $^4$Magnetic Resonance Center (CERM), University of Florence, Sesto Fiorentino, Italy\\
+\addr $^{20}$Translational Bioinformatics Group, International Centre for Genetic Engineering and Biotechnology (ICGEB), New Delhi, India\\
+\addr $^{21}$Computational Biology Group, International Centre for Genetic Engineering and Biotechnology (ICGEB), Trieste, Italy\\
+\addr $^{22}$Bioinformatics Facility, Department of Cellular, Computational and Integrative Biology -- CIBIO, University of Trento, Trento, Italy\\
 \addr $^{\ast}$Moussa Kassim and Martin Ocharo contributed equally.\\
 \addr $^{\dagger}$Leonardo Tenori and Stefano Cacciatore are co-corresponding authors.}
 
@@ -136,6 +141,9 @@ Visualization & PLS--LDA KODAMA vs openTSNE & CUDA & 10 datasets & 3/10 improved
 Table~\ref{tab:validation} separates acceleration from downstream structure. The historical MetRef PLS--DA route required 965.8 s at its five-component default; independently retained current 50-component PLS--LDA runs required 316.3 s on CPU4 and 270.4 s on CUDA. This is a contextual product comparison, not an implementation-only speedup: evaluator, components, search, parallelism, and retained seeds differ. On flow18 ($n=1{,}000{,}021$), resident IVF reduced full graph time from 296.5 to 25.9 s. The matched three-seed archive contains 10 datasets per classifier. PLS--LDA UMAP was the only positive cross-dataset median ($+0.025$, 95\% bootstrap interval $[-0.067,+0.084]$); KNN openTSNE was worse on all 10 (Holm $p=0.0078$). Figure~\ref{fig:imagenet} exposes the corresponding ImageNet trade-off instead of selecting only a favorable example. Labels were withheld during optimization. KODAMA R 2.4.1/2.4 is the sole predecessor; the supplement also reports matched MetRef KNN. All per-dataset timings, sensitivity analyses, and implementation evidence are in the supplement.
 
 Tests cover float32 numerics, backend identity, graph/PCA contracts, visualization initialization, wrappers, and direct public accelerator entry points; physical Metal and current-source CUDA execution are recorded separately from compile-only checks. The MIT repositories are \href{https://github.com/tkcaccia/kodama-cpp}{kodama-cpp} and \href{https://github.com/tkcaccia/kodama-r}{kodama-r}. Public snapshots checked on 6 August 2026 were \texttt{0b8b873} and \texttt{7090592}. A tagged confirmatory rerun remains a submission prerequisite; fragmentation, coverage, timings, and limitations are detailed in the supplement.
+
+\section*{Acknowledgements}
+The authors thank the University of Cape Town's ICTS High Performance Computing team for providing a high-performance computing facility for this study (\url{https://ucthpc.uct.ac.za/}).
 
 \newpage
 \bibliography{kodama_cpp_refs}

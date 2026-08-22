@@ -6,11 +6,18 @@ source(file.path(dirname(normalizePath(.this_file)), "common.R"))
 args <- parse_cli(); out <- args$out_dir %||% stop("--out-dir required")
 image <- args$image %||% stop("--image required"); data_root <- args$data_root %||% stop("--data-root required")
 dir.create(out, recursive=TRUE, showWarnings=FALSE)
+if (utils::packageVersion("KODAMA") < "0.99.6") {
+  stop("KODAMA >= 0.99.6 is required; rebuild the Singularity image from the canonical package")
+}
 status <- check_protocol_api(FALSE); atomic_write_csv(status, file.path(out,"api_capabilities.csv"))
 manifest <- release_info(image)
 manifest$core_commit_expected <- args$core_sha %||% Sys.getenv("KODAMA_CORE_SHA", unset="")
 manifest$wrapper_commit_expected <- args$wrapper_sha %||% Sys.getenv("KODAMA_R_SHA", unset="")
 manifest$command <- paste(commandArgs(FALSE), collapse=" ")
+manifest$r_executable <- file.path(R.home("bin"), "Rscript")
+manifest$r_home <- R.home()
+manifest$r_library_paths <- .libPaths()
+manifest$kodama_library <- find.package("KODAMA")
 atomic_write_json(manifest, file.path(out,"release_manifest.json"))
 capture.output(sessionInfo(), file=file.path(out,"sessionInfo.txt"))
 
@@ -31,7 +38,7 @@ if (any(!status$available) || any(ds$status != "ready")) stop("Preflight failed;
 
 # Exercise every hidden native policy. This proves dispatch without emulating it in R.
 set.seed(4); x <- matrix(rnorm(120), 30, 4)
-g <- kodamaR::KODAMA.graph(x, k=10L, metric="euclidean", backend="cpu", n.cores=4L, seed=4L, storage="matrix")
+g <- KODAMA::KODAMA.graph(x, k=10L, metric="euclidean", backend="cpu", n.cores=4L, seed=4L, storage="matrix")
 classic_checks <- list(
   fuzzy_umap=tryCatch(fastEmbedR::umap(x,n_neighbors=10L,graph_mode="fuzzy",backend="cpu",seed=4L),error=identity),
   opentsne=tryCatch(fastEmbedR::opentsne(x,perplexity=5,backend="cpu",seed=4L,n_iter=20L,early_exaggeration_iter=10L),error=identity))
@@ -41,11 +48,45 @@ atomic_write_csv(classic_status,file.path(out,"classic_embedding_preflight.csv")
 checks <- list()
 for (classifier in c("knn","pls_lda")) for (policy in if(classifier=="knn") common_policies else pls_policies) {
   z <- tryCatch(matrix_call(x,g,classifier,2L,2L,5L,2L,30L,10L,5L,4L,policy), error=identity)
-  ok <- !inherits(z,"error") && all(c("run_diagnostics","cycle_diagnostics") %in% names(z))
+  required_result <- c(
+    "acc", "res", "run_diagnostics", "cycle_diagnostics",
+    "shared_landmark_partition_used", "coarse_partition_seconds",
+    "core_evolution_seconds"
+  )
+  ok <- !inherits(z,"error") && all(required_result %in% names(z)) &&
+    is.numeric(z$acc) && is.matrix(z$res) &&
+    isTRUE(z$shared_landmark_partition_used) &&
+    identical(as.numeric(z$coarse_partition_seconds), c(0, 0))
   checks[[length(checks)+1L]] <- data.frame(classifier,policy,ok,
     cv_evaluations=if(ok) sum(z$run_diagnostics$cv_evaluations) else NA,
     expected=if(ok) 2L*(2L+1L) else 6L, error=if(inherits(z,"error")) conditionMessage(z) else NA_character_)
 }
 checks <- do.call(rbind,checks); atomic_write_csv(checks,file.path(out,"policy_preflight.csv"))
 if (any(!checks$ok) || any(checks$cv_evaluations != checks$expected)) stop("Native policy/diagnostic preflight failed")
+
+# Verify the exact matrix-to-visualization handoff used by the full jobs. This
+# catches an omitted return.graph before an M=100, Tcycle=100 run is submitted.
+visual_fit <- matrix_call(
+  x, g, "knn", 1L, 1L, 2L, 2L, 30L, 10L, 5L, 4L, "full"
+)
+assert_visualizable_fit(visual_fit)
+visual_checks <- list(
+  umap = tryCatch(KODAMA::KODAMA.visualization(
+    visual_fit, method = "UMAP", k = 5L, n.epochs = 2L,
+    graph.mode = "fuzzy", backend = "cpu", n.cores = 4L, seed = 4L
+  ), error = identity),
+  opentsne = tryCatch(KODAMA::KODAMA.visualization(
+    visual_fit, method = "opentsne", k = 5L, perplexity = 2,
+    n.iter = 2L, backend = "cpu", n.cores = 4L, seed = 4L
+  ), error = identity)
+)
+visual_status <- data.frame(
+  method = names(visual_checks),
+  ok = !vapply(visual_checks, inherits, logical(1), "error"),
+  error = vapply(visual_checks, function(z) {
+    if (inherits(z, "error")) conditionMessage(z) else NA_character_
+  }, character(1))
+)
+atomic_write_csv(visual_status, file.path(out, "kodama_visualization_preflight.csv"))
+if (any(!visual_status$ok)) stop("KODAMA matrix-to-visualization preflight failed")
 atomic_write_lines("ready",file.path(out,"PREFLIGHT_OK")); cat("Preflight passed\n")

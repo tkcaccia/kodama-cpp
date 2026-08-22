@@ -28,6 +28,17 @@ help(package = "KODAMA")
 
 The sections below explain optional CUDA, Metal, and development workflows.
 
+Set one default backend for KODAMA, fastPLS, fastEmbedR, and faissR in the
+current R session, or through the process environment:
+
+```r
+options(backend = "cuda", n.cores = 4L)
+# or: Sys.setenv(BACKEND = "cuda", N_CORES = "4")
+```
+
+Explicit function arguments such as `backend = "cpu"` or `n.cores = 8L`
+always override the shared settings.
+
 `KODAMA` does not reimplement the mathematics in R. It converts R matrices and
 vectors to the C++ API and returns R-friendly lists, matrices, and S3 objects.
 The vendored CPU sources are synchronized from `kodama-cpp`; the same public
@@ -47,24 +58,35 @@ The wrapper exports:
 - `CoreKNN()` and `CorePLSLDA()` for label-optimization kernels.
 - `KODAMA.matrix()` for complete KODAMA matrix construction.
 - `KODAMA.matrix.graph()` for bare neighbor-index/distance input.
-- `KODAMA.pca()` / `kodama_pca()` for backend-native float32 PCA.
+- `RunFastPCA()` for backend-native float32 PCA on matrices and supported
+  single-cell containers.
 - `KODAMA.visualization()` for UMAP/openTSNE embeddings from KODAMA graphs.
 - `KODAMA.graph()`, `KODAMA.makeSNNGraph()`, `makeSNNGraph()`, and
-  `KODAMA.clustering()` for graph construction and CPU random-walk clustering.
+  `KODAMA.clustering()` for graph construction and fastEmbedR Louvain, Leiden,
+  or Walktrap clustering.
 - `RunKODAMAgraph()`, `RunKODAMAmatrix()`, and
-  `RunKODAMAvisualization()` for `SingleCellExperiment`, `SpatialExperiment`,
-  Seurat, and Giotto containers.
+  `RunKODAMAvisualization()`, and `RunKODAMAclustering()` for
+  `SingleCellExperiment`, `SpatialExperiment`, Seurat, and Giotto containers.
 - `SpatialFeatureSelection()` / `RunSpatialFeatureSelection()` for
   `SpatialExperiment`, Seurat, and Giotto containers. The selector is
   multicore CPU-only.
 
 ## Single-Cell Object Workflow
 
-The three object generics mirror the matrix pipeline. Graph construction is
+The object generics mirror the matrix pipeline. Graph construction is
 performed once and retained as an opaque native handle; the matrix step reuses
 that graph, and only the visualization step creates a KODAMA reduced dimension:
 
 ```r
+spe <- SpatialFeatureSelection(spe)
+spe_sub <- spe[, spe$subject == "Br5595"]
+spe_sub <- RunFastPCA(
+  spe_sub, nfeatures = gene_number, ncomp = 50,
+  center = TRUE, scale = TRUE,
+  backend = "cpu", n.cores = 4
+)
+
+object <- spe_sub
 object <- RunKODAMAgraph(
   object,
   reduction = "PCA", # use "pca" for Seurat and Giotto
@@ -87,6 +109,15 @@ object <- RunKODAMAvisualization(
   method = "UMAP",
   backend = "cpu"
 )
+object <- RunKODAMAclustering(
+  object,
+  reduction = "KODAMA",
+  method = "leiden",
+  resolution = 1,
+  backend = "cpu",
+  graph.backend = "cpu",
+  n.cores = 4
+)
 ```
 
 For `SpatialExperiment`, spatial coordinates are used by default and
@@ -103,6 +134,10 @@ Bioconductor containers retain graph and matrix state under
 KODAMA dimensional-reduction object. The final coordinates are available from
 `reducedDim(object, "KODAMA")`, `Embeddings(object, "KODAMA")`, or the
 corresponding Giotto dimensional reduction.
+`RunKODAMAclustering()` stores membership as `KODAMA_clusters` in
+`colData()`, Seurat cell metadata, or Giotto cell metadata. Complete
+fastEmbedR clustering diagnostics are retained in KODAMA state where the
+container provides that state slot.
 
 ## Prerequisites
 
@@ -242,7 +277,7 @@ lab <- rep(1:3, length.out = nrow(x))
 cv <- KNNCV(x, lab, folds = 3, k = 5, backend = "cpu")
 cv$accuracy
 
-pc <- KODAMA.pca(x, ncomp = 3, backend = "cpu")
+pc <- RunFastPCA(x, ncomp = 3, backend = "cpu")
 dim(pc$scores)
 
 kk <- KODAMA.matrix(
@@ -258,6 +293,13 @@ kk <- KODAMA.matrix(
 KODAMA.timing(kk)
 kk$landmark_seconds
 head(kk$best_labels)
+
+progress_path <- tempfile(fileext = ".log")
+kk_progress <- KODAMA.matrix(
+  x, M = 2, Tcycle = 10, progress = TRUE,
+  progress.file = progress_path
+)
+tail(readLines(kk_progress$progress_file))
 
 prepared <- KODAMA.graph(
   x, k = 30, backend = "cpu", storage = "handle"
@@ -288,6 +330,10 @@ when R arrays are required. Both forms carry
 backend-matched UMAP/openTSNE PCA starts and never retain the raw matrix.
 External handles are process-local; materialize the graph before saving it for
 use in another R session.
+Native progress is written to a file because independent M workers must not
+call the R console from background threads. With `progress = TRUE`, the wrapper
+announces the path and returns it as `progress_file`; checkpoints report M,
+Tcycle, accuracy, score, active classes, acceptance, and elapsed time.
 Multiple slides can be kept distinct during spatial graph construction with
 the original KODAMA `samples` contract:
 
@@ -402,7 +448,10 @@ kk <- KODAMA.matrix(
 KODAMA.timing(kk)
 labels <- kk$best_labels
 um <- KODAMA.visualization(kk, "UMAP", k = 30, backend = "cuda")
-clu <- KODAMA.clustering(um, n.iterations = 10, random.walk.steps = 4)
+clu <- KODAMA.clustering(
+  um, method = "leiden", resolution = 1,
+  backend = "cuda", graph.backend = "cuda", n.iterations = 10
+)
 ```
 
 `KODAMA.matrix()` returns a `kodama_matrix` object. The raw C++ fields are still

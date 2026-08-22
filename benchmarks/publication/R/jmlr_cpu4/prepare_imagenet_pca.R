@@ -5,7 +5,7 @@
 source(file.path(dirname(normalizePath(.this_file)), "common.R"))
 args <- parse_cli(); data_root <- args$data_root %||% stop("--data-root required"); out <- args$out %||% stop("--out required")
 d <- load_dataset("imagenet","raw",data_root); t0 <- proc.time()[["elapsed"]]
-pca <- kodamaR::KODAMA.pca(d$x,ncomp=50L,center=TRUE,scale=FALSE,backend="cpu",n.cores=4L,seed=4L)
+pca <- KODAMA::KODAMA.pca(d$x,ncomp=50L,center=TRUE,scale=FALSE,backend="cpu",n.cores=4L,seed=4L)
 seconds <- proc.time()[["elapsed"]]-t0; scores <- as.matrix(pca$scores %||% pca$x %||% pca)
 payload <- list(scores=scores,sample_order_sha256=hash_object(seq_len(nrow(scores))),
   source_file_sha256=d$file_sha256,source_matrix_sha256=d$data_sha256,

@@ -6,7 +6,7 @@ source(file.path(dirname(normalizePath(.this_file)), "common.R"))
 args <- parse_cli(); dataset <- args$dataset %||% stop("--dataset required"); representation <- args$representation %||% stop("--representation required")
 seed <- as_int(args$seed,4L); data_root <- args$data_root %||% stop("--data-root required"); out <- args$out_dir %||% stop("--out-dir required")
 pca_path <- args$imagenet_pca %||% NULL; check_protocol_api(TRUE); d <- load_dataset(dataset,representation,data_root,pca_path)
-t0 <- proc.time()[["elapsed"]]; graph <- kodamaR::KODAMA.graph(d$x,k=100L,metric="euclidean",backend="cpu",n.cores=4L,seed=seed,storage="matrix")
+t0 <- proc.time()[["elapsed"]]; graph <- KODAMA::KODAMA.graph(d$x,k=100L,metric="euclidean",backend="cpu",n.cores=4L,seed=seed,storage="matrix")
 seconds <- proc.time()[["elapsed"]]-t0
 # Deliberately exclude raw data and truth labels. Matrix jobs reload them independently.
 payload <- list(graph=graph,dataset=dataset,representation=representation,seed=seed,n=nrow(d$x),p=ncol(d$x),

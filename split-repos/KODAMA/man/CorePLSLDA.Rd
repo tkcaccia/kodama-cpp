@@ -14,7 +14,7 @@ CorePLSLDA(
   stratified = TRUE,
   seed = 1L,
   ncomp = min(50L, ncol(data)),
-  backend = c("cpu", "cuda", "metal"),
+  backend = NULL,
   n.cores = 4L,
   gpu.device = 0L
 )
@@ -52,4 +52,10 @@ absorption counters for optimizer-state diagnostics.
 }
 \description{
 KODAMA core optimization with PLS-LDA classifier
+}
+\examples{
+x <- as.matrix(iris[, 1:4])
+y <- rep(1:3, each = 50)
+fit <- CorePLSLDA(x, y, cycles = 1, folds = 3, ncomp = 2, n.cores = 1)
+fit$accuracy
 }

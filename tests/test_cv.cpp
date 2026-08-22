@@ -1303,6 +1303,12 @@ void check_graph_cluster_contracts() {
   require(embedded.target_exact && embedded.n_communities == 2,
           "Embedding graph clustering did not satisfy the exact target.");
 
+  options.target_clusters = 3;
+  const kodama::GraphClusterResult exact_three =
+    kodama::KODAMAGraphCluster_CPU(graph, 6, options);
+  require(exact_three.target_exact && exact_three.n_communities == 3,
+          "Graph clustering did not coarsen to the exact requested target.");
+
   options.target_clusters = 0;
   options.k = 2;
   const kodama::GraphClusterResult built =

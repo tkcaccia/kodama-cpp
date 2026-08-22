@@ -170,14 +170,30 @@
 
 .kodama_giotto_data <- function(object, reduction, dims) {
   .kodama_require_namespace("Giotto", "Giotto")
-  data <- .kodama_export("Giotto", "getDimReduction")(
-    object,
-    reduction = "cells",
-    reduction_method = reduction,
-    name = reduction,
-    output = "matrix",
-    set_defaults = TRUE
+  get_reduction <- .kodama_export("Giotto", "getDimReduction")
+  data <- tryCatch(
+    get_reduction(
+      object,
+      reduction = "cells",
+      reduction_method = reduction,
+      name = reduction,
+      output = "matrix",
+      set_defaults = TRUE
+    ),
+    error = function(error) NULL
   )
+  if (is.null(data)) {
+    data <- get_reduction(
+      object,
+      spat_unit = "cell",
+      feat_type = "rna",
+      reduction = "cells",
+      reduction_method = "kodama",
+      name = reduction,
+      output = "matrix",
+      set_defaults = FALSE
+    )
+  }
   .kodama_select_dimensions(data, dims, paste0("Giotto reduction '", reduction, "'"))
 }
 
@@ -229,8 +245,8 @@
 }
 
 .kodama_feature_rows <- function(expression, cells, framework) {
-  expression <- as.matrix(expression)
-  if (!is.numeric(expression) || length(dim(expression)) != 2L) {
+  if (length(dim(expression)) != 2L ||
+      (is.matrix(expression) && !is.numeric(expression))) {
     stop(framework, " expression data must be a numeric matrix.", call. = FALSE)
   }
   if (ncol(expression) != length(cells)) {
@@ -250,7 +266,12 @@
     }
     expression <- expression[, positions, drop = FALSE]
   }
-  t(expression)
+  if (inherits(expression, "Matrix")) {
+    .kodama_require_namespace("Matrix", framework)
+    Matrix::t(expression)
+  } else {
+    t(expression)
+  }
 }
 
 .kodama_giotto_state <- function(object, name) {
@@ -290,6 +311,243 @@
 .kodama_is_seurat_list <- function(object) {
   is.list(object) && length(object) > 0L &&
     all(vapply(object, inherits, logical(1), what = "Seurat"))
+}
+
+.kodama_subset_feature_rows <- function(expression, features, framework) {
+  if (is.null(features)) return(expression)
+  if (is.character(features)) {
+    available <- rownames(expression)
+    if (is.null(available) || anyNA(match(features, available))) {
+      stop(framework, " does not contain every requested feature.", call. = FALSE)
+    }
+  }
+  expression[features, , drop = FALSE]
+}
+
+.kodama_fit_expression_pca <- function(expression, cells, features,
+                                       framework, ...) {
+  expression <- .kodama_subset_feature_rows(expression, features, framework)
+  feature_names <- rownames(expression)
+  observations <- .kodama_feature_rows(expression, cells, framework)
+  fit <- fastEmbedR::pca(observations, ...)
+  fit$sdev <- fit$singular_values / sqrt(max(1, nrow(observations) - 1L))
+  component_names <- paste0("PC", seq_len(ncol(fit$scores)))
+  rownames(fit$scores) <- cells
+  colnames(fit$scores) <- component_names
+  rownames(fit$loadings) <- feature_names
+  colnames(fit$loadings) <- component_names
+  fit
+}
+
+.kodama_pca_misc <- function(fit) {
+  fit[c(
+    "singular_values", "sdev", "variance", "variance_explained",
+    "cumulative_variance_explained", "total_variance", "center", "scale",
+    "ncomp", "oversample", "power", "backend", "precision",
+    "runtime_seconds"
+  )]
+}
+
+.kodama_spatial_feature_metadata <- function(result) {
+  rank <- integer(length(result$ranking))
+  rank[result$ranking] <- seq_along(result$ranking)
+  data.frame(
+    KODAMA_spatial_score = result$score,
+    KODAMA_spatial_p_value = result$p.value,
+    KODAMA_spatial_adjusted_p_value = result$adjusted.p.value,
+    KODAMA_spatial_rank = rank,
+    row.names = names(result$score),
+    check.names = FALSE
+  )
+}
+
+.kodama_ranked_features <- function(rank, feature_names, nfeatures, framework) {
+  if (is.null(nfeatures)) return(NULL)
+  nfeatures <- suppressWarnings(as.integer(nfeatures))
+  if (length(nfeatures) != 1L || is.na(nfeatures) || nfeatures < 1L) {
+    stop("nfeatures must be a positive integer.", call. = FALSE)
+  }
+  if (is.null(rank) || length(rank) != length(feature_names) || anyNA(rank)) {
+    stop(
+      framework, " does not contain a SpatialFeatureSelection ranking. ",
+      "Run SpatialFeatureSelection() first.", call. = FALSE
+    )
+  }
+  feature_names[order(rank, method = "radix")][
+    seq_len(min(nfeatures, length(feature_names)))
+  ]
+}
+
+#' Fast native PCA for matrices and single-cell containers
+#'
+#' Uses [fastEmbedR::pca()] for the numerical PCA and stores its scores directly
+#' in supported single-cell containers. Expression assays are transposed
+#' internally because their rows are features and their columns are cells.
+#'
+#' @param object Numeric matrix, `SingleCellExperiment`, `SpatialExperiment`,
+#'   Seurat object, Giotto object, or list of Seurat objects.
+#' @param ... Arguments passed to [fastEmbedR::pca()].
+#' @return A native PCA result for a matrix input, otherwise the updated
+#'   container with a PCA dimensional reduction.
+#' @export
+RunFastPCA <- function(object, ...) {
+  if (.kodama_is_seurat_list(object)) {
+    return(lapply(object, RunFastPCA.Seurat, ...))
+  }
+  UseMethod("RunFastPCA")
+}
+
+#' @rdname RunFastPCA
+#' @param features Optional feature names, indices, or logical selector.
+#' @export
+RunFastPCA.default <- function(object, features = NULL, ...) {
+  if (!is.null(features)) object <- object[, features, drop = FALSE]
+  fastEmbedR::pca(object, ...)
+}
+
+#' @rdname RunFastPCA
+#' @param assay.type Assay to use. `NULL` prefers `logcounts`, then
+#'   `normcounts`, then `counts`, and finally the first available assay.
+#' @param nfeatures Number of top features from a preceding
+#'   [SpatialFeatureSelection()] call. Cannot be combined with `features`.
+#' @param ncomp Number of principal components to calculate and store.
+#' @param reduction.name Name used to store PCA scores.
+#' @export
+RunFastPCA.SingleCellExperiment <- function(
+    object, assay.type = NULL, features = NULL, nfeatures = NULL, ncomp = 50L,
+    reduction.name = "PCA", ...) {
+  .kodama_require_namespace("SummarizedExperiment", "SingleCellExperiment")
+  assay_names <- SummarizedExperiment::assayNames(object)
+  if (!length(assay_names)) {
+    stop("SingleCellExperiment does not contain an expression assay.", call. = FALSE)
+  }
+  if (is.null(assay.type)) {
+    preferred <- intersect(c("logcounts", "normcounts", "counts"), assay_names)
+    assay.type <- if (length(preferred)) preferred[[1L]] else assay_names[[1L]]
+  }
+  if (!assay.type %in% assay_names) {
+    stop(
+      "Assay '", assay.type, "' was not found. Available values: ",
+      paste(assay_names, collapse = ", "), ".", call. = FALSE
+    )
+  }
+  if (!is.null(features) && !is.null(nfeatures)) {
+    stop("Specify either features or nfeatures, not both.", call. = FALSE)
+  }
+  if (is.null(features) && !is.null(nfeatures)) {
+    feature_data <- SummarizedExperiment::rowData(object)
+    rank <- if ("KODAMA_spatial_rank" %in% colnames(feature_data)) {
+      feature_data$KODAMA_spatial_rank
+    } else NULL
+    features <- .kodama_ranked_features(
+      rank, rownames(object), nfeatures, "SingleCellExperiment"
+    )
+  }
+  fit <- .kodama_fit_expression_pca(
+    SummarizedExperiment::assay(object, assay.type), colnames(object),
+    features, "SingleCellExperiment", ncomp = ncomp, ...
+  )
+  SingleCellExperiment::reducedDim(object, reduction.name) <- fit$scores
+  object
+}
+
+#' @rdname RunFastPCA
+#' @export
+RunFastPCA.SpatialExperiment <- function(
+    object, assay.type = NULL, features = NULL, nfeatures = NULL, ncomp = 50L,
+    reduction.name = "PCA", ...) {
+  RunFastPCA.SingleCellExperiment(
+    object, assay.type = assay.type, features = features,
+    nfeatures = nfeatures, ncomp = ncomp, reduction.name = reduction.name, ...
+  )
+}
+
+#' @rdname RunFastPCA
+#' @param assay Seurat assay containing the features.
+#' @param layer Seurat assay layer, normally `"data"`.
+#' @export
+RunFastPCA.Seurat <- function(
+    object, assay = NULL, layer = "data", features = NULL, nfeatures = NULL,
+    ncomp = 50L,
+    reduction.name = "pca", ...) {
+  .kodama_require_namespace("SeuratObject", "Seurat")
+  if (!inherits(object, "Seurat")) {
+    stop("object is not a Seurat object.", call. = FALSE)
+  }
+  if (is.null(assay)) assay <- SeuratObject::DefaultAssay(object)
+  if (!assay %in% names(object)) {
+    stop("Assay '", assay, "' was not found in the Seurat object.", call. = FALSE)
+  }
+  if (!is.null(features) && !is.null(nfeatures)) {
+    stop("Specify either features or nfeatures, not both.", call. = FALSE)
+  }
+  if (is.null(features) && !is.null(nfeatures)) {
+    feature_data <- object[[assay]][[]]
+    rank <- if ("KODAMA_spatial_rank" %in% colnames(feature_data)) {
+      feature_data$KODAMA_spatial_rank
+    } else NULL
+    features <- .kodama_ranked_features(
+      rank, rownames(feature_data), nfeatures, "Seurat"
+    )
+  }
+  expression <- SeuratObject::LayerData(object[[assay]], layer = layer)
+  fit <- .kodama_fit_expression_pca(
+    expression, colnames(expression), features, "Seurat",
+    ncomp = ncomp, ...
+  )
+  key <- paste0(gsub("[^A-Za-z0-9]", "", toupper(reduction.name)), "_")
+  object[[reduction.name]] <- SeuratObject::CreateDimReducObject(
+    embeddings = fit$scores, loadings = fit$loadings, assay = assay,
+    stdev = fit$sdev, key = key, misc = .kodama_pca_misc(fit)
+  )
+  object
+}
+
+#' @rdname RunFastPCA
+#' @param values Giotto expression-values selection. `NULL` uses the object's
+#'   default expression values.
+#' @export
+RunFastPCA.giotto <- function(
+    object, values = NULL, features = NULL, nfeatures = NULL, ncomp = 50L,
+    reduction.name = "pca", ...) {
+  if (!is.null(features) && !is.null(nfeatures)) {
+    stop("Specify either features or nfeatures, not both.", call. = FALSE)
+  }
+  if (is.null(features) && !is.null(nfeatures)) {
+    feature_data <- as.data.frame(.kodama_export("Giotto", "getFeatureMetadata")(
+      object, output = "data.table", copy_obj = TRUE, set_defaults = TRUE
+    ))
+    feature_column <- intersect(
+      c("feat_ID", "gene_ID", "gene", "feature_ID"), colnames(feature_data)
+    )
+    feature_names <- if (length(feature_column)) {
+      as.character(feature_data[[feature_column[[1L]]]])
+    } else rownames(feature_data)
+    rank <- if ("KODAMA_spatial_rank" %in% colnames(feature_data)) {
+      feature_data$KODAMA_spatial_rank
+    } else NULL
+    features <- .kodama_ranked_features(rank, feature_names, nfeatures, "Giotto")
+  }
+  expression <- .kodama_export("Giotto", "getExpression")(
+    object, values = values, output = "matrix", set_defaults = TRUE
+  )
+  cells <- colnames(expression)
+  if (is.null(cells)) {
+    stop("Giotto expression data must provide cell column names.", call. = FALSE)
+  }
+  fit <- .kodama_fit_expression_pca(
+    expression, cells, features, "Giotto", ncomp = ncomp, ...
+  )
+  dim_object <- .kodama_export("GiottoClass", "createDimObj", "Giotto")(
+    coordinates = fit$scores, name = reduction.name,
+    spat_unit = "cell", feat_type = "rna", method = "PCA",
+    reduction = "cells", provenance = NULL,
+    misc = .kodama_pca_misc(fit), my_rownames = cells
+  )
+  .kodama_export("Giotto", "setDimReduction")(
+    object, x = dim_object, name = reduction.name, reduction = "cells",
+    reduction_method = "pca", verbose = FALSE
+  )
 }
 
 .kodama_object_matrix <- function(data, graph = NULL, spatial = NULL,
@@ -519,6 +777,12 @@ RunKODAMAmatrix.giotto <- function(
 #' @param ... Arguments passed to [KODAMA.visualization()].
 #' @return A matrix for a direct KODAMA input, otherwise the updated container
 #'   with a genuine KODAMA reduced dimension.
+#' @examples
+#' x <- as.matrix(iris[, 1:4])
+#' fit <- RunKODAMAvisualization(
+#'   x, method = "UMAP", k = 5, n.epochs = 5, n.cores = 1
+#' )
+#' dim(fit)
 #' @export
 RunKODAMAvisualization <- function(object, ...) {
   if (.kodama_is_seurat_list(object)) {
@@ -592,6 +856,115 @@ RunKODAMAvisualization.giotto <- function(
   .kodama_set_giotto_state(object, reduction.save, visualization, state)
 }
 
+#' Cluster KODAMA reductions in matrices and single-cell containers
+#'
+#' This object-aware wrapper extracts a stored dimensional reduction, delegates
+#' graph construction and Louvain, Leiden, or Walktrap clustering to
+#' [KODAMA.clustering()], and writes the resulting membership back to the
+#' container. The clustering algorithms themselves are implemented only by
+#' [fastEmbedR::graph_cluster()].
+#'
+#' @param object Numeric matrix, KODAMA result, `SingleCellExperiment`,
+#'   `SpatialExperiment`, Seurat object, Giotto object, or list of Seurat
+#'   objects.
+#' @param ... Arguments passed to [KODAMA.clustering()].
+#' @return A `fastEmbedR_graph_cluster` result for direct matrix or graph input;
+#'   otherwise the updated container with cluster membership stored in its
+#'   observation metadata.
+#' @export
+RunKODAMAclustering <- function(object, ...) {
+  if (.kodama_is_seurat_list(object)) {
+    return(lapply(object, RunKODAMAclustering.Seurat, ...))
+  }
+  UseMethod("RunKODAMAclustering")
+}
+
+#' @rdname RunKODAMAclustering
+#' @param graph Optional precomputed KODAMA, KNN, or fastEmbedR graph for a
+#'   direct matrix call.
+#' @export
+RunKODAMAclustering.default <- function(object, graph = NULL, ...) {
+  KODAMA.clustering(if (is.null(graph)) object else graph, ...)
+}
+
+#' @rdname RunKODAMAclustering
+#' @param reduction Name of the dimensional reduction to cluster.
+#' @param dims Number of leading dimensions, or an integer vector selecting
+#'   dimensions.
+#' @param cluster.name Observation-metadata column used to store membership.
+#' @param graph.name Name of the KODAMA state entry used to store complete
+#'   clustering diagnostics.
+#' @export
+RunKODAMAclustering.SingleCellExperiment <- function(
+    object, reduction = "KODAMA", dims = 2L,
+    cluster.name = "KODAMA_clusters", graph.name = "KODAMA", ...) {
+  data <- .kodama_bioc_data(object, reduction, dims)
+  fit <- KODAMA.clustering(data, ...)
+  membership <- factor(fit$membership)
+  names(membership) <- rownames(data)
+  column_data <- SummarizedExperiment::colData(object)
+  column_data[[cluster.name]] <- membership
+  SummarizedExperiment::colData(object) <- column_data
+  state <- .kodama_bioc_state(object, graph.name)
+  if (is.null(state$clustering) || !is.list(state$clustering)) {
+    state$clustering <- list()
+  }
+  state$clustering[[cluster.name]] <- fit
+  .kodama_set_bioc_state(object, graph.name, state)
+}
+
+#' @rdname RunKODAMAclustering
+#' @export
+RunKODAMAclustering.SpatialExperiment <- function(
+    object, reduction = "KODAMA", dims = 2L,
+    cluster.name = "KODAMA_clusters", graph.name = "KODAMA", ...) {
+  RunKODAMAclustering.SingleCellExperiment(
+    object,
+    reduction = reduction,
+    dims = dims,
+    cluster.name = cluster.name,
+    graph.name = graph.name,
+    ...
+  )
+}
+
+#' @rdname RunKODAMAclustering
+#' @param reduction.save Name of the Seurat or Giotto KODAMA state entry.
+#' @export
+RunKODAMAclustering.Seurat <- function(
+    object, reduction = "KODAMA", dims = 2L,
+    cluster.name = "KODAMA_clusters", reduction.save = "KODAMA", ...) {
+  data <- .kodama_seurat_data(object, reduction, dims)
+  fit <- KODAMA.clustering(data, ...)
+  membership <- factor(fit$membership)
+  names(membership) <- rownames(data)
+  object <- SeuratObject::AddMetaData(
+    object, metadata = membership, col.name = cluster.name
+  )
+  state <- .kodama_seurat_state(object, reduction.save)
+  if (is.null(state$clustering) || !is.list(state$clustering)) {
+    state$clustering <- list()
+  }
+  state$clustering[[cluster.name]] <- fit
+  .kodama_set_seurat_state(object, reduction.save, state)
+}
+
+#' @rdname RunKODAMAclustering
+#' @export
+RunKODAMAclustering.giotto <- function(
+    object, reduction = "KODAMA", dims = 2L,
+    cluster.name = "KODAMA_clusters", reduction.save = "KODAMA", ...) {
+  data <- .kodama_giotto_data(object, reduction, dims)
+  fit <- KODAMA.clustering(data, ...)
+  membership <- factor(fit$membership)
+  names(membership) <- rownames(data)
+  .kodama_export("Giotto", "addCellMetadata")(
+    object,
+    new_metadata = membership,
+    vector_name = cluster.name
+  )
+}
+
 #' Spatial feature selection for matrices and spatial containers
 #'
 #' Extracts expression values, coordinates, and slide identities from supported
@@ -602,8 +975,8 @@ RunKODAMAvisualization.giotto <- function(
 #' @param object Numeric matrix, SpatialExperiment, Seurat object, Giotto
 #'   object, or list of Seurat objects.
 #' @param ... Additional arguments passed to [spatial_feature_selection()].
-#' @return A kodama_spatial_features result, or a list of results for a list
-#'   of Seurat objects.
+#' @return A `kodama_spatial_features` result for a matrix input. Container
+#'   methods return the updated object with statistics in feature metadata.
 #' @aliases SpatialFeatureSelection
 #' @export
 RunSpatialFeatureSelection <- function(object, ...) {
@@ -655,9 +1028,26 @@ RunSpatialFeatureSelection.SpatialExperiment <- function(
     )
   }
   if (is.null(samples)) samples <- spatial_input$samples
-  spatial_feature_selection(
+  result <- spatial_feature_selection(
     data = data, spatial = spatial_input$spatial, samples = samples, ...
   )
+  feature_metadata <- .kodama_spatial_feature_metadata(result)
+  positions <- match(rownames(object), rownames(feature_metadata))
+  if (anyNA(positions)) {
+    stop("Spatial feature results do not match SpatialExperiment rows.", call. = FALSE)
+  }
+  row_data <- SummarizedExperiment::rowData(object)
+  for (column in colnames(feature_metadata)) {
+    row_data[[column]] <- feature_metadata[[column]][positions]
+  }
+  SummarizedExperiment::rowData(object) <- row_data
+  metadata <- S4Vectors::metadata(object)
+  if (is.null(metadata$KODAMA) || !is.list(metadata$KODAMA)) {
+    metadata$KODAMA <- list()
+  }
+  metadata$KODAMA$SpatialFeatureSelection <- result
+  S4Vectors::metadata(object) <- metadata
+  object
 }
 
 #' @rdname RunSpatialFeatureSelection
@@ -679,8 +1069,20 @@ RunSpatialFeatureSelection.Seurat <- function(
   data <- .kodama_feature_rows(expression, cells, "Seurat")
   spatial_input <- .kodama_seurat_spatial(object, cells)
   if (is.null(samples)) samples <- spatial_input$samples
-  spatial_feature_selection(
+  result <- spatial_feature_selection(
     data = data, spatial = spatial_input$spatial, samples = samples, ...
+  )
+  feature_metadata <- .kodama_spatial_feature_metadata(result)
+  assay_features <- rownames(object[[assay]])
+  feature_metadata <- feature_metadata[assay_features, , drop = FALSE]
+  object[[assay]] <- SeuratObject::AddMetaData(
+    object[[assay]], metadata = feature_metadata
+  )
+  state <- SeuratObject::Misc(object, slot = "KODAMA")
+  if (is.null(state) || !is.list(state)) state <- list()
+  state$SpatialFeatureSelection <- result
+  suppressWarnings(
+    SeuratObject::`Misc<-`(object, slot = "KODAMA", value = state)
   )
 }
 
@@ -702,9 +1104,17 @@ RunSpatialFeatureSelection.giotto <- function(
   if (is.null(samples)) {
     samples <- .kodama_giotto_samples(object, cells, sample.column)
   }
-  spatial_feature_selection(
+  result <- spatial_feature_selection(
     data = data, spatial = spatial, samples = samples, ...
   )
+  feature_metadata <- .kodama_spatial_feature_metadata(result)
+  feature_metadata$feat_ID <- rownames(feature_metadata)
+  object <- .kodama_export("Giotto", "addFeatMetadata")(
+    object, new_metadata = feature_metadata, by_column = TRUE,
+    column_feat_ID = "feat_ID"
+  )
+  attr(object, "KODAMA_spatial_features") <- result
+  object
 }
 
 #' @rdname RunSpatialFeatureSelection

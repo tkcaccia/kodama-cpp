@@ -90,6 +90,40 @@
   x
 }
 
+#' Spatial message passing using the exact KODAMA grid-neighbor formulation
+#'
+#' @param data Numeric expression matrix with samples/spots in rows.
+#' @param spatial Numeric matrix with two or three coordinates per row.
+#' @param number_knn Number of self-inclusive spatial neighbors.
+#' @param samples Optional sample/slide vector. Each level is processed independently.
+#' @param backend One of `"cpu"`, `"cuda"`, or `"metal"`.
+#' @param n.cores Number of CPU workers used for accumulation and CPU grid search.
+#' @param gpu.device Accelerator device identifier.
+#' @return A numeric matrix with the same dimensions and dimnames as `data`.
+passing.message <- function(data, spatial, number_knn = 15L, samples = NULL,
+                            backend = c("cpu", "cuda", "metal"), n.cores = 4L,
+                            gpu.device = 0L) {
+  backend <- match.arg(backend)
+  .kodama_cpp_temp_load(backend)
+  data <- .kodama_as_numeric_matrix(data)
+  spatial <- .kodama_as_numeric_matrix(spatial)
+  if (!is.null(samples)) {
+    if (length(samples) != nrow(data) || anyNA(samples)) {
+      stop("samples must contain one non-missing value per data row.")
+    }
+    samples <- as.integer(as.factor(samples))
+  }
+  kodama_passing_message_temp(
+    data = data,
+    spatial = spatial,
+    number_knn = as.integer(number_knn),
+    samples = samples,
+    backend = backend,
+    n_threads = as.integer(n.cores),
+    gpu_device = as.integer(gpu.device)
+  )
+}
+
 .kodama_scale_init_sd <- function(scores, target = 1e-4) {
   init <- sweep(as.matrix(scores), 2L, colMeans(scores), check.margin = FALSE)
   scale <- max(apply(init, 2L, stats::sd))
@@ -205,6 +239,7 @@ KODAMA.matrix.cpp <- local({
            spatial.resolution = 0.3,
            spatial.graph.mix = FALSE,
            spatial.constraint.mode = c("kmeans", "graph", "auto"),
+           spatial.mode = c("standard", "population"),
            metrics = "euclidean",
            classifier = c("pls_lda", "knn"),
            backend = c("cpu", "cuda", "metal"),
@@ -217,6 +252,7 @@ KODAMA.matrix.cpp <- local({
     classifier <- match.arg(classifier)
     backend <- match.arg(backend)
     spatial.constraint.mode <- match.arg(spatial.constraint.mode)
+    spatial.mode <- match.arg(spatial.mode)
     .evolution.policy <- match.arg(.evolution.policy, c(
       "full", "no_prediction_guidance", "fixed_proposal_budget",
       "no_transition_proposal", "greedy_acceptance", "raw_cv_score",
@@ -321,6 +357,7 @@ KODAMA.matrix.cpp <- local({
       spatial_resolution = as.numeric(spatial.resolution),
       spatial_graph_mix = isTRUE(spatial.graph.mix),
       spatial_constraint_mode = if (spatial.constraint.mode == "auto") -1L else if (spatial.constraint.mode == "graph") 1L else 0L,
+      spatial_coordinate_mode = if (spatial.mode == "population") 1L else 0L,
       metric = metrics,
       classifier = classifier,
       backend = backend,

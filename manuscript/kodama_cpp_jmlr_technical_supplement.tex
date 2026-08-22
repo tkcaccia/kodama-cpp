@@ -20,11 +20,16 @@
 \name Dupe Ojo$^{1}$ \email dupe.ojo@icgeb.org \\
 \name Alessia Vignoli$^{3,4}$ \email vignoli@cerm.unifi.it \\
 \name Leonardo Tenori$^{3,4,\dagger}$ \email tenori@cerm.unifi.it \\
+\name Dinesh Gupta$^{20}$ \\
+\name Silvano Piazza$^{21,22}$ \\
 \name Stefano Cacciatore$^{1,2,\dagger}$ \email stefano.cacciatore@icgeb.org \\
 \addr $^{1}$ Bioinformatics Unit, International Centre for Genetic Engineering and Biotechnology (ICGEB), Cape Town 7925, South Africa \\
 \addr $^{2}$ Department of Integrative Biomedical Sciences, \\ \addr Institute of Infectious Disease \& Molecular Medicine (IDM), \\ \addr University of Cape Town, Cape Town 7925, South Africa \\
 \addr $^{3}$ Department of Chemistry ``Ugo Schiff'', University of Florence, Sesto Fiorentino, Italy \\
 \addr $^{4}$ Magnetic Resonance Center (CERM), University of Florence, Sesto Fiorentino, Italy \\
+\addr $^{20}$ Translational Bioinformatics Group, International Centre for Genetic Engineering and Biotechnology (ICGEB), New Delhi, India \\
+\addr $^{21}$ Computational Biology Group, International Centre for Genetic Engineering and Biotechnology (ICGEB), Trieste, Italy \\
+\addr $^{22}$ Bioinformatics Facility, Department of Cellular, Computational and Integrative Biology -- CIBIO, University of Trento, Trento, Italy \\
 \addr $^{*}$ Moussa Kassim and Martin Ocharo contributed equally. \\
 \addr $^{\dagger}$ Leonardo Tenori and Stefano Cacciatore are co-corresponding authors. \\
 }
@@ -308,7 +313,7 @@ Failure semantics & Unavailable CUDA entry points throw; no CPU fallback is labe
 \end{tabularx}
 \end{table}
 
-The public surface groups cross-validation, core optimization, graph preparation, matrix and graph-input KODAMA, PCA, visualization, and graph utilities. The installed C++ headers and generated R/Python references are the authoritative signature list.
+The public surface groups cross-validation, core optimization, graph preparation, matrix and graph-input KODAMA, PCA, visualization, and graph utilities. In the R ecosystem, numerical PCA and the Louvain, Leiden, and Walktrap wrappers are owned by fastEmbedR. KODAMA's object-aware \texttt{RunFastPCA} adapter delegates to \texttt{fastEmbedR::pca} after selecting and orienting matrix, SingleCellExperiment, SpatialExperiment, Seurat, or Giotto data; it does not maintain a second R-level PCA implementation. Spatial benchmark clustering likewise calls \texttt{fastEmbedR::knn\_graph} and \texttt{fastEmbedR::graph\_cluster}, while KODAMAextra is used only for the established tissue plotting helper. The installed C++ headers and generated R/Python references are the authoritative signature list.
 
 \subsection{Graph-first input contract}
 KODAMA.graph returns a matrix- or external-handle-backed graph, backend-matched PCA starts, metadata, and timings, but never the source matrix. Raw features remain caller-owned when supplied separately.

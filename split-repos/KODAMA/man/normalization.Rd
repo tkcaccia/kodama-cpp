@@ -9,7 +9,7 @@ normalization(
   Xtest = NULL,
   method = "pqn",
   ref = NULL,
-  backend = "cpu",
+  backend = NULL,
   n.cores = 1L,
   gpu.device = 0L
 )
@@ -39,6 +39,11 @@ and \code{coeXtest} when \code{Xtest} is supplied.
 \description{
 Compatibility implementation of the preprocessing utility exposed by the
 KODAMA R package. Samples are stored in rows and variables in columns.
+}
+\examples{
+x <- abs(as.matrix(iris[, 1:4])) + 1
+fit <- normalization(x, method = "pqn")
+dim(fit$newXtrain)
 }
 \references{
 Dieterle F, Ross A, Schlotterbeck G, Senn H. Probabilistic

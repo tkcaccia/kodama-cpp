@@ -1,0 +1,99 @@
+name: Bioconductor checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bioc-check:
+    runs-on: ubuntu-latest
+    container: bioconductor/bioconductor_docker:devel
+    env:
+      # Seurat and the object-container adapters are optional integrations.
+      # Bioconductor's release builders provide them, but the minimal devel
+      # container used here does not install every package in Suggests.
+      _R_CHECK_FORCE_SUGGESTS_: "false"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install package dependencies
+        shell: Rscript {0}
+        run: |
+          BiocManager::install(
+            c(
+              "BiocCheck", "BiocStyle", "S4Vectors", "Rcpp", "knitr",
+              "rmarkdown", "testthat"
+            ),
+            ask = FALSE,
+            update = FALSE
+          )
+      - name: Build source package
+        run: R CMD build .
+      - name: Run R CMD check
+        run: |
+          set +e
+          R CMD check --no-manual KODAMA_*.tar.gz \
+            > rcmdcheck-console.log 2>&1
+          status=$?
+          cat rcmdcheck-console.log
+          if test -f KODAMA.Rcheck/00check.log; then
+            {
+              echo "### R CMD check log"
+              echo '```text'
+              cat KODAMA.Rcheck/00check.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if test "$status" -ne 0; then
+            diagnostic=$(tail -n 80 rcmdcheck-console.log | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
+            echo "::error file=.github/workflows/bioc-check.yml,line=37::$diagnostic"
+          fi
+          exit "$status"
+      - name: Show R CMD check log
+        if: always()
+        run: |
+          if test -f KODAMA.Rcheck/00check.log; then
+            cat KODAMA.Rcheck/00check.log
+          fi
+      - name: Run BiocCheck for a new package
+        shell: Rscript {0}
+        run: |
+          tarball <- Sys.glob("KODAMA_*.tar.gz")
+          stopifnot(length(tarball) == 1L)
+          capture.output(
+            result <- BiocCheck::BiocCheck(
+              tarball,
+              `new-package` = TRUE,
+              # These are submission-account/repository state checks rather
+              # than package checks. They remain manual release requirements.
+              `no-check-CRAN` = TRUE,
+              `no-check-bioc-help` = TRUE,
+              `quit-with-status` = FALSE
+            ),
+            file = "bioccheck-console.log"
+          )
+          log_file <- Sys.glob("*.BiocCheck/00BiocCheck.log")
+          output <- if (length(log_file)) {
+            readLines(log_file[[1L]], warn = FALSE)
+          } else {
+            readLines("bioccheck-console.log", warn = FALSE)
+          }
+          cat(output, sep = "\n")
+          writeLines(
+            c("### BiocCheck output", "```text", output, "```"),
+            Sys.getenv("GITHUB_STEP_SUMMARY")
+          )
+          status <- as.integer(
+            result$getNum("error") > 0L || result$getNum("warning") > 0L
+          )
+          if (status) {
+            tail_output <- utils::tail(output, 100L)
+            escaped <- gsub("%", "%25", paste(tail_output, collapse = "%0A"), fixed = TRUE)
+            cat("::error file=.github/workflows/bioc-check.yml,line=74::", escaped, "\n", sep = "")
+          }
+          quit(status = status)

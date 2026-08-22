@@ -109,6 +109,66 @@ Rcpp::NumericMatrix embedding_to_r(const kodama::EmbeddingResult& result) {
 }  // namespace
 
 // [[Rcpp::export]]
+Rcpp::NumericMatrix kodama_passing_message_temp(
+  Rcpp::NumericMatrix data,
+  Rcpp::NumericMatrix spatial,
+  int number_knn = 15,
+  Rcpp::Nullable<Rcpp::IntegerVector> samples = R_NilValue,
+  std::string backend = "cpu",
+  int n_threads = 4,
+  int gpu_device = 0
+) {
+  if (data.nrow() != spatial.nrow()) {
+    Rcpp::stop("data and spatial must have the same number of rows.");
+  }
+  const int rows = data.nrow();
+  const int variables = data.ncol();
+  const int dimensions = spatial.ncol();
+  std::vector<float> expression(static_cast<std::size_t>(rows) * variables);
+  std::vector<float> coordinates(static_cast<std::size_t>(rows) * dimensions);
+  for (int row = 0; row < rows; ++row) {
+    for (int variable = 0; variable < variables; ++variable) {
+      expression[static_cast<std::size_t>(row) * variables + variable] =
+        static_cast<float>(data(row, variable));
+    }
+    for (int dimension = 0; dimension < dimensions; ++dimension) {
+      coordinates[static_cast<std::size_t>(row) * dimensions + dimension] =
+        static_cast<float>(spatial(row, dimension));
+    }
+  }
+
+  kodama::PassingMessageOptions options;
+  options.neighbors = number_knn;
+  options.backend = parse_backend(backend);
+  options.n_threads = n_threads;
+  options.gpu_device = gpu_device;
+  const kodama::PassingMessageResult result = kodama::PassingMessage(
+    kodama::MatrixView{expression.data(), static_cast<std::size_t>(rows),
+                       static_cast<std::size_t>(variables)},
+    kodama::MatrixView{coordinates.data(), static_cast<std::size_t>(rows),
+                       static_cast<std::size_t>(dimensions)},
+    optional_int_vector(samples), options
+  );
+
+  Rcpp::NumericMatrix output(rows, variables);
+  for (int row = 0; row < rows; ++row) {
+    for (int variable = 0; variable < variables; ++variable) {
+      output(row, variable) = result.values[static_cast<std::size_t>(row) * variables + variable];
+    }
+  }
+  output.attr("dimnames") = data.attr("dimnames");
+  output.attr("backend") = kodama::to_string(result.backend);
+  output.attr("timing") = Rcpp::List::create(
+    Rcpp::Named("graph_seconds") = result.graph_seconds,
+    Rcpp::Named("aggregation_seconds") = result.aggregation_seconds,
+    Rcpp::Named("runtime_seconds") = result.runtime_seconds
+  );
+  output.attr("sample_groups") = static_cast<double>(result.sample_groups);
+  output.attr("sample_max_distances") = result.sample_max_distances;
+  return output;
+}
+
+// [[Rcpp::export]]
 Rcpp::List kodama_matrix_cpp_temp(
   Rcpp::NumericMatrix data,
   Rcpp::Nullable<Rcpp::NumericMatrix> spatial = R_NilValue,
@@ -127,6 +187,7 @@ Rcpp::List kodama_matrix_cpp_temp(
   double spatial_resolution = 0.3,
   bool spatial_graph_mix = false,
   int spatial_constraint_mode = 0,
+  int spatial_coordinate_mode = 0,
   std::string metric = "euclidean",
   std::string classifier = "knn",
   std::string backend = "cpu",
@@ -156,6 +217,9 @@ Rcpp::List kodama_matrix_cpp_temp(
   options.spatial_resolution = spatial_resolution;
   options.spatial_graph_mix = spatial_graph_mix;
   options.spatial_constraint_mode = spatial_constraint_mode;
+  options.spatial_coordinate_mode = spatial_coordinate_mode == 1 ?
+    kodama::SpatialCoordinateMode::Population :
+    kodama::SpatialCoordinateMode::Standard;
   options.seed = static_cast<std::uint64_t>(seed);
   options.metric = parse_metric(metric);
   options.backend = parse_backend(backend);
@@ -227,6 +291,14 @@ Rcpp::List kodama_matrix_cpp_temp(
     Rcpp::Named("gpu_total_memory_mb") = result.gpu_total_memory_mb,
     Rcpp::Named("gpu_worker_memory_estimate_mb") = result.gpu_worker_memory_estimate_mb,
     Rcpp::Named("runtime_seconds") = result.runtime_seconds,
+    Rcpp::Named("coarse_partition_seconds") = result.coarse_partition_seconds,
+    Rcpp::Named("landmark_sampling_seconds") = result.landmark_sampling_seconds,
+    Rcpp::Named("constraint_seconds") = result.constraint_seconds,
+    Rcpp::Named("landmark_prepare_seconds") = result.landmark_prepare_seconds,
+    Rcpp::Named("landmark_initialization_seconds") = result.landmark_initialization_seconds,
+    Rcpp::Named("landmark_graph_seconds") = result.landmark_graph_seconds,
+    Rcpp::Named("core_evolution_seconds") = result.core_evolution_seconds,
+    Rcpp::Named("projection_seconds") = result.projection_seconds,
     Rcpp::Named("analysis_storage") = "float32",
     Rcpp::Named("classifier") = classifier,
     Rcpp::Named("timing") = Rcpp::List::create(

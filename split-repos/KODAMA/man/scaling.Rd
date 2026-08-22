@@ -8,7 +8,7 @@ scaling(
   Xtrain,
   Xtest = NULL,
   method = "autoscaling",
-  backend = "cpu",
+  backend = NULL,
   n.cores = 1L,
   gpu.device = 0L
 )
@@ -36,6 +36,10 @@ supplied.
 \description{
 Compatibility implementation of the scaling utility exposed by the KODAMA
 R package. Training statistics are reused for an optional test matrix.
+}
+\examples{
+fit <- scaling(as.matrix(iris[, 1:4]), method = "autoscaling")
+dim(fit$newXtrain)
 }
 \references{
 van den Berg RA, Hoefsloot HCJ, Westerhuis JA, et al. Centering,

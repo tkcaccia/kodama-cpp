@@ -232,7 +232,20 @@ test_that("public API wrappers are exposed", {
     early_exaggeration_iter = 1,
     backend = "cpu"
   )
-  clu <- KODAMA.clustering(graph, n.iterations = 2, random.walk.steps = 2)
+  clu <- KODAMA.clustering(
+    graph, method = "walktrap", backend = "cpu",
+    n.iterations = 2, steps = 2
+  )
+  clu_leiden <- KODAMA.clustering(
+    emb_default,
+    method = "leiden",
+    k = 5L,
+    n.cores = 1L,
+    n.iterations = 2L,
+    backend = "cpu",
+    graph.backend = "cpu",
+    seed = 4L
+  )
 
   expect_length(knncv$predicted, nrow(x))
   expect_length(pls$predicted, nrow(x))
@@ -293,6 +306,9 @@ test_that("public API wrappers are exposed", {
   expect_true(all(is.finite(emb_raw)))
   expect_true(all(is.finite(tsne_raw)))
   expect_length(clu$membership, nrow(x))
+  expect_identical(clu$method, "walktrap")
+  expect_length(clu_leiden$membership, nrow(x))
+  expect_identical(clu_leiden$method, "leiden")
   metal_graph <- KODAMA.graph.materialize(graph)
   metal_umap <- tryCatch(
     KODAMA:::kodama_umap_cpp(
@@ -533,7 +549,25 @@ test_that("shared k-means landmark atlas is reported", {
     backend = "cpu", progress = FALSE
   )
   expect_true(result$shared_landmark_partition_used)
+  expect_length(result$coarse_partition_seconds, 1L)
+  expect_identical(result$coarse_partition_seconds, 0)
+  expect_length(result$core_evolution_seconds, 1L)
   expect_identical(result$shared_landmark_partition_strata, 8L)
+})
+
+test_that("progress checkpoints are written to a caller-visible file", {
+  set.seed(49)
+  x <- matrix(rnorm(80 * 4), 80, 4)
+  path <- tempfile(fileext = ".log")
+  result <- KODAMA.matrix(
+    x, M = 2L, Tcycle = 3L, landmarks = 50L, splitting = 6L,
+    graph.neighbors = 10L, knn.k = 5L, backend = "cpu", n.cores = 2L,
+    progress = TRUE, progress.file = path, visual.init = FALSE
+  )
+  expect_identical(result$progress_file, normalizePath(path))
+  lines <- readLines(path)
+  expect_true(any(grepl("M 1/2 Tcycle 0/3", lines, fixed = TRUE)))
+  expect_true(any(grepl("M 2/2 Tcycle 3/3", lines, fixed = TRUE)))
 })
 
 test_that("population spatial mode regularizes repeated coordinates reproducibly", {

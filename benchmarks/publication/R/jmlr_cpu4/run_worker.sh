@@ -12,9 +12,10 @@ export SINGULARITYENV_OMP_NUM_THREADS=4 SINGULARITYENV_RCPP_PARALLEL_NUM_THREADS
 export SINGULARITYENV_OPENBLAS_NUM_THREADS=1 SINGULARITYENV_MKL_NUM_THREADS=1
 CONTAINER="$(command -v apptainer || command -v singularity || true)"
 [[ -n "${CONTAINER}" ]] || { echo "apptainer/singularity was not found" >&2; exit 1; }
+R_EXECUTABLE="${KODAMA_RSCRIPT:-/opt/r46/bin/Rscript}"
 exec /usr/bin/time -v \
   "${CONTAINER}" exec --cleanenv \
   --env OMP_NUM_THREADS=4,RCPP_PARALLEL_NUM_THREADS=4,OPENBLAS_NUM_THREADS=1,MKL_NUM_THREADS=1,VECLIB_MAXIMUM_THREADS=1,NUMEXPR_NUM_THREADS=1 \
   --bind /scratch/firenze/NN:/scratch/firenze/NN \
   --pwd /scratch/firenze/NN \
-  "${IMAGE}" /opt/conda/bin/Rscript "${SCRIPT}" "$@"
+  "${IMAGE}" "${R_EXECUTABLE}" "${SCRIPT}" "$@"
